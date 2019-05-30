@@ -1,0 +1,13 @@
+steps:
+- name: gcr.io/moonrhythm-containers/golang:1.12.5-alpine3.9
+  args: [go, build, -o, parapet-ingress-controller, -ldflags, -w -s, -tags=cbrotli, .]
+  env:
+  - GOOS=linux
+  - GOARCH=amd64
+  - CGO_ENABLED=1
+  - GOPROXY=https://proxy.golang.org
+- name: gcr.io/cloud-builders/docker
+  args: [build, -t, gcr.io/$PROJECT_ID/parapet-ingress-controller:$COMMIT_SHA, '.']
+
+images:
+- gcr.io/$PROJECT_ID/parapet-ingress-controller:$COMMIT_SHA
