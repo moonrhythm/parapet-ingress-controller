@@ -11,6 +11,7 @@ import (
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/body"
 	"github.com/moonrhythm/parapet/pkg/hsts"
+	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"gopkg.in/yaml.v2"
 	"k8s.io/api/extensions/v1beta1"
@@ -95,6 +96,8 @@ func (m *hostMapper) flush() {
 	mux := http.NewServeMux()
 	for _, ing := range m.raw {
 		var h parapet.Middlewares
+		h.Use(injectIngress{Namespace: ing.Namespace, Name: ing.Name})
+
 		if a := ing.Annotations["parapet.moonrhythm.io/hsts"]; a != "" {
 			if a == "preload" {
 				h.Use(hsts.Preload())
@@ -215,4 +218,17 @@ func getServicePort(serviceName, portName string) int {
 		}
 	}
 	return 0
+}
+
+type injectIngress struct {
+	Namespace string
+	Name      string
+}
+
+func (m injectIngress) ServeHandler(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		logger.Set(ctx, "namespace", m.Namespace)
+		logger.Set(ctx, "ingress", m.Name)
+	})
 }

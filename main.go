@@ -48,9 +48,9 @@ func main() {
 
 	s := parapet.New()
 	s.Use(health())
-	s.Use(prom.Requests())
 	s.Use(gcp.HLBImmediateIP(0)) // TODO: configurable
 	s.Use(logger.Stdout())
+	s.Use(promRequests())
 	s.Use(redirect.HTTPS()) // TODO: not redirect for acme http
 	s.Use(compress.Gzip())
 	s.Use(compress.Br())
