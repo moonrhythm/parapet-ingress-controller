@@ -14,7 +14,7 @@ func promRequests() parapet.Middleware {
 	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "requests",
-	}, []string{"host", "status", "method", "ingress"})
+	}, []string{"host", "status", "method", "ingress_name", "ingress_namespace"})
 	prom.Registry().MustRegister(requests)
 
 	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
@@ -30,8 +30,8 @@ func promRequests() parapet.Middleware {
 			}
 			defer func() {
 				l["status"] = strconv.Itoa(nw.status)
-				l["ingress"], _ = logger.Get(ctx, "ingress").(string)
-				l["namespace"], _ = logger.Get(ctx, "namespace").(string)
+				l["ingress_name"], _ = logger.Get(ctx, "ingress").(string)
+				l["ingress_namespace"], _ = logger.Get(ctx, "namespace").(string)
 				counter, err := requests.GetMetricWith(l)
 				if err != nil {
 					return
