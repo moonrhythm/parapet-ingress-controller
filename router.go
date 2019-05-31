@@ -230,5 +230,6 @@ func (m injectIngress) ServeHandler(h http.Handler) http.Handler {
 		ctx := r.Context()
 		logger.Set(ctx, "namespace", m.Namespace)
 		logger.Set(ctx, "ingress", m.Name)
+		h.ServeHTTP(w, r)
 	})
 }
