@@ -13,7 +13,6 @@ import (
 	"github.com/moonrhythm/parapet/pkg/location"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
-	"github.com/moonrhythm/parapet/pkg/redirect"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -51,7 +50,6 @@ func main() {
 	s.Use(gcp.HLBImmediateIP(0)) // TODO: configurable
 	s.Use(logger.Stdout())
 	s.Use(promRequests())
-	s.Use(redirect.HTTPS()) // TODO: not redirect for acme http
 	s.Use(compress.Gzip())
 	s.Use(compress.Br())
 
