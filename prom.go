@@ -10,11 +10,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const promNamespace = "parapet_ingress_controller"
-
 func promRequests() parapet.Middleware {
 	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: promNamespace,
+		Namespace: prom.Namespace,
 		Name:      "requests",
 	}, []string{"host", "status", "method", "ingress"})
 	prom.Registry().MustRegister(requests)
