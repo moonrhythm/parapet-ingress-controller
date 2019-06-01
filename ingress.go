@@ -15,7 +15,6 @@ import (
 	"github.com/moonrhythm/parapet/pkg/hsts"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
-	"github.com/moonrhythm/parapet/pkg/redirect"
 	"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -109,7 +108,7 @@ func (ctrl *ingressController) reload() {
 		h.Use(injectIngress{Namespace: ing.Namespace, Name: ing.Name})
 
 		if a := ing.Annotations["parapet.moonrhythm.io/redirect-https"]; a == "true" {
-			h.Use(redirect.HTTPS())
+			h.Use(httpsRedirector{})
 		}
 		if a := ing.Annotations["parapet.moonrhythm.io/hsts"]; a != "" {
 			if a == "preload" {
