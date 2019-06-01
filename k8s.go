@@ -4,9 +4,19 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
-func getServicePort(serviceName, portName string) int {
+func newKubernetesClient() (*kubernetes.Clientset, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		return nil, err
+	}
+	return kubernetes.NewForConfig(config)
+}
+
+func getServicePort(namespace, serviceName, portName string) int {
 	svc, err := client.CoreV1().Services(namespace).Get(serviceName, metav1.GetOptions{})
 	if err != nil {
 		glog.Error("can not get service %s/%s; %v\n", namespace, serviceName, err)

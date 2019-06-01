@@ -14,7 +14,6 @@ import (
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 )
 
 const (
@@ -50,6 +49,10 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctrl := &ingressController{}
+	ctrl.reload()
+	go ctrl.watchIngresses()
+
 	s := parapet.New()
 	s.Use(health())
 	s.Use(gcp.HLBImmediateIP(0)) // TODO: configurable
@@ -58,7 +61,7 @@ func main() {
 	s.Use(compress.Gzip())
 	s.Use(compress.Br())
 
-	s.Use(&ingressController{})
+	s.Use(ctrl)
 
 	prom.Connections(s)
 	prom.Networks(s)
@@ -79,12 +82,4 @@ func health() parapet.Middleware {
 	l.Use(healthz.New())
 	h.Use(l)
 	return h
-}
-
-func newKubernetesClient() (*kubernetes.Clientset, error) {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return nil, err
-	}
-	return kubernetes.NewForConfig(config)
 }

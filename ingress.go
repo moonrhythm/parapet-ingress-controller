@@ -29,19 +29,14 @@ type ingressController struct {
 	debounceTimer *time.Timer
 }
 
-func (ctrl *ingressController) ServeHandler(http.Handler) http.Handler {
-	ctrl.reload()
-	go ctrl.watchIngresses()
+func (ctrl *ingressController) ServeHandler(_ http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctrl.mu.RLock()
+		mux := ctrl.m
+		ctrl.mu.RUnlock()
 
-	return ctrl
-}
-
-func (ctrl *ingressController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	ctrl.mu.RLock()
-	mux := ctrl.m
-	ctrl.mu.RUnlock()
-
-	mux.ServeHTTP(w, r)
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func (ctrl *ingressController) watchIngresses() {
@@ -49,6 +44,7 @@ func (ctrl *ingressController) watchIngresses() {
 		w, err := client.ExtensionsV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
 		if err != nil {
 			glog.Error("can not watch ingresses;", err)
+			time.Sleep(5 * time.Second)
 			continue
 		}
 
@@ -185,7 +181,7 @@ func (ctrl *ingressController) reload() {
 				port := int(backend.ServicePort.IntVal)
 				if backend.ServicePort.Type == intstr.String {
 					// TODO: add to watched services
-					port = getServicePort(backend.ServiceName, backend.ServicePort.StrVal)
+					port = getServicePort(ing.Namespace, backend.ServiceName, backend.ServicePort.StrVal)
 				}
 				if port <= 0 {
 					continue
