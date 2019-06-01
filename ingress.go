@@ -96,10 +96,10 @@ func (ctrl *ingressController) reload() {
 	mux := http.NewServeMux()
 	for _, ing := range list {
 		if ing.Annotations == nil || ing.Annotations["kubernetes.io/ingress.class"] != ingressClass {
-			glog.Infof("skip %s/%s", ing.Namespace, ing.Name)
+			glog.Infof("skip: %s/%s", ing.Namespace, ing.Name)
 			continue
 		}
-		glog.Infof("load %s/%s", ing.Namespace, ing.Name)
+		glog.Infof("load: %s/%s", ing.Namespace, ing.Name)
 
 		var h parapet.Middlewares
 		h.Use(injectIngress{Namespace: ing.Namespace, Name: ing.Name})
@@ -192,12 +192,13 @@ func (ctrl *ingressController) reload() {
 				}
 
 				src := rule.Host + path
-				target := fmt.Sprintf("%s:%d", backend.ServiceName, port)
+				// service.namespace.svc.cluster.local:port
+				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, port)
 				mux.Handle(src, h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
 					proxy.ServeHTTP(w, r)
 				})))
-				glog.Infof("registered: %s => %s:%d", src, backend.ServiceName, port)
+				glog.Infof("registered: %s => %s", src, target)
 			}
 		}
 	}
