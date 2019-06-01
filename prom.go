@@ -19,11 +19,11 @@ var _promRequests promRequests
 
 func (p *promRequests) init() {
 	p.once.Do(func() {
-		requests := prometheus.NewCounterVec(prometheus.CounterOpts{
+		p.vec = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: prom.Namespace,
 			Name:      "requests",
 		}, []string{"host", "status", "method", "ingress_name", "ingress_namespace"})
-		prom.Registry().MustRegister(requests)
+		prom.Registry().MustRegister(p.vec)
 	})
 }
 
