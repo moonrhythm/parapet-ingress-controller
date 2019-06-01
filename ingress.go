@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
@@ -15,87 +16,90 @@ import (
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"github.com/moonrhythm/parapet/pkg/redirect"
 	"gopkg.in/yaml.v2"
-	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 )
 
-type router struct{}
+type ingressController struct {
+	mu sync.RWMutex
+	m  *http.ServeMux
 
-func (r router) ServeHandler(http.Handler) http.Handler {
-	var mapper hostMapper
+	debounceMu    sync.Mutex
+	debounceTimer *time.Timer
+}
 
-	go func() {
-		for {
-			w, err := client.ExtensionsV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
-			if err != nil {
-				glog.Error("can not watch ingresses;", err)
-				continue
-			}
+func (ctrl *ingressController) ServeHandler(http.Handler) http.Handler {
+	ctrl.reload()
+	go ctrl.watchIngresses()
 
-			result := w.ResultChan()
+	return ctrl
+}
 
-			for {
-				event := <-result
-				ing, ok := event.Object.(*v1beta1.Ingress)
-				if !ok {
-					break
-				}
+func (ctrl *ingressController) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	ctrl.mu.RLock()
+	mux := ctrl.m
+	ctrl.mu.RUnlock()
 
-				if ing.Annotations["kubernetes.io/ingress.class"] != "parapet" {
-					glog.Infof("skip %s/%s\n", ing.Namespace, ing.Name)
-					continue
-				}
+	mux.ServeHTTP(w, r)
+}
 
-				switch event.Type {
-				case watch.Added, watch.Modified:
-					glog.Infof("upsert %s/%s\n", ing.Namespace, ing.Name)
-					mapper.Upsert(ing)
-				case watch.Deleted:
-					glog.Infof("delete %s/%s\n", ing.Namespace, ing.Name)
-					mapper.Delete(ing)
-				}
-			}
-
-			w.Stop()
+func (ctrl *ingressController) watchIngresses() {
+	for {
+		w, err := client.ExtensionsV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
+		if err != nil {
+			glog.Error("can not watch ingresses;", err)
+			continue
 		}
-	}()
 
-	return &mapper
-}
+		result := w.ResultChan()
 
-type hostMapper struct {
-	mu  sync.RWMutex
-	raw map[string]*v1beta1.Ingress
-	m   *http.ServeMux
-}
+		for {
+			event := <-result
+			if event.Type == watch.Error {
+				break
+			}
 
-func (m *hostMapper) Upsert(obj *v1beta1.Ingress) {
-	if m.raw == nil {
-		m.raw = make(map[string]*v1beta1.Ingress)
+			ctrl.reloadDebounce()
+		}
+
+		w.Stop()
+		glog.Info("restart watcher")
 	}
-	m.raw[obj.Namespace+"/"+obj.Name] = obj
-	m.flush()
 }
 
-func (m *hostMapper) Delete(obj *v1beta1.Ingress) {
-	if m.raw == nil {
-		return
+func (ctrl *ingressController) reloadDebounce() {
+	ctrl.debounceMu.Lock()
+	defer ctrl.debounceMu.Unlock()
+
+	if ctrl.debounceTimer != nil {
+		ctrl.debounceTimer.Stop()
 	}
-
-	delete(m.raw, obj.Namespace+"/"+obj.Name)
-	m.flush()
+	ctrl.debounceTimer = time.AfterFunc(100*time.Millisecond, ctrl.reload)
 }
 
-func (m *hostMapper) flush() {
+func (ctrl *ingressController) reload() {
+	glog.Info("reload ingresses")
+
 	defer func() {
 		if err := recover(); err != nil {
 			glog.Error(err)
 		}
 	}()
+
+	list, err := getIngresses()
+	if err != nil {
+		return
+	}
+
 	mux := http.NewServeMux()
-	for _, ing := range m.raw {
+	for _, ing := range list {
+		if ing.Annotations == nil || ing.Annotations["kubernetes.io/ingress.class"] != ingressClass {
+			glog.Infof("skip %s/%s", ing.Namespace, ing.Name)
+			continue
+		}
+		glog.Infof("load %s/%s", ing.Namespace, ing.Name)
+
 		var h parapet.Middlewares
 		h.Use(injectIngress{Namespace: ing.Namespace, Name: ing.Name})
 
@@ -179,6 +183,7 @@ func (m *hostMapper) flush() {
 
 				port := int(backend.ServicePort.IntVal)
 				if backend.ServicePort.Type == intstr.String {
+					// TODO: add to watched services
 					port = getServicePort(backend.ServiceName, backend.ServicePort.StrVal)
 				}
 				if port <= 0 {
@@ -196,32 +201,9 @@ func (m *hostMapper) flush() {
 		}
 	}
 
-	m.mu.Lock()
-	m.m = mux
-	m.mu.Unlock()
-}
-
-func (m *hostMapper) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	m.mu.RLock()
-	mux := m.m
-	m.mu.RUnlock()
-
-	mux.ServeHTTP(w, r)
-}
-
-func getServicePort(serviceName, portName string) int {
-	svc, err := client.CoreV1().Services(namespace).Get(serviceName, metav1.GetOptions{})
-	if err != nil {
-		glog.Error("can not get service %s/%s; %v\n", namespace, serviceName, err)
-		return 0
-	}
-
-	for _, port := range svc.Spec.Ports {
-		if port.Name == portName {
-			return int(port.Port)
-		}
-	}
-	return 0
+	ctrl.mu.Lock()
+	ctrl.m = mux
+	ctrl.mu.Unlock()
 }
 
 type injectIngress struct {

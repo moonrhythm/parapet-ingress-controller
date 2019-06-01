@@ -17,6 +17,10 @@ import (
 	"k8s.io/client-go/rest"
 )
 
+const (
+	ingressClass = "parapet"
+)
+
 var (
 	client    *kubernetes.Clientset
 	namespace string
@@ -53,7 +57,7 @@ func main() {
 	s.Use(compress.Gzip())
 	s.Use(compress.Br())
 
-	s.Use(router{})
+	s.Use(&ingressController{})
 
 	prom.Connections(s)
 	prom.Networks(s)
