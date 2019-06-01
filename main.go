@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/tls"
-	"encoding/base64"
 	"flag"
 	"net/http"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
-	"github.com/moonrhythm/parapet/pkg/gcp"
 	"github.com/moonrhythm/parapet/pkg/host"
 	"github.com/moonrhythm/parapet/pkg/location"
 	"github.com/moonrhythm/parapet/pkg/logger"
@@ -33,18 +31,9 @@ var (
 func main() {
 	flag.Parse()
 
-	httpPort := os.Getenv("HTTP_PORT")
-	if httpPort == "" {
-		httpPort = "80"
-	}
-	httpsPort := os.Getenv("HTTPS_PORT")
-	if httpsPort == "" {
-		httpsPort = "443"
-	}
-	namespace = os.Getenv("NAMESPACE")
-	if namespace == "" {
-		namespace = "default"
-	}
+	httpPort := config.StringDefault("HTTP_PORT", "80")
+	httpsPort := config.StringDefault("HTTPS_PORT", "443")
+	namespace = config.StringDefault("NAMESPACE", "default") // TODO: watch all namespaces
 
 	glog.Infoln("parapet-ingress-controller")
 	glog.Infoln("http_port:", httpPort)
@@ -100,12 +89,23 @@ func main() {
 		h.Use(l)
 		return h
 	}())
-	m.Use(gcp.HLBImmediateIP(0)) // TODO: configurable
 	m.Use(logger.Stdout())
 	m.Use(&_promRequests)
 	m.Use(compress.Gzip())
 	m.Use(compress.Br())
 	m.Use(ctrl)
+
+	var trustProxy parapet.Conditional
+	{
+		p := config.String("TRUST_PROXY")
+		switch p {
+		case "true":
+			trustProxy = parapet.Trusted()
+		case "false", "":
+		default:
+			trustProxy = parapet.TrustCIDRs(config.Strings("TRUST_PROXY"))
+		}
+	}
 
 	// http
 	{
@@ -114,6 +114,7 @@ func main() {
 		prom.Connections(s)
 		prom.Networks(s)
 		s.Addr = ":" + httpPort
+		s.TrustProxy = trustProxy
 
 		go func() {
 			err := s.ListenAndServe()
@@ -139,6 +140,7 @@ func main() {
 		prom.Connections(s)
 		prom.Networks(s)
 		s.Addr = ":" + httpsPort
+		s.TrustProxy = trustProxy
 		s.TLSConfig = &tls.Config{
 			MinVersion: tls.VersionTLS12,
 			CurvePreferences: []tls.CurveID{
@@ -160,7 +162,7 @@ func main() {
 			Certificates:   []tls.Certificate{cert},
 			GetCertificate: ctrl.GetCertificate,
 		}
-		tlsSessionTicketKey, _ := base64.StdEncoding.DecodeString(os.Getenv("TLS_SESSION_TICKET_KEY"))
+		tlsSessionTicketKey := config.Base64("TLS_SESSION_TICKET_KEY")
 		if l := len(tlsSessionTicketKey); l > 0 {
 			if l == 32 {
 				copy(s.TLSConfig.SessionTicketKey[:], tlsSessionTicketKey)
