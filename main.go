@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"encoding/base64"
 	"flag"
 	"net/http"
 	"os"
@@ -158,6 +159,14 @@ func main() {
 			},
 			Certificates:   []tls.Certificate{cert},
 			GetCertificate: ctrl.GetCertificate,
+		}
+		tlsSessionTicketKey, _ := base64.StdEncoding.DecodeString(os.Getenv("TLS_SESSION_TICKET_KEY"))
+		if l := len(tlsSessionTicketKey); l > 0 {
+			if l == 32 {
+				copy(s.TLSConfig.SessionTicketKey[:], tlsSessionTicketKey)
+			} else {
+				glog.Error("invalid TLS_SESSION_TICKET_KEY")
+			}
 		}
 
 		err = s.ListenAndServe()
