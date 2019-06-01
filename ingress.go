@@ -60,7 +60,7 @@ func (ctrl *ingressController) watchIngresses() {
 				break
 			}
 
-			ctrl.reloadDebounce()
+			ctrl.safeReload()
 		}
 
 		w.Stop()
@@ -68,28 +68,29 @@ func (ctrl *ingressController) watchIngresses() {
 	}
 }
 
-func (ctrl *ingressController) reloadDebounce() {
+func (ctrl *ingressController) safeReload() {
 	ctrl.debounceMu.Lock()
 	defer ctrl.debounceMu.Unlock()
 
 	if ctrl.debounceTimer != nil {
 		ctrl.debounceTimer.Stop()
 	}
-	ctrl.debounceTimer = time.AfterFunc(100*time.Millisecond, ctrl.reload)
+	ctrl.debounceTimer = time.AfterFunc(100*time.Millisecond, func() {
+		glog.Info("reload ingresses")
+
+		defer func() {
+			if err := recover(); err != nil {
+				glog.Error(err)
+			}
+		}()
+		ctrl.reload()
+	})
 }
 
 func (ctrl *ingressController) reload() {
-	glog.Info("reload ingresses")
-
-	defer func() {
-		if err := recover(); err != nil {
-			glog.Error(err)
-		}
-	}()
-
 	list, err := getIngresses()
 	if err != nil {
-		return
+		panic(err)
 	}
 
 	mux := http.NewServeMux()
