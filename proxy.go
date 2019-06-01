@@ -29,7 +29,7 @@ var proxy = &httputil.ReverseProxy{
 			req.Header.Set("User-Agent", "")
 		}
 	},
-	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, 32*1024) }}},
+	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
 	Transport: &transport{&http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&dialer{&net.Dialer{

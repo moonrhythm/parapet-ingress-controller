@@ -19,6 +19,7 @@ import (
 
 const (
 	ingressClass = "parapet"
+	bufferSize   = 16 * 1024
 )
 
 var (
