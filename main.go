@@ -3,13 +3,15 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"net/http"
 	"os"
+	"sync"
+	"sync/atomic"
 
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
 	"github.com/moonrhythm/parapet/pkg/gcp"
-	"github.com/moonrhythm/parapet/pkg/healthz"
 	"github.com/moonrhythm/parapet/pkg/host"
 	"github.com/moonrhythm/parapet/pkg/location"
 	"github.com/moonrhythm/parapet/pkg/logger"
@@ -58,11 +60,45 @@ func main() {
 	go prom.Start(":9187")
 
 	ctrl := &ingressController{}
-	ctrl.reload()
-	go ctrl.watchIngresses()
+	go func() {
+		ctrl.reload()
+		ctrl.watchIngresses()
+	}()
 
 	m := parapet.Middlewares{}
-	m.Use(health())
+	m.Use(func() parapet.Middleware {
+		h := host.NewCIDR("0.0.0.0/0")
+		l := location.Exact("/healthz")
+		l.Use(parapet.MiddlewareFunc(func(http.Handler) http.Handler {
+			var (
+				once     sync.Once
+				shutdown int32
+			)
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				once.Do(func() {
+					if srv, ok := r.Context().Value(parapet.ServerContextKey).(*parapet.Server); ok {
+						srv.RegisterOnShutdown(func() {
+							atomic.StoreInt32(&shutdown, 1)
+						})
+					}
+				})
+
+				if r.URL.Query().Get("ready") != "" {
+					p := atomic.LoadInt32(&shutdown)
+					if p > 0 || !ctrl.Ready() {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						w.Write([]byte("Service Unavailable"))
+						return
+					}
+				}
+
+				w.WriteHeader(http.StatusOK)
+				w.Write([]byte("OK"))
+			})
+		}))
+		h.Use(l)
+		return h
+	}())
 	m.Use(gcp.HLBImmediateIP(0)) // TODO: configurable
 	m.Use(logger.Stdout())
 	m.Use(&_promRequests)
@@ -113,12 +149,4 @@ func main() {
 			os.Exit(1)
 		}
 	}
-}
-
-func health() parapet.Middleware {
-	h := host.NewCIDR("0.0.0.0/0")
-	l := location.Exact("/healthz")
-	l.Use(healthz.New())
-	h.Use(l)
-	return h
 }

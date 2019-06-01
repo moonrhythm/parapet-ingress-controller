@@ -26,9 +26,16 @@ type ingressController struct {
 	mu                sync.RWMutex
 	m                 *http.ServeMux
 	nameToCertificate map[string]*tls.Certificate
+	ready             int32
 
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
+}
+
+func (ctrl *ingressController) Ready() bool {
+	ctrl.mu.RLock()
+	defer ctrl.mu.RUnlock()
+	return ctrl.ready > 0
 }
 
 func (ctrl *ingressController) ServeHandler(_ http.Handler) http.Handler {
@@ -199,6 +206,7 @@ func (ctrl *ingressController) reload() {
 			}
 
 			for _, t := range ing.Spec.TLS {
+				// TODO: add to watched tls
 				crt, key, err := getSecretTLS(ing.Namespace, t.SecretName)
 				if err != nil {
 					glog.Errorf("can not get secret %s/%s; %v", ing.Namespace, t.SecretName, err)
@@ -223,6 +231,7 @@ func (ctrl *ingressController) reload() {
 	ctrl.mu.Lock()
 	ctrl.m = mux
 	ctrl.nameToCertificate = tlsConfig.NameToCertificate
+	ctrl.ready = 1
 	ctrl.mu.Unlock()
 }
 
