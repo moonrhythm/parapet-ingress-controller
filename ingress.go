@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -22,8 +23,9 @@ import (
 )
 
 type ingressController struct {
-	mu sync.RWMutex
-	m  *http.ServeMux
+	mu                sync.RWMutex
+	m                 *http.ServeMux
+	nameToCertificate map[string]*tls.Certificate
 
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
@@ -87,6 +89,8 @@ func (ctrl *ingressController) reload() {
 	}
 
 	mux := http.NewServeMux()
+	var certs []tls.Certificate
+
 	for _, ing := range list {
 		if ing.Annotations == nil || ing.Annotations["kubernetes.io/ingress.class"] != ingressClass {
 			glog.Infof("skip: %s/%s", ing.Namespace, ing.Name)
@@ -193,12 +197,63 @@ func (ctrl *ingressController) reload() {
 				})))
 				glog.Infof("registered: %s => %s", src, target)
 			}
+
+			for _, t := range ing.Spec.TLS {
+				crt, key, err := getSecretTLS(ing.Namespace, t.SecretName)
+				if err != nil {
+					glog.Errorf("can not get secret %s/%s; %v", ing.Namespace, t.SecretName, err)
+					continue
+				}
+
+				cert, err := tls.X509KeyPair(crt, key)
+				if err != nil {
+					glog.Errorf("can not load x509 certificate %s/%s; %v", ing.Namespace, t.SecretName, err)
+					continue
+				}
+				certs = append(certs, cert)
+			}
 		}
 	}
 
+	tlsConfig := tls.Config{
+		Certificates: certs,
+	}
+	tlsConfig.BuildNameToCertificate()
+
 	ctrl.mu.Lock()
 	ctrl.m = mux
+	ctrl.nameToCertificate = tlsConfig.NameToCertificate
 	ctrl.mu.Unlock()
+}
+
+func (ctrl *ingressController) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	// from tls/common.go
+
+	name := strings.ToLower(clientHello.ServerName)
+	for len(name) > 0 && name[len(name)-1] == '.' {
+		name = name[:len(name)-1]
+	}
+
+	ctrl.mu.RLock()
+	certs := ctrl.nameToCertificate
+	ctrl.mu.RUnlock()
+
+	if cert, ok := certs[name]; ok {
+		return cert, nil
+	}
+
+	// try replacing labels in the name with wildcards until we get a
+	// match.
+	labels := strings.Split(name, ".")
+	for i := range labels {
+		labels[i] = "*"
+		candidate := strings.Join(labels, ".")
+		if cert, ok := certs[candidate]; ok {
+			return cert, nil
+		}
+	}
+
+	return nil, nil
 }
 
 type injectIngress struct {

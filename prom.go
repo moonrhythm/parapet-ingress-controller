@@ -3,44 +3,55 @@ package main
 import (
 	"net/http"
 	"strconv"
+	"sync"
 
-	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-func promRequests() parapet.Middleware {
-	requests := prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: prom.Namespace,
-		Name:      "requests",
-	}, []string{"host", "status", "method", "ingress_name", "ingress_namespace"})
-	prom.Registry().MustRegister(requests)
+type promRequests struct {
+	once sync.Once
+	vec  *prometheus.CounterVec
+}
 
-	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ctx := r.Context()
+var _promRequests promRequests
 
-			l := prometheus.Labels{
-				"method": r.Method,
-				"host":   r.Host,
+func (p *promRequests) init() {
+	p.once.Do(func() {
+		requests := prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: prom.Namespace,
+			Name:      "requests",
+		}, []string{"host", "status", "method", "ingress_name", "ingress_namespace"})
+		prom.Registry().MustRegister(requests)
+	})
+}
+
+func (p *promRequests) ServeHandler(h http.Handler) http.Handler {
+	p.init()
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		l := prometheus.Labels{
+			"method": r.Method,
+			"host":   r.Host,
+		}
+		nw := requestTrackRW{
+			ResponseWriter: w,
+		}
+		defer func() {
+			l["status"] = strconv.Itoa(nw.status)
+			l["ingress_name"], _ = logger.Get(ctx, "ingress").(string)
+			l["ingress_namespace"], _ = logger.Get(ctx, "namespace").(string)
+			counter, err := p.vec.GetMetricWith(l)
+			if err != nil {
+				return
 			}
-			nw := requestTrackRW{
-				ResponseWriter: w,
-			}
-			defer func() {
-				l["status"] = strconv.Itoa(nw.status)
-				l["ingress_name"], _ = logger.Get(ctx, "ingress").(string)
-				l["ingress_namespace"], _ = logger.Get(ctx, "namespace").(string)
-				counter, err := requests.GetMetricWith(l)
-				if err != nil {
-					return
-				}
-				counter.Inc()
-			}()
+			counter.Inc()
+		}()
 
-			h.ServeHTTP(&nw, r)
-		})
+		h.ServeHTTP(&nw, r)
 	})
 }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"os"
 
@@ -29,9 +30,13 @@ var (
 func main() {
 	flag.Parse()
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	httpPort := os.Getenv("HTTP_PORT")
+	if httpPort == "" {
+		httpPort = "80"
+	}
+	httpsPort := os.Getenv("HTTPS_PORT")
+	if httpsPort == "" {
+		httpPort = "443"
 	}
 	namespace = os.Getenv("NAMESPACE")
 	if namespace == "" {
@@ -39,7 +44,8 @@ func main() {
 	}
 
 	glog.Infoln("parapet-ingress-controller")
-	glog.Infoln("port:", port)
+	glog.Infoln("http_port:", httpPort)
+	glog.Infoln("https_port:", httpsPort)
 	glog.Infoln("namespace:", namespace)
 
 	var err error
@@ -49,30 +55,63 @@ func main() {
 		os.Exit(1)
 	}
 
+	go prom.Start(":9187")
+
 	ctrl := &ingressController{}
 	ctrl.reload()
 	go ctrl.watchIngresses()
 
-	s := parapet.New()
-	s.Use(health())
-	s.Use(gcp.HLBImmediateIP(0)) // TODO: configurable
-	s.Use(logger.Stdout())
-	s.Use(promRequests())
-	s.Use(compress.Gzip())
-	s.Use(compress.Br())
+	m := parapet.Middlewares{}
+	m.Use(health())
+	m.Use(gcp.HLBImmediateIP(0)) // TODO: configurable
+	m.Use(logger.Stdout())
+	m.Use(&_promRequests)
+	m.Use(compress.Gzip())
+	m.Use(compress.Br())
+	m.Use(ctrl)
 
-	s.Use(ctrl)
+	// http
+	{
+		s := parapet.New()
+		s.Use(m)
+		prom.Connections(s)
+		prom.Networks(s)
+		s.Addr = ":" + httpPort
 
-	prom.Connections(s)
-	prom.Networks(s)
-	go prom.Start(":9187")
+		go func() {
+			err := s.ListenAndServe()
+			if err != nil {
+				glog.Fatal(err)
+				os.Exit(1)
+			}
+		}()
+	}
 
-	s.Addr = ":" + port
+	// https
+	{
+		cert, err := parapet.GenerateSelfSignCertificate(parapet.SelfSign{
+			CommonName: "parapet-ingress-controller",
+		})
+		if err != nil {
+			glog.Fatal(err)
+			os.Exit(1)
+		}
 
-	err = s.ListenAndServe()
-	if err != nil {
-		glog.Fatal(err)
-		os.Exit(1)
+		s := parapet.New()
+		s.Use(m)
+		prom.Connections(s)
+		prom.Networks(s)
+		s.Addr = ":" + httpsPort
+		s.TLSConfig = &tls.Config{
+			Certificates:   []tls.Certificate{cert},
+			GetCertificate: ctrl.GetCertificate,
+		}
+
+		err = s.ListenAndServe()
+		if err != nil {
+			glog.Fatal(err)
+			os.Exit(1)
+		}
 	}
 }
 

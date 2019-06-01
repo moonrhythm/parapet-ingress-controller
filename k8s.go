@@ -39,3 +39,14 @@ func getIngresses() ([]v1beta1.Ingress, error) {
 	}
 	return list.Items, nil
 }
+
+func getSecretTLS(namespace, name string) (cert []byte, key []byte, err error) {
+	s, err := client.CoreV1().Secrets(namespace).Get(name, metav1.GetOptions{})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cert = s.Data["tls.crt"]
+	key = s.Data["tls.key"]
+	return
+}
