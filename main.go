@@ -38,7 +38,7 @@ func main() {
 	}
 	httpsPort := os.Getenv("HTTPS_PORT")
 	if httpsPort == "" {
-		httpPort = "443"
+		httpsPort = "443"
 	}
 	namespace = os.Getenv("NAMESPACE")
 	if namespace == "" {
