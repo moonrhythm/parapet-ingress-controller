@@ -48,12 +48,9 @@ func (ctrl *ingressController) watchIngresses() {
 			continue
 		}
 
-		result := w.ResultChan()
-
-		for {
-			event := <-result
+		for event := range w.ResultChan() {
 			if event.Type == watch.Error {
-				break
+				continue
 			}
 
 			ctrl.safeReload()
