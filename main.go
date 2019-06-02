@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
@@ -109,12 +110,19 @@ func main() {
 
 	// http
 	{
-		s := parapet.New()
-		s.Use(m)
+		s := &parapet.Server{
+			Addr:               ":" + httpPort,
+			TrustProxy:         trustProxy,
+			IdleTimeout:        60 * time.Second,
+			TCPKeepAlivePeriod: 1 * time.Minute,
+			GraceTimeout:       1 * time.Minute,
+			WaitBeforeShutdown: 15 * time.Second,
+			Handler:            http.NotFoundHandler(),
+		}
 		prom.Connections(s)
 		prom.Networks(s)
-		s.Addr = ":" + httpPort
-		s.TrustProxy = trustProxy
+
+		s.Use(m)
 
 		go func() {
 			err := s.ListenAndServe()
@@ -135,32 +143,35 @@ func main() {
 			os.Exit(1)
 		}
 
-		s := parapet.New()
-		s.Use(m)
-		prom.Connections(s)
-		prom.Networks(s)
-		s.Addr = ":" + httpsPort
-		s.TrustProxy = trustProxy
-		s.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
-			CurvePreferences: []tls.CurveID{
-				tls.X25519,
-				tls.CurveP256,
+		s := &parapet.Server{
+			Addr:               ":" + httpsPort,
+			TrustProxy:         trustProxy,
+			IdleTimeout:        320 * time.Second,
+			TCPKeepAlivePeriod: 1 * time.Minute,
+			GraceTimeout:       1 * time.Minute,
+			WaitBeforeShutdown: 15 * time.Second,
+			Handler:            http.NotFoundHandler(),
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				CurvePreferences: []tls.CurveID{
+					tls.X25519,
+					tls.CurveP256,
+				},
+				PreferServerCipherSuites: true,
+				CipherSuites: []uint16{
+					tls.TLS_AES_256_GCM_SHA384,
+					tls.TLS_CHACHA20_POLY1305_SHA256,
+					tls.TLS_AES_128_GCM_SHA256,
+					tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+					tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+					tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+					tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+					tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+					tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				},
+				Certificates:   []tls.Certificate{cert},
+				GetCertificate: ctrl.GetCertificate,
 			},
-			PreferServerCipherSuites: true,
-			CipherSuites: []uint16{
-				tls.TLS_AES_256_GCM_SHA384,
-				tls.TLS_CHACHA20_POLY1305_SHA256,
-				tls.TLS_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-			},
-			Certificates:   []tls.Certificate{cert},
-			GetCertificate: ctrl.GetCertificate,
 		}
 		tlsSessionTicketKey := config.Base64("TLS_SESSION_TICKET_KEY")
 		if l := len(tlsSessionTicketKey); l > 0 {
@@ -170,6 +181,10 @@ func main() {
 				glog.Error("invalid TLS_SESSION_TICKET_KEY")
 			}
 		}
+		prom.Connections(s)
+		prom.Networks(s)
+
+		s.Use(m)
 
 		err = s.ListenAndServe()
 		if err != nil {
