@@ -17,6 +17,8 @@ import (
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 )
 
 const (
@@ -53,12 +55,12 @@ func main() {
 	go prom.Start(":9187")
 
 	ctrl := &ingressController{}
-	ctrl.Use(injectLogIngress)
-	ctrl.Use(redirectHTTPS)
-	ctrl.Use(injectHSTS)
-	ctrl.Use(redirectRules)
-	ctrl.Use(rateLimit)
-	ctrl.Use(bodyLimit)
+	ctrl.Use(plugin.InjectLogIngress)
+	ctrl.Use(plugin.RedirectHTTPS)
+	ctrl.Use(plugin.InjectHSTS)
+	ctrl.Use(plugin.RedirectRules)
+	ctrl.Use(plugin.RateLimit)
+	ctrl.Use(plugin.BodyLimit)
 	go func() {
 		ctrl.reload()
 		ctrl.watchIngresses()

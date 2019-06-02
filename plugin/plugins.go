@@ -1,4 +1,4 @@
-package main
+package plugin
 
 import (
 	"net/http"
@@ -12,11 +12,10 @@ import (
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"gopkg.in/yaml.v2"
-
-	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 )
 
-func injectLogIngress(ctx plugin.Context) {
+// InjectLogIngress injects ingress name and namespace to log
+func InjectLogIngress(ctx Context) {
 	namespace := ctx.Ingress.Namespace
 	name := ctx.Ingress.Name
 	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
@@ -29,13 +28,31 @@ func injectLogIngress(ctx plugin.Context) {
 	}))
 }
 
-func redirectHTTPS(ctx plugin.Context) {
+// RedirectHTTPS redirects http to https
+// except /.well-known/acme-challenge
+func RedirectHTTPS(ctx Context) {
 	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/redirect-https"]; a == "true" {
-		ctx.Use(httpsRedirector{})
+		ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.HasPrefix(r.RequestURI, "/.well-known/acme-challenge") {
+					h.ServeHTTP(w, r)
+					return
+				}
+
+				proto := r.Header.Get("X-Forwarded-Proto")
+				if proto == "http" {
+					http.Redirect(w, r, "https://"+r.Host+r.RequestURI, http.StatusMovedPermanently)
+					return
+				}
+
+				h.ServeHTTP(w, r)
+			})
+		}))
 	}
 }
 
-func injectHSTS(ctx plugin.Context) {
+// InjectHTST injects hsts header
+func InjectHSTS(ctx Context) {
 	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/hsts"]; a != "" {
 		if a == "preload" {
 			ctx.Use(hsts.Preload())
@@ -45,7 +62,8 @@ func injectHSTS(ctx plugin.Context) {
 	}
 }
 
-func redirectRules(ctx plugin.Context) {
+// RedirectRules load redirect rules from annotation and inject to routes
+func RedirectRules(ctx Context) {
 	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/redirect"]; a != "" {
 		var obj map[string]string
 		yaml.Unmarshal([]byte(a), &obj)
@@ -75,7 +93,8 @@ func redirectRules(ctx plugin.Context) {
 	}
 }
 
-func rateLimit(ctx plugin.Context) {
+// RateLimit injects rate limit middleware
+func RateLimit(ctx Context) {
 	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/ratelimit-s"]; a != "" {
 		rate, _ := strconv.Atoi(a)
 		if rate > 0 {
@@ -96,7 +115,8 @@ func rateLimit(ctx plugin.Context) {
 	}
 }
 
-func bodyLimit(ctx plugin.Context) {
+// BodyLimit injects body limit middleware
+func BodyLimit(ctx Context) {
 	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/body-limitrequest"]; a != "" {
 		size, _ := strconv.ParseInt(a, 10, 64)
 		if size > 0 {
