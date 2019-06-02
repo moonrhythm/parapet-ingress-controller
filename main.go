@@ -10,22 +10,11 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
-	"github.com/moonrhythm/parapet/pkg/healthz"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
-)
-
-const (
-	ingressClass = "parapet"
-	bufferSize   = 16 * 1024
-)
-
-var (
-	watchNamespace string
-	health         = healthz.New()
 )
 
 func main() {
@@ -34,15 +23,13 @@ func main() {
 	httpPort := config.StringDefault("HTTP_PORT", "80")
 	httpsPort := config.StringDefault("HTTPS_PORT", "443")
 	podNamespace := config.String("POD_NAMESPACE")
-	watchNamespace = config.StringDefault("WATCH_NAMESPACE", "")
+	watchNamespace := config.StringDefault("WATCH_NAMESPACE", "")
 
 	glog.Infoln("parapet-ingress-controller")
 	glog.Infoln("http_port:", httpPort)
 	glog.Infoln("https_port:", httpsPort)
 	glog.Infoln("pod_namespace:", podNamespace)
 	glog.Infoln("watch_namespace:", watchNamespace)
-
-	health.SetReady(false)
 
 	err := k8s.Init()
 	if err != nil {
@@ -52,7 +39,7 @@ func main() {
 
 	go prom.Start(":9187")
 
-	ctrl := &ingressController{}
+	ctrl := newIngressController(watchNamespace)
 	ctrl.Use(plugin.InjectLogIngress)
 	ctrl.Use(plugin.RedirectHTTPS)
 	ctrl.Use(plugin.InjectHSTS)
@@ -65,7 +52,7 @@ func main() {
 	}()
 
 	m := parapet.Middlewares{}
-	m.Use(health)
+	m.Use(ctrl.Healthz())
 	m.Use(logger.Stdout())
 	m.Use(&_promRequests)
 	m.Use(compress.Gzip())

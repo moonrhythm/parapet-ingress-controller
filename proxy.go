@@ -11,6 +11,8 @@ import (
 	"github.com/golang/glog"
 )
 
+const bufferSize = 16 * 1024
+
 type bufferPool struct {
 	sync.Pool
 }
