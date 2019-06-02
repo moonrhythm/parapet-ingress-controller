@@ -49,7 +49,7 @@ func (ctrl *ingressController) ServeHandler(_ http.Handler) http.Handler {
 
 func (ctrl *ingressController) watchIngresses() {
 	for {
-		w, err := client.ExtensionsV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
+		w, err := client.ExtensionsV1beta1().Ingresses(watchNamespace).Watch(metav1.ListOptions{})
 		if err != nil {
 			glog.Error("can not watch ingresses;", err)
 			time.Sleep(5 * time.Second)
@@ -89,7 +89,7 @@ func (ctrl *ingressController) safeReload() {
 }
 
 func (ctrl *ingressController) reload() {
-	list, err := getIngresses()
+	list, err := getIngresses(watchNamespace)
 	if err != nil {
 		panic(err)
 	}
@@ -141,7 +141,7 @@ func (ctrl *ingressController) reload() {
 				mux.Handle(srcHost, h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					http.Redirect(w, r, target, status)
 				})))
-				glog.Infof("registered: %s ==> %d,%s", srcHost, status, target)
+				glog.V(1).Infof("registered: %s ==> %d,%s", srcHost, status, target)
 			}
 		}
 		if a := ing.Annotations["parapet.moonrhythm.io/ratelimit-s"]; a != "" {
@@ -201,7 +201,7 @@ func (ctrl *ingressController) reload() {
 					r.URL.Host = target
 					proxy.ServeHTTP(w, r)
 				})))
-				glog.Infof("registered: %s => %s", src, target)
+				glog.V(1).Infof("registered: %s => %s", src, target)
 			}
 
 			for _, t := range ing.Spec.TLS {

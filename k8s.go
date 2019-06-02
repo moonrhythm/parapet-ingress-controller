@@ -31,7 +31,7 @@ func getServicePort(namespace, serviceName, portName string) int {
 	return 0
 }
 
-func getIngresses() ([]v1beta1.Ingress, error) {
+func getIngresses(namespace string) ([]v1beta1.Ingress, error) {
 	list, err := client.ExtensionsV1beta1().Ingresses(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		glog.Error("can not list ingresses;", err)
