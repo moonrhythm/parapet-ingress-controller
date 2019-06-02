@@ -13,7 +13,9 @@ import (
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 
+	controller "github.com/moonrhythm/parapet-ingress-controller"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
+	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 )
 
@@ -39,22 +41,19 @@ func main() {
 
 	go prom.Start(":9187")
 
-	ctrl := newIngressController(watchNamespace)
+	ctrl := controller.New(watchNamespace)
 	ctrl.Use(plugin.InjectLogIngress)
 	ctrl.Use(plugin.RedirectHTTPS)
 	ctrl.Use(plugin.InjectHSTS)
 	ctrl.Use(plugin.RedirectRules)
 	ctrl.Use(plugin.RateLimit)
 	ctrl.Use(plugin.BodyLimit)
-	go func() {
-		ctrl.reload()
-		ctrl.watchIngresses()
-	}()
+	go ctrl.Watch()
 
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
 	m.Use(logger.Stdout())
-	m.Use(&_promRequests)
+	m.Use(metric.Requests())
 	m.Use(compress.Gzip())
 	m.Use(compress.Br())
 	m.Use(ctrl)

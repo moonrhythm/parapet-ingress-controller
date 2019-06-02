@@ -1,4 +1,4 @@
-package main
+package controller
 
 import (
 	"crypto/tls"
@@ -18,9 +18,11 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 )
 
-const ingressClass = "parapet"
+// IngressClass to load ingresses
+const IngressClass = "parapet"
 
-type ingressController struct {
+// Controller is the parapet ingress controller
+type Controller struct {
 	mu                sync.RWMutex
 	m                 *http.ServeMux
 	nameToCertificate map[string]*tls.Certificate
@@ -31,19 +33,22 @@ type ingressController struct {
 	watchNamespace    string
 }
 
-func newIngressController(watchNamespace string) *ingressController {
-	ctrl := &ingressController{}
+// New creates new ingress controller
+func New(watchNamespace string) *Controller {
+	ctrl := &Controller{}
 	ctrl.health = healthz.New()
 	ctrl.health.SetReady(false)
 	ctrl.watchNamespace = watchNamespace
 	return ctrl
 }
 
-func (ctrl *ingressController) Use(m plugin.Plugin) {
+// Use appends a plugin
+func (ctrl *Controller) Use(m plugin.Plugin) {
 	ctrl.plugins = append(ctrl.plugins, m)
 }
 
-func (ctrl *ingressController) ServeHandler(_ http.Handler) http.Handler {
+// ServeHandler implements parapet.Middleware
+func (ctrl *Controller) ServeHandler(_ http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctrl.mu.RLock()
 		mux := ctrl.m
@@ -53,7 +58,11 @@ func (ctrl *ingressController) ServeHandler(_ http.Handler) http.Handler {
 	})
 }
 
-func (ctrl *ingressController) watchIngresses() {
+// Watch starts watch k8s resource
+func (ctrl *Controller) Watch() {
+	ctrl.Reload()
+
+	// TODO: watch services, and secrets
 	for {
 		w, err := k8s.WatchIngresses(ctrl.watchNamespace)
 		if err != nil {
@@ -67,44 +76,51 @@ func (ctrl *ingressController) watchIngresses() {
 				continue
 			}
 
-			ctrl.safeReload()
+			ctrl.Reload()
 		}
 
+		// channel closed, retry watch again
 		w.Stop()
 		glog.Info("restart watcher")
 	}
 }
 
-func (ctrl *ingressController) safeReload() {
+// Reload reloads ingresses
+func (ctrl *Controller) Reload() {
 	ctrl.debounceMu.Lock()
 	defer ctrl.debounceMu.Unlock()
 
-	if ctrl.debounceTimer != nil {
-		ctrl.debounceTimer.Stop()
-	}
-	ctrl.debounceTimer = time.AfterFunc(100*time.Millisecond, func() {
-		glog.Info("reload ingresses")
-
-		defer func() {
-			if err := recover(); err != nil {
-				glog.Error(err)
-			}
-		}()
+	// first reload always block
+	if ctrl.debounceTimer == nil {
 		ctrl.reload()
-	})
+		ctrl.debounceTimer = time.AfterFunc(0, func() {})
+		return
+	}
+
+	ctrl.debounceTimer.Stop()
+	ctrl.debounceTimer = time.AfterFunc(100*time.Millisecond, ctrl.reload)
 }
 
-func (ctrl *ingressController) reload() {
+func (ctrl *Controller) reload() {
+	glog.Info("reload ingresses")
+
+	defer func() {
+		if err := recover(); err != nil {
+			glog.Error(err)
+		}
+	}()
+
 	list, err := k8s.GetIngresses(ctrl.watchNamespace)
 	if err != nil {
-		panic(err)
+		glog.Error("can not list ingresses;", err)
+		return
 	}
 
 	var certs []tls.Certificate
 	routes := make(map[string]http.Handler)
 
 	for _, ing := range list {
-		if ing.Annotations == nil || ing.Annotations["kubernetes.io/ingress.class"] != ingressClass {
+		if ing.Annotations == nil || ing.Annotations["kubernetes.io/ingress.class"] != IngressClass {
 			glog.Infof("skip: %s/%s", ing.Namespace, ing.Name)
 			continue
 		}
@@ -190,7 +206,8 @@ func (ctrl *ingressController) reload() {
 	ctrl.health.SetReady(true)
 }
 
-func (ctrl *ingressController) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+// GetCertificate returns certificate for given client hello information
+func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// from tls/common.go
 
 	name := strings.ToLower(clientHello.ServerName)
@@ -220,7 +237,7 @@ func (ctrl *ingressController) GetCertificate(clientHello *tls.ClientHelloInfo) 
 	return nil, nil
 }
 
-// Healthz returns healthz check middleware
-func (ctrl *ingressController) Healthz() parapet.Middleware {
+// Healthz returns health check middleware
+func (ctrl *Controller) Healthz() parapet.Middleware {
 	return ctrl.health
 }

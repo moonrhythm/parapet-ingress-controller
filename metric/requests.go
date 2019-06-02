@@ -1,21 +1,26 @@
-package main
+package metric
 
 import (
 	"net/http"
 	"strconv"
 	"sync"
 
+	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+func Requests() parapet.Middleware {
+	return &_promRequests
+}
+
+var _promRequests promRequests
+
 type promRequests struct {
 	once sync.Once
 	vec  *prometheus.CounterVec
 }
-
-var _promRequests promRequests
 
 func (p *promRequests) init() {
 	p.once.Do(func() {
