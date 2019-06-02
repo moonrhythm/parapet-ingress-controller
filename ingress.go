@@ -21,7 +21,6 @@ type ingressController struct {
 	mu                sync.RWMutex
 	m                 *http.ServeMux
 	nameToCertificate map[string]*tls.Certificate
-	ready             int32
 	plugins           []plugin.Plugin
 
 	debounceMu    sync.Mutex
@@ -30,12 +29,6 @@ type ingressController struct {
 
 func (ctrl *ingressController) Use(m plugin.Plugin) {
 	ctrl.plugins = append(ctrl.plugins, m)
-}
-
-func (ctrl *ingressController) Ready() bool {
-	ctrl.mu.RLock()
-	defer ctrl.mu.RUnlock()
-	return ctrl.ready > 0
 }
 
 func (ctrl *ingressController) ServeHandler(_ http.Handler) http.Handler {
@@ -181,8 +174,8 @@ func (ctrl *ingressController) reload() {
 	ctrl.mu.Lock()
 	ctrl.m = mux
 	ctrl.nameToCertificate = tlsConfig.NameToCertificate
-	ctrl.ready = 1
 	ctrl.mu.Unlock()
+	health.SetReady(true)
 }
 
 func (ctrl *ingressController) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {

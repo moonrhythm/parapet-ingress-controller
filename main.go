@@ -5,15 +5,12 @@ import (
 	"flag"
 	"net/http"
 	"os"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
-	"github.com/moonrhythm/parapet/pkg/host"
-	"github.com/moonrhythm/parapet/pkg/location"
+	"github.com/moonrhythm/parapet/pkg/healthz"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"k8s.io/client-go/kubernetes"
@@ -29,6 +26,7 @@ const (
 var (
 	client         *kubernetes.Clientset
 	watchNamespace string
+	health         = healthz.New()
 )
 
 func main() {
@@ -44,6 +42,8 @@ func main() {
 	glog.Infoln("https_port:", httpsPort)
 	glog.Infoln("pod_namespace:", podNamespace)
 	glog.Infoln("watch_namespace:", watchNamespace)
+
+	health.SetReady(false)
 
 	var err error
 	client, err = newKubernetesClient()
@@ -67,39 +67,7 @@ func main() {
 	}()
 
 	m := parapet.Middlewares{}
-	m.Use(func() parapet.Middleware {
-		h := host.NewCIDR("0.0.0.0/0")
-		l := location.Exact("/healthz")
-		l.Use(parapet.MiddlewareFunc(func(http.Handler) http.Handler {
-			var (
-				once     sync.Once
-				shutdown int32
-			)
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				once.Do(func() {
-					if srv, ok := r.Context().Value(parapet.ServerContextKey).(*parapet.Server); ok {
-						srv.RegisterOnShutdown(func() {
-							atomic.StoreInt32(&shutdown, 1)
-						})
-					}
-				})
-
-				if r.URL.Query().Get("ready") != "" {
-					p := atomic.LoadInt32(&shutdown)
-					if p > 0 || !ctrl.Ready() {
-						w.WriteHeader(http.StatusServiceUnavailable)
-						w.Write([]byte("Service Unavailable"))
-						return
-					}
-				}
-
-				w.WriteHeader(http.StatusOK)
-				w.Write([]byte("OK"))
-			})
-		}))
-		h.Use(l)
-		return h
-	}())
+	m.Use(health)
 	m.Use(logger.Stdout())
 	m.Use(&_promRequests)
 	m.Use(compress.Gzip())

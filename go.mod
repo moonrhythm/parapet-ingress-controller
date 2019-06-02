@@ -10,7 +10,7 @@ require (
 	github.com/json-iterator/go v0.0.0-20180701071628-ab8a2e0c74be // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.1 // indirect
-	github.com/moonrhythm/parapet v0.7.4
+	github.com/moonrhythm/parapet v0.8.0
 	github.com/prometheus/client_golang v0.9.3-0.20190127221311-3c4408c8b829
 	github.com/spf13/pflag v1.0.1 // indirect
 	golang.org/x/sys v0.0.0-20190312061237-fead79001313 // indirect
