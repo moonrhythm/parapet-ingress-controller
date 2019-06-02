@@ -10,10 +10,10 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 
+	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 )
 
@@ -43,7 +43,7 @@ func (ctrl *ingressController) ServeHandler(_ http.Handler) http.Handler {
 
 func (ctrl *ingressController) watchIngresses() {
 	for {
-		w, err := client.ExtensionsV1beta1().Ingresses(watchNamespace).Watch(metav1.ListOptions{})
+		w, err := k8s.WatchIngresses(watchNamespace)
 		if err != nil {
 			glog.Error("can not watch ingresses;", err)
 			time.Sleep(5 * time.Second)
@@ -83,7 +83,7 @@ func (ctrl *ingressController) safeReload() {
 }
 
 func (ctrl *ingressController) reload() {
-	list, err := getIngresses(watchNamespace)
+	list, err := k8s.GetIngresses(watchNamespace)
 	if err != nil {
 		panic(err)
 	}
@@ -127,7 +127,7 @@ func (ctrl *ingressController) reload() {
 				if backend.ServicePort.Type == intstr.String {
 					// TODO: add to watched services
 					// TODO: support custom proto backend
-					port = getServicePort(ing.Namespace, backend.ServiceName, backend.ServicePort.StrVal)
+					port = k8s.GetServicePort(ing.Namespace, backend.ServiceName, backend.ServicePort.StrVal)
 				}
 				if port <= 0 {
 					continue
@@ -145,7 +145,7 @@ func (ctrl *ingressController) reload() {
 
 			for _, t := range ing.Spec.TLS {
 				// TODO: add to watched tls
-				crt, key, err := getSecretTLS(ing.Namespace, t.SecretName)
+				crt, key, err := k8s.GetSecretTLS(ing.Namespace, t.SecretName)
 				if err != nil {
 					glog.Errorf("can not get secret %s/%s; %v", ing.Namespace, t.SecretName, err)
 					continue

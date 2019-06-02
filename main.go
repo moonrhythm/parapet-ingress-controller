@@ -13,8 +13,8 @@ import (
 	"github.com/moonrhythm/parapet/pkg/healthz"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
-	"k8s.io/client-go/kubernetes"
 
+	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 )
 
@@ -24,7 +24,6 @@ const (
 )
 
 var (
-	client         *kubernetes.Clientset
 	watchNamespace string
 	health         = healthz.New()
 )
@@ -45,8 +44,7 @@ func main() {
 
 	health.SetReady(false)
 
-	var err error
-	client, err = newKubernetesClient()
+	err := k8s.Init()
 	if err != nil {
 		glog.Fatal(err)
 		os.Exit(1)

@@ -1,22 +1,33 @@
-package main
+package k8s
 
 import (
 	"github.com/golang/glog"
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
 
-func newKubernetesClient() (*kubernetes.Clientset, error) {
+var client *kubernetes.Clientset
+
+// Init inits k8s client
+func Init() error {
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	return kubernetes.NewForConfig(config)
+	client, err = kubernetes.NewForConfig(config)
+	return err
 }
 
-func getServicePort(namespace, serviceName, portName string) int {
+// WatchIngresses watches ingresses for given namespace
+func WatchIngresses(namespace string) (watch.Interface, error) {
+	return client.ExtensionsV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
+}
+
+// GetServicePort gets service port number from named port
+func GetServicePort(namespace, serviceName, portName string) int {
 	svc, err := client.CoreV1().Services(namespace).Get(serviceName, metav1.GetOptions{})
 	if err != nil {
 		glog.Error("can not get service %s/%s; %v\n", namespace, serviceName, err)
@@ -31,7 +42,8 @@ func getServicePort(namespace, serviceName, portName string) int {
 	return 0
 }
 
-func getIngresses(namespace string) ([]v1beta1.Ingress, error) {
+// GetIngresses lists all ingresses for given namespace
+func GetIngresses(namespace string) ([]v1beta1.Ingress, error) {
 	list, err := client.ExtensionsV1beta1().Ingresses(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		glog.Error("can not list ingresses;", err)
@@ -40,7 +52,8 @@ func getIngresses(namespace string) ([]v1beta1.Ingress, error) {
 	return list.Items, nil
 }
 
-func getSecretTLS(namespace, name string) (cert []byte, key []byte, err error) {
+// GetSecretTLS gets tls from secret
+func GetSecretTLS(namespace, name string) (cert []byte, key []byte, err error) {
 	s, err := client.CoreV1().Secrets(namespace).Get(name, metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, err
