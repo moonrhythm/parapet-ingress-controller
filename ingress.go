@@ -4,21 +4,17 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
-	"github.com/moonrhythm/parapet/pkg/body"
-	"github.com/moonrhythm/parapet/pkg/hsts"
-	"github.com/moonrhythm/parapet/pkg/logger"
-	"github.com/moonrhythm/parapet/pkg/ratelimit"
-	"gopkg.in/yaml.v2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
+
+	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 )
 
 type ingressController struct {
@@ -26,9 +22,14 @@ type ingressController struct {
 	m                 *http.ServeMux
 	nameToCertificate map[string]*tls.Certificate
 	ready             int32
+	plugins           []plugin.Plugin
 
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
+}
+
+func (ctrl *ingressController) Use(m plugin.Plugin) {
+	ctrl.plugins = append(ctrl.plugins, m)
 }
 
 func (ctrl *ingressController) Ready() bool {
@@ -105,68 +106,12 @@ func (ctrl *ingressController) reload() {
 		glog.Infof("load: %s/%s", ing.Namespace, ing.Name)
 
 		var h parapet.Middlewares
-		h.Use(injectIngress{Namespace: ing.Namespace, Name: ing.Name})
-
-		if a := ing.Annotations["parapet.moonrhythm.io/redirect-https"]; a == "true" {
-			h.Use(httpsRedirector{})
-		}
-		if a := ing.Annotations["parapet.moonrhythm.io/hsts"]; a != "" {
-			if a == "preload" {
-				h.Use(hsts.Preload())
-			} else {
-				h.Use(hsts.Default())
-			}
-		}
-		if a := ing.Annotations["parapet.moonrhythm.io/redirect"]; a != "" {
-			var obj map[string]string
-			yaml.Unmarshal([]byte(a), &obj)
-			for srcHost, targetURL := range obj {
-				if srcHost == "" || targetURL == "" || strings.HasPrefix(srcHost, "/") {
-					return
-				}
-				if !strings.HasSuffix(srcHost, "/") {
-					srcHost += "/"
-				}
-
-				target := targetURL
-				status := http.StatusFound
-				if ts := strings.SplitN(targetURL, ",", 2); len(ts) == 2 {
-					st, _ := strconv.Atoi(ts[0])
-					if st > 0 {
-						status = st
-						target = ts[1]
-					}
-				}
-
-				mux.Handle(srcHost, h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					http.Redirect(w, r, target, status)
-				})))
-				glog.V(1).Infof("registered: %s ==> %d,%s", srcHost, status, target)
-			}
-		}
-		if a := ing.Annotations["parapet.moonrhythm.io/ratelimit-s"]; a != "" {
-			rate, _ := strconv.Atoi(a)
-			if rate > 0 {
-				h.Use(ratelimit.FixedWindowPerSecond(rate))
-			}
-		}
-		if a := ing.Annotations["parapet.moonrhythm.io/ratelimit-m"]; a != "" {
-			rate, _ := strconv.Atoi(a)
-			if rate > 0 {
-				h.Use(ratelimit.FixedWindowPerMinute(rate))
-			}
-		}
-		if a := ing.Annotations["parapet.moonrhythm.io/ratelimit-h"]; a != "" {
-			rate, _ := strconv.Atoi(a)
-			if rate > 0 {
-				h.Use(ratelimit.FixedWindowPerHour(rate))
-			}
-		}
-		if a := ing.Annotations["parapet.moonrhythm.io/body-limitrequest"]; a != "" {
-			size, _ := strconv.ParseInt(a, 10, 64)
-			if size > 0 {
-				h.Use(body.LimitRequest(size))
-			}
+		for _, m := range ctrl.plugins {
+			m(plugin.Context{
+				Middlewares: &h,
+				Mux:         mux,
+				Ingress:     &ing,
+			})
 		}
 
 		if ing.Spec.Backend != nil {
@@ -188,6 +133,7 @@ func (ctrl *ingressController) reload() {
 				port := int(backend.ServicePort.IntVal)
 				if backend.ServicePort.Type == intstr.String {
 					// TODO: add to watched services
+					// TODO: support custom proto backend
 					port = getServicePort(ing.Namespace, backend.ServiceName, backend.ServicePort.StrVal)
 				}
 				if port <= 0 {
@@ -262,18 +208,4 @@ func (ctrl *ingressController) GetCertificate(clientHello *tls.ClientHelloInfo) 
 	}
 
 	return nil, nil
-}
-
-type injectIngress struct {
-	Namespace string
-	Name      string
-}
-
-func (m injectIngress) ServeHandler(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		logger.Set(ctx, "namespace", m.Namespace)
-		logger.Set(ctx, "ingress", m.Name)
-		h.ServeHTTP(w, r)
-	})
 }

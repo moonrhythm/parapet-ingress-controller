@@ -26,7 +26,6 @@ const (
 
 var (
 	client         *kubernetes.Clientset
-	namespace      string
 	watchNamespace string
 )
 
@@ -35,7 +34,7 @@ func main() {
 
 	httpPort := config.StringDefault("HTTP_PORT", "80")
 	httpsPort := config.StringDefault("HTTPS_PORT", "443")
-	namespace = config.StringDefault("NAMESPACE", "default")
+	namespace := config.StringDefault("NAMESPACE", "default") // TODO: remove, or use to load config map, secret
 	watchNamespace = config.StringDefault("WATCH_NAMESPACE", "")
 
 	glog.Infoln("parapet-ingress-controller")
@@ -53,6 +52,12 @@ func main() {
 	go prom.Start(":9187")
 
 	ctrl := &ingressController{}
+	ctrl.Use(injectLogIngress)
+	ctrl.Use(redirectHTTPS)
+	ctrl.Use(injectHSTS)
+	ctrl.Use(redirectRules)
+	ctrl.Use(rateLimit)
+	ctrl.Use(bodyLimit)
 	go func() {
 		ctrl.reload()
 		ctrl.watchIngresses()
