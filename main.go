@@ -34,13 +34,14 @@ func main() {
 
 	httpPort := config.StringDefault("HTTP_PORT", "80")
 	httpsPort := config.StringDefault("HTTPS_PORT", "443")
-	namespace := config.StringDefault("NAMESPACE", "default") // TODO: remove, or use to load config map, secret
+	podNamespace := config.String("POD_NAMESPACE")
 	watchNamespace = config.StringDefault("WATCH_NAMESPACE", "")
 
 	glog.Infoln("parapet-ingress-controller")
 	glog.Infoln("http_port:", httpPort)
 	glog.Infoln("https_port:", httpsPort)
-	glog.Infoln("namespace:", namespace)
+	glog.Infoln("pod_namespace:", podNamespace)
+	glog.Infoln("watch_namespace:", watchNamespace)
 
 	var err error
 	client, err = newKubernetesClient()
