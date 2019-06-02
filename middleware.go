@@ -67,9 +67,9 @@ func redirectRules(ctx plugin.Context) {
 				}
 			}
 
-			ctx.Mux.Handle(srcHost, ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx.Routes[srcHost] = ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, target, status)
-			})))
+			}))
 			glog.V(1).Infof("registered: %s ==> %d,%s", srcHost, status, target)
 		}
 	}

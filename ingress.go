@@ -95,8 +95,8 @@ func (ctrl *ingressController) reload() {
 		panic(err)
 	}
 
-	mux := http.NewServeMux()
 	var certs []tls.Certificate
+	routes := make(map[string]http.Handler)
 
 	for _, ing := range list {
 		if ing.Annotations == nil || ing.Annotations["kubernetes.io/ingress.class"] != ingressClass {
@@ -109,7 +109,7 @@ func (ctrl *ingressController) reload() {
 		for _, m := range ctrl.plugins {
 			m(plugin.Context{
 				Middlewares: &h,
-				Mux:         mux,
+				Routes:      routes,
 				Ingress:     &ing,
 			})
 		}
@@ -143,10 +143,10 @@ func (ctrl *ingressController) reload() {
 				src := rule.Host + path
 				// service.namespace.svc.cluster.local:port
 				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, port)
-				mux.Handle(src, h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
 					proxy.ServeHTTP(w, r)
-				})))
+				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)
 			}
 
@@ -166,6 +166,11 @@ func (ctrl *ingressController) reload() {
 				certs = append(certs, cert)
 			}
 		}
+	}
+
+	mux := http.NewServeMux()
+	for r, h := range routes {
+		mux.Handle(r, h)
 	}
 
 	tlsConfig := tls.Config{

@@ -13,6 +13,6 @@ type Plugin func(ctx Context)
 // Context holds plugin's relate data
 type Context struct {
 	*parapet.Middlewares
-	Mux     *http.ServeMux
+	Routes  map[string]http.Handler
 	Ingress *v1beta1.Ingress
 }
