@@ -33,11 +33,8 @@ var proxy = &httputil.ReverseProxy{
 	},
 	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
 	Transport: &transport{&http.Transport{
-		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&dialer{&net.Dialer{
-			Timeout:   2 * time.Second,
-			KeepAlive: time.Minute,
-		}}).DialContext,
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialContext,
 		MaxConnsPerHost:       200,
 		MaxIdleConnsPerHost:   64,
 		IdleConnTimeout:       10 * time.Minute,
@@ -65,17 +62,30 @@ func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return t.Transport.RoundTrip(r)
 }
 
-type dialer struct {
-	*net.Dialer
+var dialer = &net.Dialer{
+	Timeout:   2 * time.Second,
+	KeepAlive: time.Minute,
 }
 
-func (d *dialer) DialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
-	for i := 0; i < 5; i++ {
-		conn, err = d.Dialer.DialContext(ctx, network, addr)
+func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
+	for i := 0; i < 15; i++ {
+		conn, err = dialer.DialContext(ctx, network, addr)
 		if err == nil || err == context.Canceled {
 			break
 		}
-		time.Sleep(time.Duration(1<<uint(i)) * 10 * time.Millisecond)
+
+		select {
+		case <-time.After(backoffDuration(i)):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	return
+}
+
+func backoffDuration(round int) time.Duration {
+	if round <= 6 {
+		return time.Duration(1<<uint(round)) * 10 * time.Millisecond
+	}
+	return time.Second
 }
