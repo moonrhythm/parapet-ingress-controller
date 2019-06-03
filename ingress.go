@@ -161,7 +161,7 @@ func (ctrl *Controller) reload() {
 					continue
 				}
 
-				src := rule.Host + path
+				src := strings.ToLower(rule.Host) + path
 				// service.namespace.svc.cluster.local:port
 				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, port)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

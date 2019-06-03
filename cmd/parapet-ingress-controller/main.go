@@ -5,6 +5,7 @@ import (
 	"flag"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/golang/glog"
@@ -52,6 +53,7 @@ func main() {
 
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
+	m.Use(parapet.MiddlewareFunc(lowerCaseHost))
 	m.Use(logger.Stdout())
 	m.Use(metric.Requests())
 	m.Use(compress.Gzip())
@@ -154,4 +156,11 @@ func main() {
 			os.Exit(1)
 		}
 	}
+}
+
+func lowerCaseHost(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Host = strings.ToLower(r.Host)
+		h.ServeHTTP(w, r)
+	})
 }
