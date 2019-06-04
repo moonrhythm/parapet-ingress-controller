@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/tls"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -41,6 +42,9 @@ var proxy = &httputil.ReverseProxy{
 		ExpectContinueTimeout: time.Second,
 		DisableCompression:    true,
 		ResponseHeaderTimeout: 5 * time.Minute,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
 	},
 	ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 		if err == context.Canceled {
