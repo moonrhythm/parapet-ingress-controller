@@ -49,6 +49,7 @@ func main() {
 	ctrl.Use(plugin.RedirectRules)
 	ctrl.Use(plugin.RateLimit)
 	ctrl.Use(plugin.BodyLimit)
+	ctrl.Use(plugin.UpstreamProtocol)
 	go ctrl.Watch()
 
 	m := parapet.Middlewares{}

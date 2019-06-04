@@ -32,7 +32,7 @@ var proxy = &httputil.ReverseProxy{
 		}
 	},
 	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
-	Transport: &transport{&http.Transport{
+	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialContext,
 		MaxConnsPerHost:       200,
@@ -41,7 +41,7 @@ var proxy = &httputil.ReverseProxy{
 		ExpectContinueTimeout: time.Second,
 		DisableCompression:    true,
 		ResponseHeaderTimeout: 5 * time.Minute,
-	}},
+	},
 	ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 		if err == context.Canceled {
 			// client canceled request
@@ -51,15 +51,6 @@ var proxy = &httputil.ReverseProxy{
 		glog.Warning(err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	},
-}
-
-type transport struct {
-	*http.Transport
-}
-
-func (t *transport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r.URL.Scheme = "http"
-	return t.Transport.RoundTrip(r)
 }
 
 var dialer = &net.Dialer{

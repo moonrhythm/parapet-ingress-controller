@@ -124,3 +124,23 @@ func BodyLimit(ctx Context) {
 		}
 	}
 }
+
+// UpstreamProtocol changes upstream protocol
+func UpstreamProtocol(ctx Context) {
+	proto := ctx.Ingress.Annotations["parapet.moonrhythm.io/upstream-protocol"]
+	scheme := "http"
+	switch proto {
+	case "", "http":
+	case "https":
+		scheme = "https"
+	default:
+		glog.Warning("unknown protocol", proto)
+	}
+
+	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Scheme = scheme
+			h.ServeHTTP(w, r)
+		})
+	}))
+}
