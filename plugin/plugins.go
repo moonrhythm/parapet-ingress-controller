@@ -51,7 +51,7 @@ func RedirectHTTPS(ctx Context) {
 	}
 }
 
-// InjectHTST injects hsts header
+// InjectHSTS injects hsts header
 func InjectHSTS(ctx Context) {
 	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/hsts"]; a != "" {
 		if a == "preload" {
