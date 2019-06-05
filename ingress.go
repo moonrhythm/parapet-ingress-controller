@@ -11,6 +11,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/healthz"
+	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 
@@ -151,11 +152,43 @@ func (ctrl *Controller) reload() {
 					path = "/"
 				}
 
+				var config backendConfig
+
 				port := int(backend.ServicePort.IntVal)
 				if backend.ServicePort.Type == intstr.String {
 					// TODO: add to watched services
 					// TODO: support custom proto backend
-					port = k8s.GetServicePort(ing.Namespace, backend.ServiceName, backend.ServicePort.StrVal)
+					svc, err := k8s.GetService(ing.Namespace, backend.ServiceName)
+					if err != nil {
+						glog.Errorf("can not get service %s/%s", ing.Namespace, backend.ServiceName)
+						continue
+					}
+
+					// find port number
+					for _, p := range svc.Spec.Ports {
+						if p.Name == backend.ServicePort.StrVal {
+							port = int(p.Port)
+						}
+					}
+					if port == 0 {
+						glog.Errorf("port %s on service %s/%s not found",
+							backend.ServiceName,
+							ing.Namespace,
+							backend.ServiceName,
+						)
+						continue
+					}
+
+					if svc.Annotations != nil {
+						if a := svc.Annotations["parapet.moonrhythm.io/backend-config"]; a != "" {
+							var cfg map[string]backendConfig
+							err = yaml.Unmarshal([]byte(a), &cfg)
+							if err != nil {
+								glog.Errorf("can not parse backend-config from annotation;", err)
+							}
+							config = cfg[backend.ServicePort.StrVal]
+						}
+					}
 				}
 				if port <= 0 {
 					continue
@@ -166,6 +199,14 @@ func (ctrl *Controller) reload() {
 				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, port)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
+
+					// TODO: add support h2c
+					switch config.Protocol {
+					case "http":
+						r.URL.Scheme = "http"
+					case "https":
+						r.URL.Scheme = "https"
+					}
 					proxy.ServeHTTP(w, r)
 				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)
@@ -240,4 +281,8 @@ func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.C
 // Healthz returns health check middleware
 func (ctrl *Controller) Healthz() parapet.Middleware {
 	return ctrl.health
+}
+
+type backendConfig struct {
+	Protocol string `json:"protocol" yaml:"protocol"`
 }
