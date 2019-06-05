@@ -2,7 +2,7 @@ package k8s
 
 import (
 	"github.com/golang/glog"
-	v1 "k8s.io/api/core/v1"
+	"k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -30,17 +30,6 @@ func WatchIngresses(namespace string) (watch.Interface, error) {
 // GetService gets service
 func GetService(namespace, name string) (*v1.Service, error) {
 	return client.CoreV1().Services(namespace).Get(name, metav1.GetOptions{})
-	// if err != nil {
-	// 	glog.Error("can not get service %s/%s; %v\n", namespace, serviceName, err)
-	// 	return 0
-	// }
-	//
-	// for _, port := range svc.Spec.Ports {
-	// 	if port.Name == portName {
-	// 		return int(port.Port)
-	// 	}
-	// }
-	// return 0
 }
 
 // GetIngresses lists all ingresses for given namespace
