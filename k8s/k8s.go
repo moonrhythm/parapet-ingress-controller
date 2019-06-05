@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"github.com/golang/glog"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -26,20 +27,20 @@ func WatchIngresses(namespace string) (watch.Interface, error) {
 	return client.ExtensionsV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
 }
 
-// GetServicePort gets service port number from named port
-func GetServicePort(namespace, serviceName, portName string) int {
-	svc, err := client.CoreV1().Services(namespace).Get(serviceName, metav1.GetOptions{})
-	if err != nil {
-		glog.Error("can not get service %s/%s; %v\n", namespace, serviceName, err)
-		return 0
-	}
-
-	for _, port := range svc.Spec.Ports {
-		if port.Name == portName {
-			return int(port.Port)
-		}
-	}
-	return 0
+// GetService gets service
+func GetService(namespace, name string) (*v1.Service, error) {
+	return client.CoreV1().Services(namespace).Get(name, metav1.GetOptions{})
+	// if err != nil {
+	// 	glog.Error("can not get service %s/%s; %v\n", namespace, serviceName, err)
+	// 	return 0
+	// }
+	//
+	// for _, port := range svc.Spec.Ports {
+	// 	if port.Name == portName {
+	// 		return int(port.Port)
+	// 	}
+	// }
+	// return 0
 }
 
 // GetIngresses lists all ingresses for given namespace
