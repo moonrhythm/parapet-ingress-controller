@@ -10,8 +10,8 @@ import (
 
 type backendConnections struct {
 	connections *prometheus.GaugeVec
-	requests    prometheus.Counter
-	responses   prometheus.Counter
+	requests    *prometheus.CounterVec
+	responses   *prometheus.CounterVec
 }
 
 var _backendConnections backendConnections
@@ -21,14 +21,14 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "backend_connections",
 	}, []string{"backend"})
-	_backendConnections.requests = prometheus.NewCounter(prometheus.CounterOpts{
+	_backendConnections.requests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "backend_network_request_bytes",
-	})
-	_backendConnections.responses = prometheus.NewCounter(prometheus.CounterOpts{
+	}, []string{"backend"})
+	_backendConnections.responses = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "backend_network_response_bytes",
-	})
+	}, []string{"backend"})
 	prom.Registry().MustRegister(_backendConnections.connections)
 	prom.Registry().MustRegister(_backendConnections.requests)
 	prom.Registry().MustRegister(_backendConnections.responses)
@@ -50,12 +50,20 @@ func (p *backendConnections) dec(addr string) {
 	c.Dec()
 }
 
-func (p *backendConnections) read(n int) {
-	p.requests.Add(float64(n))
+func (p *backendConnections) read(addr string, n int) {
+	c, err := p.requests.GetMetricWith(prometheus.Labels{"backend": addr})
+	if err != nil {
+		return
+	}
+	c.Add(float64(n))
 }
 
-func (p *backendConnections) write(n int) {
-	p.responses.Add(float64(n))
+func (p *backendConnections) write(addr string, n int) {
+	c, err := p.responses.GetMetricWith(prometheus.Labels{"backend": addr})
+	if err != nil {
+		return
+	}
+	c.Add(float64(n))
 }
 
 // BackendConnections collects backend connection metrics
@@ -77,7 +85,7 @@ type trackBackendConn struct {
 func (conn *trackBackendConn) Read(b []byte) (n int, err error) {
 	n, err = conn.Conn.Read(b)
 	if n > 0 {
-		_backendConnections.read(n)
+		_backendConnections.read(conn.addr, n)
 	}
 	return
 }
@@ -85,7 +93,7 @@ func (conn *trackBackendConn) Read(b []byte) (n int, err error) {
 func (conn *trackBackendConn) Write(b []byte) (n int, err error) {
 	n, err = conn.Conn.Write(b)
 	if n > 0 {
-		_backendConnections.write(n)
+		_backendConnections.write(conn.addr, n)
 	}
 	return
 }
