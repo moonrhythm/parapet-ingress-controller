@@ -99,7 +99,7 @@ func (ctrl *Controller) Watch() {
 							_, ok = (*filter)[key]
 						}
 						ctrl.mu.RUnlock()
-						if ok {
+						if !ok {
 							continue
 						}
 					}
