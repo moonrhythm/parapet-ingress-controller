@@ -10,8 +10,8 @@ import (
 
 type backendConnections struct {
 	connections *prometheus.GaugeVec
-	requests    *prometheus.CounterVec
-	responses   *prometheus.CounterVec
+	reads       *prometheus.CounterVec
+	writes      *prometheus.CounterVec
 }
 
 var _backendConnections backendConnections
@@ -21,17 +21,17 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "backend_connections",
 	}, []string{"backend"})
-	_backendConnections.requests = prometheus.NewCounterVec(prometheus.CounterOpts{
+	_backendConnections.reads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
-		Name:      "backend_network_request_bytes",
+		Name:      "backend_network_read_bytes",
 	}, []string{"backend"})
-	_backendConnections.responses = prometheus.NewCounterVec(prometheus.CounterOpts{
+	_backendConnections.writes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
-		Name:      "backend_network_response_bytes",
+		Name:      "backend_network_write_bytes",
 	}, []string{"backend"})
 	prom.Registry().MustRegister(_backendConnections.connections)
-	prom.Registry().MustRegister(_backendConnections.requests)
-	prom.Registry().MustRegister(_backendConnections.responses)
+	prom.Registry().MustRegister(_backendConnections.reads)
+	prom.Registry().MustRegister(_backendConnections.writes)
 }
 
 func (p *backendConnections) inc(addr string) {
@@ -51,7 +51,7 @@ func (p *backendConnections) dec(addr string) {
 }
 
 func (p *backendConnections) read(addr string, n int) {
-	c, err := p.requests.GetMetricWith(prometheus.Labels{"backend": addr})
+	c, err := p.reads.GetMetricWith(prometheus.Labels{"backend": addr})
 	if err != nil {
 		return
 	}
@@ -59,7 +59,7 @@ func (p *backendConnections) read(addr string, n int) {
 }
 
 func (p *backendConnections) write(addr string, n int) {
-	c, err := p.responses.GetMetricWith(prometheus.Labels{"backend": addr})
+	c, err := p.writes.GetMetricWith(prometheus.Labels{"backend": addr})
 	if err != nil {
 		return
 	}
