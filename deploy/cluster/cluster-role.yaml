@@ -8,7 +8,6 @@ rules:
   resources:
   - ingresses
   verbs:
-  - get
   - list
   - watch
 - apiGroups:
@@ -17,6 +16,5 @@ rules:
   - services
   - secrets
   verbs:
-  - get
   - list
   - watch

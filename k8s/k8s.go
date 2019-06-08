@@ -1,7 +1,6 @@
 package k8s
 
 import (
-	"github.com/golang/glog"
 	"k8s.io/api/core/v1"
 	"k8s.io/api/extensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -27,29 +26,39 @@ func WatchIngresses(namespace string) (watch.Interface, error) {
 	return client.ExtensionsV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
 }
 
-// GetService gets service
-func GetService(namespace, name string) (*v1.Service, error) {
-	return client.CoreV1().Services(namespace).Get(name, metav1.GetOptions{})
+// GetServices lists all service
+func GetServices(namespace string) ([]v1.Service, error) {
+	list, err := client.CoreV1().Services(namespace).List(metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+// WatchServices watches services
+func WatchServices(namespace string) (watch.Interface, error) {
+	return client.CoreV1().Services(namespace).Watch(metav1.ListOptions{})
 }
 
 // GetIngresses lists all ingresses for given namespace
 func GetIngresses(namespace string) ([]v1beta1.Ingress, error) {
 	list, err := client.ExtensionsV1beta1().Ingresses(namespace).List(metav1.ListOptions{})
 	if err != nil {
-		glog.Error("can not list ingresses;", err)
 		return nil, err
 	}
 	return list.Items, nil
 }
 
-// GetSecretTLS gets tls from secret
-func GetSecretTLS(namespace, name string) (cert []byte, key []byte, err error) {
-	s, err := client.CoreV1().Secrets(namespace).Get(name, metav1.GetOptions{})
+// GetSecrets lists all secret for given namespace
+func GetSecrets(namespace string) ([]v1.Secret, error) {
+	list, err := client.CoreV1().Secrets(namespace).List(metav1.ListOptions{})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
+	return list.Items, nil
+}
 
-	cert = s.Data["tls.crt"]
-	key = s.Data["tls.key"]
-	return
+// WatchSecrets watches secrets for given namespace
+func WatchSecrets(namespace string) (watch.Interface, error) {
+	return client.CoreV1().Secrets(namespace).Watch(metav1.ListOptions{})
 }

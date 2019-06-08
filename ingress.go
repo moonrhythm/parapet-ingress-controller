@@ -12,6 +12,8 @@ import (
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/healthz"
 	"gopkg.in/yaml.v2"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 
@@ -26,12 +28,14 @@ const IngressClass = "parapet"
 type Controller struct {
 	mu                sync.RWMutex
 	m                 *http.ServeMux
+	watchedServices   map[string]struct{}
+	watchedSecrets    map[string]struct{}
 	nameToCertificate map[string]*tls.Certificate
-	plugins           []plugin.Plugin
-	health            *healthz.Healthz
-	debounceMu        sync.Mutex
-	debounceTimer     *time.Timer
-	watchNamespace    string
+
+	plugins        []plugin.Plugin
+	health         *healthz.Healthz
+	reload         *debounce
+	watchNamespace string
 }
 
 // New creates new ingress controller
@@ -40,6 +44,7 @@ func New(watchNamespace string) *Controller {
 	ctrl.health = healthz.New()
 	ctrl.health.SetReady(false)
 	ctrl.watchNamespace = watchNamespace
+	ctrl.reload = newDebounce(ctrl.reloadDebounced, 100*time.Millisecond)
 	return ctrl
 }
 
@@ -63,46 +68,63 @@ func (ctrl *Controller) ServeHandler(_ http.Handler) http.Handler {
 func (ctrl *Controller) Watch() {
 	ctrl.Reload()
 
-	// TODO: watch services, and secrets
-	for {
-		w, err := k8s.WatchIngresses(ctrl.watchNamespace)
-		if err != nil {
-			glog.Error("can not watch ingresses;", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		for event := range w.ResultChan() {
-			if event.Type == watch.Error {
+	watch := func(resourceType string, f func(namespace string) (watch.Interface, error), filter *map[string]struct{}) {
+		for {
+			w, err := f(ctrl.watchNamespace)
+			if err != nil {
+				glog.Errorf("can not watch %s; %v", resourceType, err)
+				time.Sleep(5 * time.Second)
 				continue
 			}
 
-			ctrl.Reload()
-		}
+			for event := range w.ResultChan() {
+				if event.Type == watch.Error {
+					continue
+				}
 
-		// channel closed, retry watch again
-		w.Stop()
-		glog.Info("restart watcher")
+				// filter out unrelated resources
+				if filter != nil {
+					var meta *metav1.ObjectMeta
+					switch obj := event.Object.(type) {
+					case *v1.Service:
+						meta = &obj.ObjectMeta
+					case *v1.Secret:
+						meta = &obj.ObjectMeta
+					}
+					if meta != nil {
+						key := meta.Namespace + "/" + meta.Name
+						ctrl.mu.RLock()
+						var ok bool
+						if *filter != nil {
+							_, ok = (*filter)[key]
+						}
+						ctrl.mu.RUnlock()
+						if ok {
+							continue
+						}
+					}
+				}
+
+				ctrl.Reload()
+			}
+
+			// channel closed, retry watch again
+			w.Stop()
+			glog.Infof("restart %s watcher", resourceType)
+		}
 	}
+
+	go watch("ingresses", k8s.WatchIngresses, nil)
+	go watch("services", k8s.WatchServices, &ctrl.watchedServices)
+	go watch("secrets", k8s.WatchSecrets, &ctrl.watchedSecrets)
 }
 
 // Reload reloads ingresses
 func (ctrl *Controller) Reload() {
-	ctrl.debounceMu.Lock()
-	defer ctrl.debounceMu.Unlock()
-
-	// first reload always block
-	if ctrl.debounceTimer == nil {
-		ctrl.reload()
-		ctrl.debounceTimer = time.AfterFunc(0, func() {})
-		return
-	}
-
-	ctrl.debounceTimer.Stop()
-	ctrl.debounceTimer = time.AfterFunc(100*time.Millisecond, ctrl.reload)
+	ctrl.reload.Call()
 }
 
-func (ctrl *Controller) reload() {
+func (ctrl *Controller) reloadDebounced() {
 	glog.Info("reload ingresses")
 
 	defer func() {
@@ -111,16 +133,35 @@ func (ctrl *Controller) reload() {
 		}
 	}()
 
-	list, err := k8s.GetIngresses(ctrl.watchNamespace)
+	services, err := k8s.GetServices(ctrl.watchNamespace)
 	if err != nil {
-		glog.Error("can not list ingresses;", err)
+		glog.Error("can not get services;", err)
+	}
+	nameToService := make(map[string]*v1.Service)
+	for _, s := range services {
+		nameToService[s.Namespace+"/"+s.Name] = &s
+	}
+
+	secrets, err := k8s.GetSecrets(ctrl.watchNamespace)
+	if err != nil {
+		glog.Error("can not get secrets;", err)
+	}
+	nameToSecret := make(map[string]*v1.Secret)
+	for _, s := range secrets {
+		nameToSecret[s.Namespace+"/"+s.Name] = &s
+	}
+
+	ingresses, err := k8s.GetIngresses(ctrl.watchNamespace)
+	if err != nil {
+		glog.Error("can not get ingresses;", err)
 		return
 	}
 
-	var certs []tls.Certificate
 	routes := make(map[string]http.Handler)
+	watchedServices := make(map[string]struct{})
+	watchedSecrets := make(map[string]struct{})
 
-	for _, ing := range list {
+	for _, ing := range ingresses {
 		if ing.Annotations == nil || ing.Annotations["kubernetes.io/ingress.class"] != IngressClass {
 			glog.Infof("skip: %s/%s", ing.Namespace, ing.Name)
 			continue
@@ -156,13 +197,15 @@ func (ctrl *Controller) reload() {
 
 				port := int(backend.ServicePort.IntVal)
 				if backend.ServicePort.Type == intstr.String {
-					// TODO: add to watched services
-					// TODO: support custom proto backend
-					svc, err := k8s.GetService(ing.Namespace, backend.ServiceName)
-					if err != nil {
-						glog.Errorf("can not get service %s/%s", ing.Namespace, backend.ServiceName)
+					key := ing.Namespace + "/" + backend.ServiceName
+					svc := nameToService[key]
+					if svc == nil {
+						glog.Errorf("service %s not found", key)
 						continue
 					}
+					watchedServices[key] = struct{}{}
+
+					// TODO: support custom proto backend
 
 					// find port number
 					for _, p := range svc.Spec.Ports {
@@ -171,11 +214,7 @@ func (ctrl *Controller) reload() {
 						}
 					}
 					if port == 0 {
-						glog.Errorf("port %s on service %s/%s not found",
-							backend.ServiceName,
-							ing.Namespace,
-							backend.ServiceName,
-						)
+						glog.Errorf("port %s on service %s not found", backend.ServiceName, key)
 						continue
 					}
 
@@ -213,35 +252,44 @@ func (ctrl *Controller) reload() {
 			}
 
 			for _, t := range ing.Spec.TLS {
-				// TODO: add to watched tls
-				crt, key, err := k8s.GetSecretTLS(ing.Namespace, t.SecretName)
-				if err != nil {
-					glog.Errorf("can not get secret %s/%s; %v", ing.Namespace, t.SecretName, err)
+				key := ing.Namespace + "/" + t.SecretName
+				if _, ok := nameToSecret[key]; !ok {
+					glog.Errorf("secret %s not found", key)
 					continue
 				}
-
-				cert, err := tls.X509KeyPair(crt, key)
-				if err != nil {
-					glog.Errorf("can not load x509 certificate %s/%s; %v", ing.Namespace, t.SecretName, err)
-					continue
-				}
-				certs = append(certs, cert)
+				watchedSecrets[key] = struct{}{}
 			}
 		}
 	}
 
+	// build routes
 	mux := http.NewServeMux()
 	for r, h := range routes {
 		mux.Handle(r, h)
 	}
 
-	tlsConfig := tls.Config{
-		Certificates: certs,
+	// build certs
+	var certs []tls.Certificate
+	for key := range watchedSecrets {
+		s := nameToSecret[key]
+		if s == nil {
+			continue
+		}
+		crt, key := s.Data["tls.crt"], s.Data["tls.key"]
+		cert, err := tls.X509KeyPair(crt, key)
+		if err != nil {
+			glog.Errorf("can not load x509 certificate %s/%s; %v", s.Namespace, s.Name, err)
+			continue
+		}
+		certs = append(certs, cert)
 	}
+	tlsConfig := tls.Config{Certificates: certs}
 	tlsConfig.BuildNameToCertificate()
 
 	ctrl.mu.Lock()
 	ctrl.m = mux
+	ctrl.watchedServices = watchedServices
+	ctrl.watchedSecrets = watchedSecrets
 	ctrl.nameToCertificate = tlsConfig.NameToCertificate
 	ctrl.mu.Unlock()
 	ctrl.health.SetReady(true)
