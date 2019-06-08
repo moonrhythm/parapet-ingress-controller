@@ -32,5 +32,4 @@ func (d *debounce) Call() {
 
 	d.t.Stop()
 	d.t = time.AfterFunc(d.d, d.f)
-
 }

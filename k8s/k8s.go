@@ -17,6 +17,10 @@ func Init() error {
 	if err != nil {
 		return err
 	}
+	// var err error
+	// config := &rest.Config{
+	// 	Host: "127.0.0.1:8001",
+	// }
 	client, err = kubernetes.NewForConfig(config)
 	return err
 }

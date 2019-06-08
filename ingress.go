@@ -125,7 +125,7 @@ func (ctrl *Controller) Reload() {
 }
 
 func (ctrl *Controller) reloadDebounced() {
-	glog.Info("reload ingresses")
+	glog.Info("reload")
 
 	defer func() {
 		if err := recover(); err != nil {
@@ -137,18 +137,18 @@ func (ctrl *Controller) reloadDebounced() {
 	if err != nil {
 		glog.Error("can not get services;", err)
 	}
-	nameToService := make(map[string]*v1.Service)
+	nameToService := make(map[string]v1.Service)
 	for _, s := range services {
-		nameToService[s.Namespace+"/"+s.Name] = &s
+		nameToService[s.Namespace+"/"+s.Name] = s
 	}
 
 	secrets, err := k8s.GetSecrets(ctrl.watchNamespace)
 	if err != nil {
 		glog.Error("can not get secrets;", err)
 	}
-	nameToSecret := make(map[string]*v1.Secret)
+	nameToSecret := make(map[string]v1.Secret)
 	for _, s := range secrets {
-		nameToSecret[s.Namespace+"/"+s.Name] = &s
+		nameToSecret[s.Namespace+"/"+s.Name] = s
 	}
 
 	ingresses, err := k8s.GetIngresses(ctrl.watchNamespace)
@@ -198,8 +198,8 @@ func (ctrl *Controller) reloadDebounced() {
 				port := int(backend.ServicePort.IntVal)
 				if backend.ServicePort.Type == intstr.String {
 					key := ing.Namespace + "/" + backend.ServiceName
-					svc := nameToService[key]
-					if svc == nil {
+					svc, ok := nameToService[key]
+					if !ok {
 						glog.Errorf("service %s not found", key)
 						continue
 					}
@@ -214,7 +214,7 @@ func (ctrl *Controller) reloadDebounced() {
 						}
 					}
 					if port == 0 {
-						glog.Errorf("port %s on service %s not found", backend.ServiceName, key)
+						glog.Errorf("port %s on service %s not found", backend.ServicePort.StrVal, key)
 						continue
 					}
 
@@ -271,8 +271,8 @@ func (ctrl *Controller) reloadDebounced() {
 	// build certs
 	var certs []tls.Certificate
 	for key := range watchedSecrets {
-		s := nameToSecret[key]
-		if s == nil {
+		s, ok := nameToSecret[key]
+		if !ok {
 			continue
 		}
 		crt, key := s.Data["tls.crt"], s.Data["tls.key"]
