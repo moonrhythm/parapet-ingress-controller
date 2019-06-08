@@ -3,7 +3,6 @@ package metric
 import (
 	"net/http"
 	"strconv"
-	"sync"
 
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/logger"
@@ -18,23 +17,18 @@ func Requests() parapet.Middleware {
 var _promRequests promRequests
 
 type promRequests struct {
-	once sync.Once
-	vec  *prometheus.CounterVec
+	vec *prometheus.CounterVec
 }
 
-func (p *promRequests) init() {
-	p.once.Do(func() {
-		p.vec = prometheus.NewCounterVec(prometheus.CounterOpts{
-			Namespace: prom.Namespace,
-			Name:      "requests",
-		}, []string{"host", "status", "method", "ingress_name", "ingress_namespace"})
-		prom.Registry().MustRegister(p.vec)
-	})
+func init() {
+	_promRequests.vec = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "requests",
+	}, []string{"host", "status", "method", "ingress_name", "ingress_namespace"})
+	prom.Registry().MustRegister(_promRequests.vec)
 }
 
 func (p *promRequests) ServeHandler(h http.Handler) http.Handler {
-	p.init()
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+
+	"github.com/moonrhythm/parapet-ingress-controller/metric"
 )
 
 const bufferSize = 16 * 1024
@@ -74,6 +76,9 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+	if conn != nil {
+		conn = metric.BackendConnections(conn, addr)
 	}
 	return
 }
