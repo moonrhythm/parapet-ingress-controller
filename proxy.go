@@ -38,7 +38,6 @@ var proxy = &httputil.ReverseProxy{
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialContext,
-		MaxConnsPerHost:       200,
 		MaxIdleConnsPerHost:   64,
 		IdleConnTimeout:       10 * time.Minute,
 		ExpectContinueTimeout: time.Second,
@@ -65,7 +64,7 @@ var dialer = &net.Dialer{
 }
 
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
-	for i := 0; i < 15; i++ {
+	for i := 0; i < 30; i++ {
 		conn, err = dialer.DialContext(ctx, network, addr)
 		if err == nil || err == context.Canceled {
 			break
