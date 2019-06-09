@@ -36,7 +36,6 @@ var proxy = &httputil.ReverseProxy{
 	},
 	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
 	Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           dialContext,
 		MaxIdleConnsPerHost:   64,
 		IdleConnTimeout:       10 * time.Minute,
