@@ -1,5 +1,5 @@
 steps:
-- name: gcr.io/moonrhythm-containers/golang:1.12.5-alpine3.9
+- name: gcr.io/moonrhythm-containers/golang:1.12.6-alpine3.9
   args: [go, build, -o, parapet-ingress-controller, -ldflags, -w -s, -tags=cbrotli, ./cmd/parapet-ingress-controller]
   env:
   - GOOS=linux
