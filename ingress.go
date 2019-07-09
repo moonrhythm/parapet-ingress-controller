@@ -265,7 +265,15 @@ func (ctrl *Controller) reloadDebounced() {
 	// build routes
 	mux := http.NewServeMux()
 	for r, h := range routes {
-		mux.Handle(r, h)
+		func() {
+			defer func() {
+				err := recover()
+				if err != nil {
+					glog.Errorf("register handler at %s; %v", r, err)
+				}
+			}()
+			mux.Handle(r, h)
+		}()
 	}
 
 	// build certs
