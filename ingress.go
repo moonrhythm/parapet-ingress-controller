@@ -11,6 +11,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/healthz"
+	"github.com/moonrhythm/parapet/pkg/logger"
 	"gopkg.in/yaml.v2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -195,47 +196,62 @@ func (ctrl *Controller) reloadDebounced() {
 
 				var config backendConfig
 
-				port := int(backend.ServicePort.IntVal)
-				if backend.ServicePort.Type == intstr.String {
-					key := ing.Namespace + "/" + backend.ServiceName
-					svc, ok := nameToService[key]
-					if !ok {
-						glog.Errorf("service %s not found", key)
-						continue
-					}
-					watchedServices[key] = struct{}{}
+				svcKey := ing.Namespace + "/" + backend.ServiceName
+				svc, ok := nameToService[svcKey]
+				if !ok {
+					glog.Errorf("service %s not found", svcKey)
+					continue
+				}
+				watchedServices[svcKey] = struct{}{}
 
-					// TODO: support custom proto backend
+				// TODO: support custom proto backend
+
+				// find port
+				var (
+					portVal  int
+					portName string
+				)
+				if backend.ServicePort.Type == intstr.String {
+					portName = backend.ServicePort.StrVal
 
 					// find port number
 					for _, p := range svc.Spec.Ports {
 						if p.Name == backend.ServicePort.StrVal {
-							port = int(p.Port)
+							portVal = int(p.Port)
 						}
 					}
-					if port == 0 {
-						glog.Errorf("port %s on service %s not found", backend.ServicePort.StrVal, key)
+					if portVal == 0 {
+						glog.Errorf("port %s on service %s not found", backend.ServicePort.StrVal, svcKey)
 						continue
 					}
+				} else {
+					portVal = int(backend.ServicePort.IntVal)
 
-					if svc.Annotations != nil {
-						if a := svc.Annotations["parapet.moonrhythm.io/backend-config"]; a != "" {
-							var cfg map[string]backendConfig
-							err = yaml.Unmarshal([]byte(a), &cfg)
-							if err != nil {
-								glog.Errorf("can not parse backend-config from annotation;", err)
-							}
-							config = cfg[backend.ServicePort.StrVal]
+					// find port name
+					for _, p := range svc.Spec.Ports {
+						if p.Port == backend.ServicePort.IntVal {
+							portName = p.Name
 						}
 					}
 				}
-				if port <= 0 {
+
+				if svc.Annotations != nil {
+					if a := svc.Annotations["parapet.moonrhythm.io/backend-config"]; a != "" {
+						var cfg map[string]backendConfig
+						err = yaml.Unmarshal([]byte(a), &cfg)
+						if err != nil {
+							glog.Errorf("can not parse backend-config from annotation;", err)
+						}
+						config = cfg[portName]
+					}
+				}
+				if portVal <= 0 {
 					continue
 				}
 
 				src := strings.ToLower(rule.Host) + path
 				// service.namespace.svc.cluster.local:port
-				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, port)
+				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
 
@@ -246,6 +262,11 @@ func (ctrl *Controller) reloadDebounced() {
 					case "https":
 						r.URL.Scheme = "https"
 					}
+
+					ctx := r.Context()
+					logger.Set(ctx, "serviceType", string(svc.Spec.Type))
+					logger.Set(ctx, "serviceName", svc.Name)
+
 					proxy.ServeHTTP(w, r)
 				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)

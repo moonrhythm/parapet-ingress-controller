@@ -24,7 +24,7 @@ func init() {
 	_promRequests.vec = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "requests",
-	}, []string{"host", "status", "method", "ingress_name", "ingress_namespace"})
+	}, []string{"host", "status", "method", "ingress_name", "ingress_namespace", "service_type", "service_name"})
 	prom.Registry().MustRegister(_promRequests.vec)
 }
 
@@ -43,6 +43,8 @@ func (p *promRequests) ServeHandler(h http.Handler) http.Handler {
 			l["status"] = strconv.Itoa(nw.status)
 			l["ingress_name"], _ = logger.Get(ctx, "ingress").(string)
 			l["ingress_namespace"], _ = logger.Get(ctx, "namespace").(string)
+			l["service_type"], _ = logger.Get(ctx, "serviceType").(string)
+			l["service_name"], _ = logger.Get(ctx, "serviceName").(string)
 			counter, err := p.vec.GetMetricWith(l)
 			if err != nil {
 				return

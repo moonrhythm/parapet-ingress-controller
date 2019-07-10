@@ -76,7 +76,7 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 		}
 	}
 	if conn != nil {
-		conn = metric.BackendConnections(conn, addr)
+		conn = metric.BackendConnections(ctx, conn, addr)
 	}
 	return
 }
