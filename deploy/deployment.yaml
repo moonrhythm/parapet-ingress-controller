@@ -30,7 +30,7 @@ spec:
       serviceAccountName: parapet-ingress-controller
       containers:
       - name: parapet-ingress-controller
-        image: gcr.io/moonrhythm-containers/parapet-ingress-controller:v0.3.0
+        image: gcr.io/moonrhythm-containers/parapet-ingress-controller:v0.5.0
         imagePullPolicy: IfNotPresent
         env:
         - name: POD_NAMESPACE
