@@ -144,3 +144,16 @@ func UpstreamProtocol(ctx Context) {
 		})
 	}))
 }
+
+func UpstreamHost(ctx Context) {
+	host := ctx.Ingress.Annotations["parapet.moonrhythm.io/upstream-host"]
+	if host == "" {
+		return
+	}
+	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.Host = host
+			h.ServeHTTP(w, r)
+		})
+	}))
+}

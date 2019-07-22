@@ -50,6 +50,7 @@ func main() {
 	ctrl.Use(plugin.RateLimit)
 	ctrl.Use(plugin.BodyLimit)
 	ctrl.Use(plugin.UpstreamProtocol)
+	ctrl.Use(plugin.UpstreamHost)
 	go ctrl.Watch()
 
 	m := parapet.Middlewares{}
