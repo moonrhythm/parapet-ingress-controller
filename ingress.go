@@ -271,15 +271,15 @@ func (ctrl *Controller) reloadDebounced() {
 				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)
 			}
+		}
 
-			for _, t := range ing.Spec.TLS {
-				key := ing.Namespace + "/" + t.SecretName
-				if _, ok := nameToSecret[key]; !ok {
-					glog.Errorf("secret %s not found", key)
-					continue
-				}
-				watchedSecrets[key] = struct{}{}
+		for _, t := range ing.Spec.TLS {
+			key := ing.Namespace + "/" + t.SecretName
+			if _, ok := nameToSecret[key]; !ok {
+				glog.Errorf("secret %s not found", key)
+				continue
 			}
+			watchedSecrets[key] = struct{}{}
 		}
 	}
 
