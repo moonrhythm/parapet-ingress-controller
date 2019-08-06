@@ -51,6 +51,7 @@ func main() {
 	ctrl.Use(plugin.BodyLimit)
 	ctrl.Use(plugin.UpstreamProtocol)
 	ctrl.Use(plugin.UpstreamHost)
+	ctrl.Use(plugin.BasicAuth)
 	go ctrl.Watch()
 
 	m := parapet.Middlewares{}
