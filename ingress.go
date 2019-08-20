@@ -240,7 +240,7 @@ func (ctrl *Controller) reloadDebounced() {
 						var cfg map[string]backendConfig
 						err = yaml.Unmarshal([]byte(a), &cfg)
 						if err != nil {
-							glog.Errorf("can not parse backend-config from annotation;", err)
+							glog.Errorf("can not parse backend-config from annotation; %v", err)
 						}
 						config = cfg[portName]
 					}
