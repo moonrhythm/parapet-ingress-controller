@@ -119,7 +119,6 @@ func main() {
 			WaitBeforeShutdown: 15 * time.Second,
 			Handler:            http.NotFoundHandler(),
 			TLSConfig: &tls.Config{
-				MinVersion:               tls.VersionTLS10,
 				PreferServerCipherSuites: true,
 				Certificates:             []tls.Certificate{cert},
 				GetCertificate:           ctrl.GetCertificate,
