@@ -2,7 +2,7 @@ package k8s
 
 import (
 	"k8s.io/api/core/v1"
-	"k8s.io/api/extensions/v1beta1"
+	"k8s.io/api/networking/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
@@ -27,7 +27,7 @@ func Init() error {
 
 // WatchIngresses watches ingresses for given namespace
 func WatchIngresses(namespace string) (watch.Interface, error) {
-	return client.ExtensionsV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
+	return client.NetworkingV1beta1().Ingresses(namespace).Watch(metav1.ListOptions{})
 }
 
 // GetServices lists all service
@@ -46,7 +46,7 @@ func WatchServices(namespace string) (watch.Interface, error) {
 
 // GetIngresses lists all ingresses for given namespace
 func GetIngresses(namespace string) ([]v1beta1.Ingress, error) {
-	list, err := client.ExtensionsV1beta1().Ingresses(namespace).List(metav1.ListOptions{})
+	list, err := client.NetworkingV1beta1().Ingresses(namespace).List(metav1.ListOptions{})
 	if err != nil {
 		return nil, err
 	}

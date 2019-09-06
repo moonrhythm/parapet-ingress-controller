@@ -4,7 +4,7 @@ import (
 	"net/http"
 
 	"github.com/moonrhythm/parapet"
-	"k8s.io/api/extensions/v1beta1"
+	"k8s.io/api/networking/v1beta1"
 )
 
 // Plugin injects middleware or mutate router while reading ingress object
