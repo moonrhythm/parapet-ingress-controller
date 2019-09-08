@@ -126,6 +126,9 @@ func (conn *trackBackendConn) Read(b []byte) (n int, err error) {
 	if n > 0 {
 		_backendConnections.read(conn.addr, conn.namespace, conn.serviceType, conn.serviceName, conn.ingress, n)
 	}
+	if err != nil {
+		conn.trackClose()
+	}
 	return
 }
 
@@ -134,12 +137,19 @@ func (conn *trackBackendConn) Write(b []byte) (n int, err error) {
 	if n > 0 {
 		_backendConnections.write(conn.addr, conn.namespace, conn.serviceType, conn.serviceName, conn.ingress, n)
 	}
+	if err != nil {
+		conn.trackClose()
+	}
 	return
 }
 
-func (conn *trackBackendConn) Close() error {
+func (conn *trackBackendConn) trackClose() {
 	if atomic.CompareAndSwapInt32(&conn.closed, 0, 1) {
 		_backendConnections.dec(conn.addr, conn.namespace, conn.serviceType, conn.serviceName, conn.ingress)
 	}
+}
+
+func (conn *trackBackendConn) Close() error {
+	conn.trackClose()
 	return conn.Conn.Close()
 }
