@@ -127,7 +127,7 @@ func (ctrl *Controller) Watch() {
 
 	go watch("ingresses", k8s.WatchIngresses, nil, ctrl.Reload)
 	go watch("services", k8s.WatchServices, &ctrl.watchedServices, ctrl.Reload)
-	go watch("endpoints", k8s.WatchEndpoints, &ctrl.watchedServices, ctrl.Reload)
+	go watch("endpoints", k8s.WatchEndpoints, &ctrl.watchedServices, ctrl.reloadEndpoint)
 	go watch("secrets", k8s.WatchSecrets, &ctrl.watchedSecrets, ctrl.Reload)
 }
 
