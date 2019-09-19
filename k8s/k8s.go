@@ -66,3 +66,17 @@ func GetSecrets(namespace string) ([]v1.Secret, error) {
 func WatchSecrets(namespace string) (watch.Interface, error) {
 	return client.CoreV1().Secrets(namespace).Watch(metav1.ListOptions{})
 }
+
+// GetEndpoints lists all endpoints
+func GetEndpoints(namespace string) ([]v1.Endpoints, error) {
+	list, err := client.CoreV1().Endpoints(namespace).List(metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+// WatchEndpoints watches endpoints
+func WatchEndpoints(namespace string) (watch.Interface, error) {
+	return client.CoreV1().Endpoints(namespace).Watch(metav1.ListOptions{})
+}

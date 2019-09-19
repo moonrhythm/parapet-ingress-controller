@@ -4,8 +4,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang/glog"
@@ -32,11 +34,13 @@ type Controller struct {
 	watchedServices   map[string]struct{}
 	watchedSecrets    map[string]struct{}
 	nameToCertificate map[string]*tls.Certificate
+	endpoints         map[string]*rrlb
 
-	plugins        []plugin.Plugin
-	health         *healthz.Healthz
-	reload         *debounce
-	watchNamespace string
+	plugins                []plugin.Plugin
+	health                 *healthz.Healthz
+	reloadDebounce         *debounce
+	reloadEndpointDebounce *debounce
+	watchNamespace         string
 }
 
 // New creates new ingress controller
@@ -45,7 +49,8 @@ func New(watchNamespace string) *Controller {
 	ctrl.health = healthz.New()
 	ctrl.health.SetReady(false)
 	ctrl.watchNamespace = watchNamespace
-	ctrl.reload = newDebounce(ctrl.reloadDebounced, 100*time.Millisecond)
+	ctrl.reloadDebounce = newDebounce(ctrl.reloadDebounced, 300*time.Millisecond)
+	ctrl.reloadEndpointDebounce = newDebounce(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
 	return ctrl
 }
 
@@ -69,7 +74,12 @@ func (ctrl *Controller) ServeHandler(_ http.Handler) http.Handler {
 func (ctrl *Controller) Watch() {
 	ctrl.Reload()
 
-	watch := func(resourceType string, f func(namespace string) (watch.Interface, error), filter *map[string]struct{}) {
+	watch := func(
+		resourceType string,
+		f func(namespace string) (watch.Interface, error),
+		filter *map[string]struct{},
+		reload func(),
+	) {
 		for {
 			w, err := f(ctrl.watchNamespace)
 			if err != nil {
@@ -106,7 +116,7 @@ func (ctrl *Controller) Watch() {
 					}
 				}
 
-				ctrl.Reload()
+				reload()
 			}
 
 			// channel closed, retry watch again
@@ -115,14 +125,15 @@ func (ctrl *Controller) Watch() {
 		}
 	}
 
-	go watch("ingresses", k8s.WatchIngresses, nil)
-	go watch("services", k8s.WatchServices, &ctrl.watchedServices)
-	go watch("secrets", k8s.WatchSecrets, &ctrl.watchedSecrets)
+	go watch("ingresses", k8s.WatchIngresses, nil, ctrl.Reload)
+	go watch("services", k8s.WatchServices, &ctrl.watchedServices, ctrl.Reload)
+	go watch("endpoints", k8s.WatchEndpoints, &ctrl.watchedServices, ctrl.Reload)
+	go watch("secrets", k8s.WatchSecrets, &ctrl.watchedSecrets, ctrl.Reload)
 }
 
 // Reload reloads ingresses
 func (ctrl *Controller) Reload() {
-	ctrl.reload.Call()
+	ctrl.reloadDebounce.Call()
 }
 
 func (ctrl *Controller) reloadDebounced() {
@@ -250,10 +261,15 @@ func (ctrl *Controller) reloadDebounced() {
 				}
 
 				src := strings.ToLower(rule.Host) + path
+				portStr := strconv.Itoa(portVal)
 				// service.namespace.svc.cluster.local:port
-				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
+				target := fmt.Sprintf("%s.%s.svc.cluster.local:%s", backend.ServiceName, ing.Namespace, portStr)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					r.URL.Host = target
+					if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
+						r.URL.Host = addr + ":" + portStr
+					} else {
+						r.URL.Host = target
+					}
 
 					// TODO: add support h2c
 					switch config.Protocol {
@@ -266,6 +282,7 @@ func (ctrl *Controller) reloadDebounced() {
 					ctx := r.Context()
 					logger.Set(ctx, "serviceType", string(svc.Spec.Type))
 					logger.Set(ctx, "serviceName", svc.Name)
+					logger.Set(ctx, "serviceTarget", r.URL.Host)
 
 					proxy.ServeHTTP(w, r)
 				}))
@@ -322,6 +339,56 @@ func (ctrl *Controller) reloadDebounced() {
 	ctrl.nameToCertificate = tlsConfig.NameToCertificate
 	ctrl.mu.Unlock()
 	ctrl.health.SetReady(true)
+	ctrl.reloadEndpoint()
+}
+
+func (ctrl *Controller) reloadEndpoint() {
+	ctrl.reloadEndpointDebounce.Call()
+}
+
+func (ctrl *Controller) reloadEndpointDebounced() {
+	glog.Info("reload endpoints")
+
+	endpoints, err := k8s.GetEndpoints(ctrl.watchNamespace)
+	if err != nil {
+		glog.Error("can not get endpoints;", err)
+		return
+	}
+
+	lbs := make(map[string]*rrlb)
+	for _, ep := range endpoints {
+		if len(ep.Subsets) == 0 {
+			continue
+		}
+
+		var b rrlb
+		for _, ss := range ep.Subsets {
+			for _, addr := range ss.Addresses {
+				b.IPs = append(b.IPs, addr.IP)
+			}
+		}
+		lbs[ep.Namespace+"/"+ep.Name] = &b
+	}
+
+	ctrl.mu.Lock()
+	ctrl.endpoints = lbs
+	ctrl.mu.Unlock()
+}
+
+func (ctrl *Controller) resolveAddr(namespace, name string) string {
+	ctrl.mu.RLock()
+	lbs := ctrl.endpoints
+	ctrl.mu.RUnlock()
+
+	if lbs == nil {
+		return ""
+	}
+
+	lb, _ := lbs[namespace+"/"+name]
+	if lb == nil {
+		return ""
+	}
+	return lb.Get()
 }
 
 // GetCertificate returns certificate for given client hello information
@@ -362,4 +429,20 @@ func (ctrl *Controller) Healthz() parapet.Middleware {
 
 type backendConfig struct {
 	Protocol string `json:"protocol" yaml:"protocol"`
+}
+
+type rrlb struct {
+	IPs     []string
+	current uint32
+}
+
+func (lb *rrlb) Get() string {
+	l := len(lb.IPs)
+	if l == 0 {
+		return ""
+	}
+
+	p := atomic.AddUint32(&lb.current, 1)
+	i := int(p) % l
+	return lb.IPs[i]
 }
