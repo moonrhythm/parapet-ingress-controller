@@ -101,19 +101,25 @@ func (ctrl *Controller) Watch() {
 						meta = &obj.ObjectMeta
 					case *v1.Secret:
 						meta = &obj.ObjectMeta
+					case *v1.Endpoints:
+						meta = &obj.ObjectMeta
 					}
-					if meta != nil {
-						key := meta.Namespace + "/" + meta.Name
-						ctrl.mu.RLock()
-						var ok bool
-						if *filter != nil {
-							_, ok = (*filter)[key]
-						}
-						ctrl.mu.RUnlock()
-						if !ok {
-							continue
-						}
+					if meta == nil {
+						continue
 					}
+
+					key := meta.Namespace + "/" + meta.Name
+					ctrl.mu.RLock()
+					var ok bool
+					if *filter != nil {
+						_, ok = (*filter)[key]
+					}
+					ctrl.mu.RUnlock()
+					if !ok {
+						continue
+					}
+
+					glog.Infof("reload because %s %s/%s changed", resourceType, meta.Namespace, meta.Name)
 				}
 
 				reload()
@@ -219,8 +225,9 @@ func (ctrl *Controller) reloadDebounced() {
 
 				// find port
 				var (
-					portVal  int
-					portName string
+					portVal       int
+					portName      string
+					portTargetVal int
 				)
 				if backend.ServicePort.Type == intstr.String {
 					portName = backend.ServicePort.StrVal
@@ -229,6 +236,7 @@ func (ctrl *Controller) reloadDebounced() {
 					for _, p := range svc.Spec.Ports {
 						if p.Name == backend.ServicePort.StrVal {
 							portVal = int(p.Port)
+							portTargetVal = int(p.TargetPort.IntVal)
 						}
 					}
 					if portVal == 0 {
@@ -261,14 +269,16 @@ func (ctrl *Controller) reloadDebounced() {
 				}
 
 				src := strings.ToLower(rule.Host) + path
-				portStr := strconv.Itoa(portVal)
+				portTargetValStr := strconv.Itoa(portTargetVal)
 				// service.namespace.svc.cluster.local:port
-				target := fmt.Sprintf("%s.%s.svc.cluster.local:%s", backend.ServiceName, ing.Namespace, portStr)
+				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
-						r.URL.Host = addr + ":" + portStr
-					} else {
-						r.URL.Host = target
+					r.URL.Host = target
+
+					if portTargetVal > 0 {
+						if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
+							r.URL.Host = addr + ":" + portTargetValStr
+						}
 					}
 
 					// TODO: add support h2c
