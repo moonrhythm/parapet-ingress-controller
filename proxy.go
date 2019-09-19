@@ -57,14 +57,23 @@ var proxy = &httputil.ReverseProxy{
 	},
 }
 
+type ctxKeyResolver struct{}
+
+type resolver func() string
+
 var dialer = &net.Dialer{
 	Timeout:   2 * time.Second,
 	KeepAlive: time.Minute,
 }
 
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
+	resolver, _ := ctx.Value(ctxKeyResolver{}).(resolver)
+	if resolver == nil {
+		resolver = func() string { return addr }
+	}
+
 	for i := 0; i < 30; i++ {
-		conn, err = dialer.DialContext(ctx, network, addr)
+		conn, err = dialer.DialContext(ctx, network, resolver())
 		if err == nil || err == context.Canceled {
 			break
 		}

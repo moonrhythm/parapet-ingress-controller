@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -276,12 +277,6 @@ func (ctrl *Controller) reloadDebounced() {
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
 
-					if portTargetVal > 0 {
-						if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
-							r.URL.Host = addr + ":" + portTargetValStr
-						}
-					}
-
 					// TODO: add support h2c
 					switch config.Protocol {
 					case "http":
@@ -291,6 +286,16 @@ func (ctrl *Controller) reloadDebounced() {
 					}
 
 					ctx := r.Context()
+
+					if portTargetVal > 0 {
+						ctx = context.WithValue(ctx, ctxKeyResolver{}, func() string {
+							if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
+								return addr + ":" + portTargetValStr
+							}
+							return target
+						})
+					}
+
 					logger.Set(ctx, "serviceType", string(svc.Spec.Type))
 					logger.Set(ctx, "serviceName", svc.Name)
 					logger.Set(ctx, "serviceTarget", r.URL.Host)
@@ -303,11 +308,11 @@ func (ctrl *Controller) reloadDebounced() {
 
 		for _, t := range ing.Spec.TLS {
 			key := ing.Namespace + "/" + t.SecretName
+			watchedSecrets[key] = struct{}{} // watch not exists secret
 			if _, ok := nameToSecret[key]; !ok {
 				glog.Errorf("secret %s not found", key)
 				continue
 			}
-			watchedSecrets[key] = struct{}{}
 		}
 	}
 
