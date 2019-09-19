@@ -286,19 +286,18 @@ func (ctrl *Controller) reloadDebounced() {
 					}
 
 					ctx := r.Context()
+					logger.Set(ctx, "serviceType", string(svc.Spec.Type))
+					logger.Set(ctx, "serviceName", svc.Name)
 
 					if portTargetVal > 0 {
-						ctx = context.WithValue(ctx, ctxKeyResolver{}, func() string {
+						ctx = context.WithValue(ctx, ctxKeyResolver{}, resolver(func() string {
 							if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
 								return addr + ":" + portTargetValStr
 							}
 							return target
-						})
+						}))
+						r = r.WithContext(ctx)
 					}
-
-					logger.Set(ctx, "serviceType", string(svc.Spec.Type))
-					logger.Set(ctx, "serviceName", svc.Name)
-					logger.Set(ctx, "serviceTarget", r.URL.Host)
 
 					proxy.ServeHTTP(w, r)
 				}))
@@ -456,6 +455,9 @@ func (lb *rrlb) Get() string {
 	l := len(lb.IPs)
 	if l == 0 {
 		return ""
+	}
+	if l == 1 {
+		return lb.IPs[0]
 	}
 
 	p := atomic.AddUint32(&lb.current, 1)
