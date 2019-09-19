@@ -214,12 +214,13 @@ func (ctrl *Controller) reloadDebounced() {
 				var config backendConfig
 
 				svcKey := ing.Namespace + "/" + backend.ServiceName
+				watchedServices[svcKey] = struct{}{} // service may create later
+
 				svc, ok := nameToService[svcKey]
 				if !ok {
 					glog.Errorf("service %s not found", svcKey)
 					continue
 				}
-				watchedServices[svcKey] = struct{}{}
 
 				// TODO: support custom proto backend
 
