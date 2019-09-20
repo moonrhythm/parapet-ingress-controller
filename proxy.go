@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/moonrhythm/parapet/pkg/logger"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 )
@@ -58,24 +57,14 @@ var proxy = &httputil.ReverseProxy{
 	},
 }
 
-type ctxKeyResolver struct{}
-
-type resolver func() string
-
 var dialer = &net.Dialer{
 	Timeout:   2 * time.Second,
 	KeepAlive: time.Minute,
 }
 
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
-	resolver, _ := ctx.Value(ctxKeyResolver{}).(resolver)
-	if resolver == nil {
-		resolver = func() string { return addr }
-	}
-
 	for i := 0; i < 30; i++ {
-		resolveAddr := resolver()
-		conn, err = dialer.DialContext(ctx, network, resolveAddr)
+		conn, err = dialer.DialContext(ctx, network, addr)
 		if err == nil || err == context.Canceled {
 			break
 		}
@@ -85,7 +74,6 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		logger.Set(ctx, "endpoint", resolveAddr)
 	}
 	if conn != nil {
 		conn = metric.BackendConnections(ctx, conn, addr)

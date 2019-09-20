@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -276,6 +275,11 @@ func (ctrl *Controller) reloadDebounced() {
 				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
+					if portTargetVal > 0 {
+						if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
+							r.URL.Host = addr + ":" + portTargetValStr
+						}
+					}
 
 					// TODO: add support h2c
 					switch config.Protocol {
@@ -288,16 +292,7 @@ func (ctrl *Controller) reloadDebounced() {
 					ctx := r.Context()
 					logger.Set(ctx, "serviceType", string(svc.Spec.Type))
 					logger.Set(ctx, "serviceName", svc.Name)
-
-					if portTargetVal > 0 {
-						ctx = context.WithValue(ctx, ctxKeyResolver{}, resolver(func() string {
-							if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
-								return addr + ":" + portTargetValStr
-							}
-							return target
-						}))
-						r = r.WithContext(ctx)
-					}
+					logger.Set(ctx, "serviceTarget", r.URL.Host)
 
 					proxy.ServeHTTP(w, r)
 				}))
