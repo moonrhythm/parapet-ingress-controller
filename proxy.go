@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -53,8 +54,23 @@ var proxy = &httputil.ReverseProxy{
 		}
 
 		glog.Warning(err)
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		var retry *errRetryable
+		if errors.As(err, &retry) {
+			panic(err)
+		}
 	},
+}
+
+type errRetryable struct {
+	err error
+}
+
+func (err *errRetryable) Error() string {
+	return err.err.Error()
+}
+
+func (err *errRetryable) Unwrap() error {
+	return err.err
 }
 
 var dialer = &net.Dialer{
@@ -63,22 +79,34 @@ var dialer = &net.Dialer{
 }
 
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
-	for i := 0; i < 30; i++ {
-		conn, err = dialer.DialContext(ctx, network, addr)
-		if err == nil || err == context.Canceled {
-			break
-		}
-
-		select {
-		case <-time.After(backoffDuration(i)):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	conn, err = dialer.DialContext(ctx, network, addr)
+	if err == context.Canceled {
+		return
 	}
-	if conn != nil {
-		conn = metric.BackendConnections(ctx, conn, addr)
+	if err != nil {
+		err = &errRetryable{err}
+		return
 	}
+	conn = metric.BackendConnections(ctx, conn, addr)
 	return
+
+	// for i := 0; i < 30; i++ {
+	// 	conn, err = dialer.DialContext(ctx, network, addr)
+	// 	if err == nil || err == context.Canceled {
+	// 		break
+	// 	}
+	// 	panic(err)
+	//
+	// 	select {
+	// 	case <-time.After(backoffDuration(i)):
+	// 	case <-ctx.Done():
+	// 		return nil, ctx.Err()
+	// 	}
+	// }
+	// if conn != nil {
+	// 	conn = metric.BackendConnections(ctx, conn, addr)
+	// }
+	// return
 }
 
 func backoffDuration(round int) time.Duration {

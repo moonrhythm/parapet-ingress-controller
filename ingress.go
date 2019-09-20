@@ -273,6 +273,7 @@ func (ctrl *Controller) reloadDebounced() {
 				portTargetValStr := strconv.Itoa(portTargetVal)
 				// service.namespace.svc.cluster.local:port
 				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
+				h.Use(parapet.MiddlewareFunc(panicRetry))
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
 					if portTargetVal > 0 {
@@ -358,6 +359,12 @@ func (ctrl *Controller) reloadEndpoint() {
 
 func (ctrl *Controller) reloadEndpointDebounced() {
 	glog.Info("reload endpoints")
+
+	defer func() {
+		if err := recover(); err != nil {
+			glog.Error(err)
+		}
+	}()
 
 	endpoints, err := k8s.GetEndpoints(ctrl.watchNamespace)
 	if err != nil {
@@ -458,4 +465,29 @@ func (lb *rrlb) Get() string {
 	p := atomic.AddUint32(&lb.current, 1)
 	i := int(p) % l
 	return lb.IPs[i]
+}
+
+func panicRetry(h http.Handler) http.Handler {
+	f := func(w http.ResponseWriter, r *http.Request, i int) (done bool) {
+		defer func() {
+			if e := recover(); e != nil {
+				select {
+				case <-time.After(backoffDuration(i)):
+				case <-r.Context().Done():
+					done = true
+				}
+			}
+		}()
+		h.ServeHTTP(w, r)
+		return true
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < 30; i++ {
+			if f(w, r, i) {
+				return
+			}
+		}
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	})
 }
