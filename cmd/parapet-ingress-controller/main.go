@@ -116,7 +116,7 @@ func main() {
 			IdleTimeout:        320 * time.Second,
 			TCPKeepAlivePeriod: 1 * time.Minute,
 			GraceTimeout:       1 * time.Minute,
-			WaitBeforeShutdown: 15 * time.Second,
+			WaitBeforeShutdown: 30 * time.Second,
 			Handler:            http.NotFoundHandler(),
 			TLSConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
