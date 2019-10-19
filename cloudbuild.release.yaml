@@ -1,6 +1,14 @@
 steps:
 - name: gcr.io/moonrhythm-containers/golang:1.13.3-alpine3.10
-  args: [go, build, -o, parapet-ingress-controller, -ldflags, -w -s, -tags=cbrotli, ./cmd/parapet-ingress-controller]
+  args:
+  - go
+  - build
+  - -o
+  - parapet-ingress-controller
+  - -ldflags
+  - -w -s -X main.version=$TAG_NAME
+  - -tags=cbrotli
+  - ./cmd/parapet-ingress-controller
   env:
   - GOOS=linux
   - GOARCH=amd64

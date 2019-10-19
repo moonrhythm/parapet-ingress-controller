@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"cloud.google.com/go/profiler"
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
@@ -20,6 +21,8 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 )
 
+var version = "HEAD"
+
 func main() {
 	flag.Parse()
 
@@ -27,12 +30,28 @@ func main() {
 	httpsPort := config.StringDefault("HTTPS_PORT", "443")
 	podNamespace := config.String("POD_NAMESPACE")
 	watchNamespace := config.StringDefault("WATCH_NAMESPACE", "")
+	enableProfiler := config.Bool("PROFILER")
+	hostname, _ := os.Hostname()
 
 	glog.Infoln("parapet-ingress-controller")
+	glog.Infoln("version:", version)
+	glog.Infoln("hostname:", hostname)
 	glog.Infoln("http_port:", httpPort)
 	glog.Infoln("https_port:", httpsPort)
 	glog.Infoln("pod_namespace:", podNamespace)
 	glog.Infoln("watch_namespace:", watchNamespace)
+	glog.Infoln("profiler:", enableProfiler)
+
+	if enableProfiler {
+		err := profiler.Start(profiler.Config{
+			Service:        "parapet-ingress-controller",
+			ServiceVersion: version,
+			Instance:       hostname,
+		})
+		if err != nil {
+			glog.Errorf("can not start profiler: %v", err)
+		}
+	}
 
 	err := k8s.Init()
 	if err != nil {

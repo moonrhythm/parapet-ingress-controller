@@ -3,6 +3,7 @@ module github.com/moonrhythm/parapet-ingress-controller
 go 1.13
 
 require (
+	cloud.google.com/go v0.37.4
 	github.com/acoshift/configfile v1.5.1
 	github.com/gogo/protobuf v1.3.1 // indirect
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
