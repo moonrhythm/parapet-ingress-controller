@@ -83,7 +83,7 @@ func main() {
 			IdleTimeout:        60 * time.Second,
 			TCPKeepAlivePeriod: 1 * time.Minute,
 			GraceTimeout:       1 * time.Minute,
-			WaitBeforeShutdown: 15 * time.Second,
+			WaitBeforeShutdown: 30 * time.Second,
 			Handler:            http.NotFoundHandler(),
 		}
 		prom.Connections(s)
