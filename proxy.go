@@ -58,6 +58,7 @@ var proxy = &httputil.ReverseProxy{
 		if errors.As(err, &retry) {
 			panic(err)
 		}
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	},
 }
 
