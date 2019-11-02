@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"net/http"
@@ -273,14 +274,15 @@ func (ctrl *Controller) reloadDebounced() {
 				portTargetValStr := strconv.Itoa(portTargetVal)
 				// service.namespace.svc.cluster.local:port
 				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
-				h.Use(parapet.MiddlewareFunc(panicRetry))
+				// h.Use(parapet.MiddlewareFunc(panicRetry))
+				resolve := func() string {
+					if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
+						return addr + ":" + portTargetValStr
+					}
+					return ""
+				}
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
-					if portTargetVal > 0 {
-						if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
-							r.URL.Host = addr + ":" + portTargetValStr
-						}
-					}
 
 					// TODO: add support h2c
 					switch config.Protocol {
@@ -295,7 +297,11 @@ func (ctrl *Controller) reloadDebounced() {
 					logger.Set(ctx, "serviceName", svc.Name)
 					logger.Set(ctx, "serviceTarget", r.URL.Host)
 
-					proxy.ServeHTTP(w, r)
+					if portTargetVal > 0 {
+						ctx = context.WithValue(ctx, ctxKeyResolver{}, resolve)
+					}
+
+					proxy.ServeHTTP(w, r.WithContext(ctx))
 				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)
 			}
@@ -467,27 +473,27 @@ func (lb *rrlb) Get() string {
 	return lb.IPs[i]
 }
 
-func panicRetry(h http.Handler) http.Handler {
-	f := func(w http.ResponseWriter, r *http.Request, i int) (done bool) {
-		defer func() {
-			if e := recover(); e != nil {
-				select {
-				case <-time.After(backoffDuration(i)):
-				case <-r.Context().Done():
-					done = true
-				}
-			}
-		}()
-		h.ServeHTTP(w, r)
-		return true
-	}
-
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for i := 0; i < 30; i++ {
-			if f(w, r, i) {
-				return
-			}
-		}
-		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-	})
-}
+// func panicRetry(h http.Handler) http.Handler {
+// 	f := func(w http.ResponseWriter, r *http.Request, i int) (done bool) {
+// 		defer func() {
+// 			if e := recover(); e != nil {
+// 				select {
+// 				case <-time.After(backoffDuration(i)):
+// 				case <-r.Context().Done():
+// 					done = true
+// 				}
+// 			}
+// 		}()
+// 		h.ServeHTTP(w, r)
+// 		return true
+// 	}
+//
+// 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// 		for i := 0; i < 30; i++ {
+// 			if f(w, r, i) {
+// 				return
+// 			}
+// 		}
+// 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+// 	})
+// }
