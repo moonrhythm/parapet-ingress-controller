@@ -275,7 +275,7 @@ func (ctrl *Controller) reloadDebounced() {
 				// service.namespace.svc.cluster.local:port
 				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
 				// h.Use(parapet.MiddlewareFunc(panicRetry))
-				resolve := func() string {
+				var resolve resolver = func() string {
 					if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
 						return addr + ":" + portTargetValStr
 					}

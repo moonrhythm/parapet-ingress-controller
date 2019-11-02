@@ -102,8 +102,7 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 	for i := 0; i < 30; i++ {
 		dialAddr = addr
 		if resolve != nil {
-			resolveAddr := resolve()
-			if resolveAddr != "" {
+			if resolveAddr := resolve(); resolveAddr != "" {
 				dialAddr = resolveAddr
 			}
 		}
