@@ -14,7 +14,6 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/healthz"
-	"github.com/moonrhythm/parapet/pkg/logger"
 	"gopkg.in/yaml.v2"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
+	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
 // IngressClass to load ingresses
@@ -293,9 +293,10 @@ func (ctrl *Controller) reloadDebounced() {
 					}
 
 					ctx := r.Context()
-					logger.Set(ctx, "serviceType", string(svc.Spec.Type))
-					logger.Set(ctx, "serviceName", svc.Name)
-					logger.Set(ctx, "serviceTarget", r.URL.Host)
+					s := state.Get(ctx)
+					s["serviceType"] = string(svc.Spec.Type)
+					s["serviceName"] = svc.Name
+					s["serviceTarget"] = r.URL.Host
 
 					if portTargetVal > 0 {
 						ctx = context.WithValue(ctx, ctxKeyResolver{}, resolve)

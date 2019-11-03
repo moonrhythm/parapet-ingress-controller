@@ -19,6 +19,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
+	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
 var version = "HEAD"
@@ -31,6 +32,7 @@ func main() {
 	podNamespace := config.String("POD_NAMESPACE")
 	watchNamespace := config.StringDefault("WATCH_NAMESPACE", "")
 	enableProfiler := config.Bool("PROFILER")
+	disableLog := config.Bool("DISABLE_LOG")
 	hostname, _ := os.Hostname()
 
 	glog.Infoln("parapet-ingress-controller")
@@ -62,7 +64,7 @@ func main() {
 	go prom.Start(":9187")
 
 	ctrl := controller.New(watchNamespace)
-	ctrl.Use(plugin.InjectLogIngress)
+	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.RedirectHTTPS)
 	ctrl.Use(plugin.InjectHSTS)
 	ctrl.Use(plugin.RedirectRules)
@@ -76,7 +78,10 @@ func main() {
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
 	m.Use(parapet.MiddlewareFunc(lowerCaseHost))
-	m.Use(logger.Stdout())
+	if !disableLog {
+		m.Use(logger.Stdout())
+	}
+	m.Use(state.Middleware())
 	m.Use(metric.Requests())
 	m.Use(compress.Gzip())
 	m.Use(compress.Br())

@@ -7,9 +7,10 @@ import (
 	"strconv"
 
 	"github.com/moonrhythm/parapet"
-	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
 func Requests() parapet.Middleware {
@@ -42,11 +43,12 @@ func (p *promRequests) ServeHandler(h http.Handler) http.Handler {
 			ResponseWriter: w,
 		}
 		defer func() {
+			s := state.Get(ctx)
 			l["status"] = strconv.Itoa(nw.status)
-			l["ingress_name"], _ = logger.Get(ctx, "ingress").(string)
-			l["ingress_namespace"], _ = logger.Get(ctx, "namespace").(string)
-			l["service_type"], _ = logger.Get(ctx, "serviceType").(string)
-			l["service_name"], _ = logger.Get(ctx, "serviceName").(string)
+			l["ingress_name"], _ = s["ingress"].(string)
+			l["ingress_namespace"], _ = s["namespace"].(string)
+			l["service_type"], _ = s["serviceType"].(string)
+			l["service_name"], _ = s["serviceName"].(string)
 			counter, err := p.vec.GetMetricWith(l)
 			if err != nil {
 				return

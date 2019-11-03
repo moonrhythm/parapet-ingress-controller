@@ -10,20 +10,22 @@ import (
 	"github.com/moonrhythm/parapet/pkg/authn"
 	"github.com/moonrhythm/parapet/pkg/body"
 	"github.com/moonrhythm/parapet/pkg/hsts"
-	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"gopkg.in/yaml.v2"
+
+	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
-// InjectLogIngress injects ingress name and namespace to log
-func InjectLogIngress(ctx Context) {
+// InjectStateIngress injects ingress name and namespace to state
+func InjectStateIngress(ctx Context) {
 	namespace := ctx.Ingress.Namespace
 	name := ctx.Ingress.Name
 	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
-			logger.Set(ctx, "namespace", namespace)
-			logger.Set(ctx, "ingress", name)
+			s := state.Get(ctx)
+			s["namespace"] = namespace
+			s["ingress"] = name
 			h.ServeHTTP(w, r)
 		})
 	}))

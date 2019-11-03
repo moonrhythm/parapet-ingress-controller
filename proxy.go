@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/moonrhythm/parapet/pkg/logger"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 )
@@ -121,7 +120,6 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 	if err != nil {
 		return nil, err
 	}
-	logger.Set(ctx, "serviceTarget", dialAddr)
 	conn = metric.BackendConnections(ctx, conn, dialAddr)
 	return
 }

@@ -5,9 +5,10 @@ import (
 	"net"
 	"sync/atomic"
 
-	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
 type backendConnections struct {
@@ -94,10 +95,11 @@ func (p *backendConnections) write(addr string, namespace, serviceType, serviceN
 
 // BackendConnections collects backend connection metrics
 func BackendConnections(ctx context.Context, conn net.Conn, addr string) net.Conn {
-	serviceType, _ := logger.Get(ctx, "serviceType").(string)
-	serviceName, _ := logger.Get(ctx, "serviceName").(string)
-	namespace, _ := logger.Get(ctx, "namespace").(string)
-	ingress, _ := logger.Get(ctx, "ingress").(string)
+	s := state.Get(ctx)
+	serviceType, _ := s["serviceType"].(string)
+	serviceName, _ := s["serviceName"].(string)
+	namespace, _ := s["namespace"].(string)
+	ingress, _ := s["ingress"].(string)
 
 	_backendConnections.inc(addr, namespace, serviceType, serviceName, ingress)
 
