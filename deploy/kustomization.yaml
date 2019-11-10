@@ -1,8 +1,0 @@
-commonLabels:
-  app: parapet-ingress-controller
-resources:
-- service-account.yaml
-- role.yaml
-- role-binding.yaml
-- deployment.yaml
-- service.yaml

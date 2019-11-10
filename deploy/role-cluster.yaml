@@ -1,0 +1,38 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: parapet-ingress-controller
+  labels:
+    app: parapet-ingress-controller
+rules:
+- apiGroups:
+  - networking.k8s.io
+  resources:
+  - ingresses
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources:
+  - services
+  - secrets
+  - endpoints
+  verbs:
+  - list
+  - watch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: parapet-ingress-controller
+  labels:
+    app: parapet-ingress-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: parapet-ingress-controller
+subjects:
+- kind: ServiceAccount
+  name: parapet-ingress-controller
+  namespace: parapet-ingress-controller
