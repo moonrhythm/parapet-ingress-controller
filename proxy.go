@@ -53,25 +53,9 @@ var proxy = &httputil.ReverseProxy{
 		}
 
 		glog.Warning(err)
-		// var retry *errRetryable
-		// if errors.As(err, &retry) {
-		// 	panic(err)
-		// }
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	},
 }
-
-// type errRetryable struct {
-// 	err error
-// }
-//
-// func (err *errRetryable) Error() string {
-// 	return err.err.Error()
-// }
-//
-// func (err *errRetryable) Unwrap() error {
-// 	return err.err
-// }
 
 var dialer = &net.Dialer{
 	Timeout:   2 * time.Second,
@@ -84,17 +68,6 @@ type (
 )
 
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
-	// conn, err = dialer.DialContext(ctx, network, addr)
-	// if err == context.Canceled {
-	// 	return
-	// }
-	// if err != nil {
-	// 	err = &errRetryable{err}
-	// 	return
-	// }
-	// conn = metric.BackendConnections(ctx, conn, addr)
-	// return
-
 	resolve, _ := ctx.Value(ctxKeyResolver{}).(resolver)
 	var dialAddr string
 
@@ -124,9 +97,12 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 	return
 }
 
-func backoffDuration(round int) time.Duration {
-	if round <= 6 {
-		return time.Duration(1<<uint(round)) * 10 * time.Millisecond
+const maxBackoffDuration = 3 * time.Second
+
+func backoffDuration(round int) (t time.Duration) {
+	t = time.Duration(1<<uint(round)) * 10 * time.Millisecond
+	if t > maxBackoffDuration {
+		t = maxBackoffDuration
 	}
-	return time.Second
+	return
 }

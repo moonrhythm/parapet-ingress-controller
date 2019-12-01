@@ -155,25 +155,28 @@ func (ctrl *Controller) reloadDebounced() {
 	services, err := k8s.GetServices(ctrl.watchNamespace)
 	if err != nil {
 		glog.Error("can not get services;", err)
-	}
-	nameToService := make(map[string]v1.Service)
-	for _, s := range services {
-		nameToService[s.Namespace+"/"+s.Name] = s
+		return
 	}
 
 	secrets, err := k8s.GetSecrets(ctrl.watchNamespace)
 	if err != nil {
 		glog.Error("can not get secrets;", err)
-	}
-	nameToSecret := make(map[string]v1.Secret)
-	for _, s := range secrets {
-		nameToSecret[s.Namespace+"/"+s.Name] = s
+		return
 	}
 
 	ingresses, err := k8s.GetIngresses(ctrl.watchNamespace)
 	if err != nil {
 		glog.Error("can not get ingresses;", err)
 		return
+	}
+
+	nameToService := make(map[string]v1.Service)
+	for _, s := range services {
+		nameToService[s.Namespace+"/"+s.Name] = s
+	}
+	nameToSecret := make(map[string]v1.Secret)
+	for _, s := range secrets {
+		nameToSecret[s.Namespace+"/"+s.Name] = s
 	}
 
 	routes := make(map[string]http.Handler)
@@ -274,7 +277,6 @@ func (ctrl *Controller) reloadDebounced() {
 				portTargetValStr := strconv.Itoa(portTargetVal)
 				// service.namespace.svc.cluster.local:port
 				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
-				// h.Use(parapet.MiddlewareFunc(panicRetry))
 				var resolve resolver = func() string {
 					if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
 						return addr + ":" + portTargetValStr
@@ -473,28 +475,3 @@ func (lb *rrlb) Get() string {
 	i := int(p) % l
 	return lb.IPs[i]
 }
-
-// func panicRetry(h http.Handler) http.Handler {
-// 	f := func(w http.ResponseWriter, r *http.Request, i int) (done bool) {
-// 		defer func() {
-// 			if e := recover(); e != nil {
-// 				select {
-// 				case <-time.After(backoffDuration(i)):
-// 				case <-r.Context().Done():
-// 					done = true
-// 				}
-// 			}
-// 		}()
-// 		h.ServeHTTP(w, r)
-// 		return true
-// 	}
-//
-// 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-// 		for i := 0; i < 30; i++ {
-// 			if f(w, r, i) {
-// 				return
-// 			}
-// 		}
-// 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
-// 	})
-// }
