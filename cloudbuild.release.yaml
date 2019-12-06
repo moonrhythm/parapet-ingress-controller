@@ -1,5 +1,5 @@
 steps:
-- name: gcr.io/moonrhythm-containers/golang:1.13.4-alpine3.10
+- name: gcr.io/moonrhythm-containers/golang:1.13.5-alpine3.10
   args:
   - go
   - build
@@ -13,7 +13,6 @@ steps:
   - GOOS=linux
   - GOARCH=amd64
   - CGO_ENABLED=1
-  - GOPROXY=https://proxy.golang.org
 - name: gcr.io/cloud-builders/docker
   args: [build, -t, gcr.io/$PROJECT_ID/parapet-ingress-controller, '.']
 - name: gcr.io/cloud-builders/docker
