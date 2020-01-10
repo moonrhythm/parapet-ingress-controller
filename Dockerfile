@@ -1,4 +1,4 @@
-FROM gcr.io/moonrhythm-containers/alpine:3.10
+FROM gcr.io/moonrhythm-containers/alpine:3.11
 
 RUN mkdir -p /app
 WORKDIR /app
