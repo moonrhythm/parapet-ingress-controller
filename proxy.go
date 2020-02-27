@@ -33,7 +33,6 @@ var proxy = &httputil.ReverseProxy{
 		if _, ok := req.Header["User-Agent"]; !ok {
 			req.Header.Set("User-Agent", "")
 		}
-		req.RemoteAddr = ""
 	},
 	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
 	Transport: &http.Transport{

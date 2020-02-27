@@ -304,7 +304,9 @@ func (ctrl *Controller) reloadDebounced() {
 						ctx = context.WithValue(ctx, ctxKeyResolver{}, resolve)
 					}
 
-					proxy.ServeHTTP(w, r.WithContext(ctx))
+					nr := r.WithContext(ctx)
+					nr.RemoteAddr = ""
+					proxy.ServeHTTP(w, nr)
 				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)
 			}
