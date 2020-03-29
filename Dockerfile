@@ -1,4 +1,8 @@
-FROM gcr.io/moonrhythm-containers/alpine:3.11
+FROM debian:buster-slim
+
+RUN apt update && apt install -y \
+	brotli \
+	&& rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /app
 WORKDIR /app
