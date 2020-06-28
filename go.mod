@@ -9,6 +9,7 @@ require (
 	github.com/lucas-clemente/quic-go v0.17.1
 	github.com/moonrhythm/parapet v0.9.1
 	github.com/prometheus/client_golang v1.6.0
+	golang.org/x/sync v0.0.0-20200317015054-43a5402ce75a
 	gopkg.in/yaml.v2 v2.3.0
 	k8s.io/api v0.18.3
 	k8s.io/apimachinery v0.18.3

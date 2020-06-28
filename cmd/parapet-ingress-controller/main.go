@@ -15,6 +15,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/compress"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
+	"golang.org/x/sync/errgroup"
 
 	controller "github.com/moonrhythm/parapet-ingress-controller"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
@@ -77,6 +78,30 @@ func main() {
 	ctrl.Use(plugin.BasicAuth)
 	go ctrl.Watch()
 
+	cert, err := parapet.GenerateSelfSignCertificate(parapet.SelfSign{
+		CommonName: "parapet-ingress-controller",
+	})
+	if err != nil {
+		glog.Fatal(err)
+		os.Exit(1)
+	}
+
+	http3Server := &http3.Server{
+		Server: &http.Server{
+			Addr: ":" + httpsPort,
+			TLSConfig: &tls.Config{
+				MinVersion: tls.VersionTLS13,
+				CurvePreferences: []tls.CurveID{
+					tls.X25519,
+					tls.CurveP256,
+				},
+				PreferServerCipherSuites: true,
+				Certificates:             []tls.Certificate{cert},
+				GetCertificate:           ctrl.GetCertificate,
+			},
+		},
+	}
+
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
 	m.Use(parapet.MiddlewareFunc(lowerCaseHost))
@@ -87,6 +112,14 @@ func main() {
 	m.Use(metric.Requests())
 	m.Use(compress.Gzip())
 	m.Use(compress.Br())
+	if enableHTTP3 {
+		m.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http3Server.SetQuicHeaders(w.Header())
+				h.ServeHTTP(w, r)
+			})
+		}))
+	}
 	m.Use(ctrl)
 
 	var trustProxy parapet.Conditional
@@ -101,13 +134,9 @@ func main() {
 		}
 	}
 
-	cert, err := parapet.GenerateSelfSignCertificate(parapet.SelfSign{
-		CommonName: "parapet-ingress-controller",
-	})
-	if err != nil {
-		glog.Fatal(err)
-		os.Exit(1)
-	}
+	http3Server.Handler = m.ServeHandler(http.NotFoundHandler())
+
+	eg := errgroup.Group{}
 
 	// http
 	{
@@ -125,40 +154,12 @@ func main() {
 
 		s.Use(m)
 
-		go func() {
-			err := s.ListenAndServe()
-			if err != nil {
-				glog.Fatal(err)
-				os.Exit(1)
-			}
-		}()
+		eg.Go(s.ListenAndServe)
 	}
 
 	// http3 - experiment
 	if enableHTTP3 {
-		s := &http3.Server{
-			Server: &http.Server{
-				Addr: ":" + httpsPort,
-				TLSConfig: &tls.Config{
-					MinVersion: tls.VersionTLS13,
-					CurvePreferences: []tls.CurveID{
-						tls.X25519,
-						tls.CurveP256,
-					},
-					PreferServerCipherSuites: true,
-					Certificates:             []tls.Certificate{cert},
-					GetCertificate:           ctrl.GetCertificate,
-				},
-				Handler: m.ServeHandler(http.NotFoundHandler()),
-			},
-		}
-		go func() {
-			err := s.ListenAndServe()
-			if err != nil {
-				glog.Fatal(err)
-				os.Exit(1)
-			}
-		}()
+		eg.Go(http3Server.ListenAndServe)
 	}
 
 	// https
@@ -195,11 +196,13 @@ func main() {
 
 		s.Use(m)
 
-		err = s.ListenAndServe()
-		if err != nil {
-			glog.Fatal(err)
-			os.Exit(1)
-		}
+		eg.Go(s.ListenAndServe)
+	}
+
+	err = eg.Wait()
+	if err != nil {
+		glog.Fatal(err)
+		os.Exit(1)
 	}
 }
 
