@@ -10,6 +10,7 @@ import (
 
 	"cloud.google.com/go/profiler"
 	"github.com/golang/glog"
+	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
 	"github.com/moonrhythm/parapet/pkg/logger"
@@ -33,6 +34,7 @@ func main() {
 	watchNamespace := config.StringDefault("WATCH_NAMESPACE", "")
 	enableProfiler := config.Bool("PROFILER")
 	disableLog := config.Bool("DISABLE_LOG")
+	enableHTTP3 := config.Bool("HTTP3")
 	hostname, _ := os.Hostname()
 
 	glog.Infoln("parapet-ingress-controller")
@@ -99,6 +101,14 @@ func main() {
 		}
 	}
 
+	cert, err := parapet.GenerateSelfSignCertificate(parapet.SelfSign{
+		CommonName: "parapet-ingress-controller",
+	})
+	if err != nil {
+		glog.Fatal(err)
+		os.Exit(1)
+	}
+
 	// http
 	{
 		s := &parapet.Server{
@@ -124,16 +134,35 @@ func main() {
 		}()
 	}
 
+	// http3 - experiment
+	if enableHTTP3 {
+		s := &http3.Server{
+			Server: &http.Server{
+				Addr: ":" + httpsPort,
+				TLSConfig: &tls.Config{
+					MinVersion: tls.VersionTLS13,
+					CurvePreferences: []tls.CurveID{
+						tls.X25519,
+						tls.CurveP256,
+					},
+					PreferServerCipherSuites: true,
+					Certificates:             []tls.Certificate{cert},
+					GetCertificate:           ctrl.GetCertificate,
+				},
+				Handler: m.ServeHandler(http.NotFoundHandler()),
+			},
+		}
+		go func() {
+			err := s.ListenAndServe()
+			if err != nil {
+				glog.Fatal(err)
+				os.Exit(1)
+			}
+		}()
+	}
+
 	// https
 	{
-		cert, err := parapet.GenerateSelfSignCertificate(parapet.SelfSign{
-			CommonName: "parapet-ingress-controller",
-		})
-		if err != nil {
-			glog.Fatal(err)
-			os.Exit(1)
-		}
-
 		s := &parapet.Server{
 			Addr:               ":" + httpsPort,
 			TrustProxy:         trustProxy,
