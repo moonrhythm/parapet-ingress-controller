@@ -1,7 +1,9 @@
 package k8s
 
 import (
-	"k8s.io/api/core/v1"
+	"os"
+
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/api/networking/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -13,14 +15,22 @@ var client *kubernetes.Clientset
 
 // Init inits k8s client
 func Init() error {
-	config, err := rest.InClusterConfig()
-	if err != nil {
-		return err
+	var (
+		config *rest.Config
+		err    error
+	)
+
+	if os.Getenv("KUBERNETES_LOCAL") == "true" {
+		config = &rest.Config{
+			Host: "127.0.0.1:8001",
+		}
+	} else {
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			return err
+		}
 	}
-	// var err error
-	// config := &rest.Config{
-	// 	Host: "127.0.0.1:8001",
-	// }
+
 	client, err = kubernetes.NewForConfig(config)
 	return err
 }

@@ -65,6 +65,7 @@ func main() {
 
 	ctrl := controller.New(watchNamespace)
 	ctrl.Use(plugin.InjectStateIngress)
+	ctrl.Use(plugin.AllowRemote)
 	ctrl.Use(plugin.RedirectHTTPS)
 	ctrl.Use(plugin.InjectHSTS)
 	ctrl.Use(plugin.RedirectRules)
