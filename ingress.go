@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
+	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
@@ -149,25 +150,25 @@ func (ctrl *Controller) reloadDebounced() {
 	defer func() {
 		if err := recover(); err != nil {
 			glog.Error(err)
+			metric.Reload(false)
+			return
 		}
+		metric.Reload(true)
 	}()
 
 	services, err := k8s.GetServices(ctrl.watchNamespace)
 	if err != nil {
-		glog.Error("can not get services;", err)
-		return
+		panic(fmt.Errorf("can not get services; %w", err))
 	}
 
 	secrets, err := k8s.GetSecrets(ctrl.watchNamespace)
 	if err != nil {
-		glog.Error("can not get secrets;", err)
-		return
+		panic(fmt.Errorf("can not get secrets; %w", err))
 	}
 
 	ingresses, err := k8s.GetIngresses(ctrl.watchNamespace)
 	if err != nil {
-		glog.Error("can not get ingresses;", err)
-		return
+		panic(fmt.Errorf("can not get ingresses; %w", err))
 	}
 
 	nameToService := make(map[string]v1.Service)
