@@ -1,4 +1,6 @@
-FROM gcr.io/moonrhythm-containers/alpine:3.12
+FROM alpine:3.12
+
+RUN apk add --no-cache ca-certificates tzdata brotli
 
 RUN mkdir -p /app
 WORKDIR /app
