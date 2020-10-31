@@ -13,6 +13,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/body"
 	"github.com/moonrhythm/parapet/pkg/hsts"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
+	"github.com/moonrhythm/parapet/pkg/stripprefix"
 	"gopkg.in/yaml.v2"
 	"k8s.io/api/networking/v1beta1"
 
@@ -232,4 +233,14 @@ func AllowRemote(ctx Context) {
 	}))
 
 	ctx.Use(m)
+}
+
+// StripPrefix strip prefix request path
+func StripPrefix(ctx Context) {
+	prefix := ctx.Ingress.Annotations["parapet.moonrhythm.io/strip-prefix"]
+	if prefix == "" {
+		return
+	}
+
+	ctx.Use(stripprefix.New(prefix))
 }
