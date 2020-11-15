@@ -92,14 +92,14 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 		}
 	}
 	if err != nil {
-		glog.Errorf("proxy: can not connect to %s (retry=%d, err=%v)", dialAddr, i, err)
+		glog.Errorf("can not connect to %s (addr=%s, retry=%d, err=%v)", addr, dialAddr, i, err)
 		return nil, err
 	}
 
 	if i == 0 {
-		glog.Infof("proxy: connected to %s", dialAddr)
+		glog.Infof("connected to %s (addr=%s)", addr, dialAddr)
 	} else {
-		glog.Warningf("proxy: connected to %s (retry=%d)", dialAddr, i)
+		glog.Warningf("connected to %s (addr=%s, retry=%d)", addr, dialAddr, i)
 	}
 
 	conn = metric.BackendConnections(ctx, conn, dialAddr)
