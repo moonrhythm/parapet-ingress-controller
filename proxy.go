@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -50,6 +51,12 @@ var proxy = &httputil.ReverseProxy{
 		if err == context.Canceled {
 			// client canceled request
 			w.WriteHeader(499)
+			return
+		}
+
+		var netOpError *net.OpError
+		if errors.As(err, &netOpError) && netOpError.Op == "dial" {
+			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
