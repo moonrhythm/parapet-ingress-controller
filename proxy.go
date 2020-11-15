@@ -71,7 +71,8 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 	resolve, _ := ctx.Value(ctxKeyResolver{}).(resolver)
 	var dialAddr string
 
-	for i := 0; i < 30; i++ {
+	var i int
+	for i = 0; i < 30; i++ {
 		dialAddr = addr
 		if resolve != nil {
 			if resolveAddr := resolve(); resolveAddr != "" {
@@ -91,8 +92,16 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 		}
 	}
 	if err != nil {
+		glog.Errorf("proxy: can not connect to %s (retry=%d, err=%v)", dialAddr, i, err)
 		return nil, err
 	}
+
+	if i == 0 {
+		glog.Infof("proxy: connected to %s", dialAddr)
+	} else {
+		glog.Warningf("proxy: connected to %s (retry=%d)", dialAddr, i)
+	}
+
 	conn = metric.BackendConnections(ctx, conn, dialAddr)
 	return
 }
