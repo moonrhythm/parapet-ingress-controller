@@ -49,6 +49,7 @@ var proxy = &httputil.ReverseProxy{
 	ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 		if err == context.Canceled {
 			// client canceled request
+			w.WriteHeader(499)
 			return
 		}
 
