@@ -14,7 +14,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/hsts"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"github.com/moonrhythm/parapet/pkg/stripprefix"
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 	"k8s.io/api/networking/v1beta1"
 
 	"github.com/moonrhythm/parapet-ingress-controller/state"
