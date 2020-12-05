@@ -19,6 +19,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/stripprefix"
 	sdpropagation "go.opencensus.io/exporter/stackdriver/propagation"
 	"go.opencensus.io/plugin/ochttp"
+	"go.opencensus.io/plugin/ochttp/propagation/b3"
 	"go.opencensus.io/trace"
 	octrace "go.opencensus.io/trace"
 	"gopkg.in/yaml.v3"
@@ -291,7 +292,10 @@ func (exp *splitExporter) FormatSpanName(r *http.Request) string {
 	return proto + "://" + r.Host + r.RequestURI
 }
 
-var exporter splitExporter
+var (
+	exporter     splitExporter
+	b3HTTPFormat b3.HTTPFormat
+)
 
 func OperationsTrace(ctx Context) {
 	enable := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace"]
@@ -304,9 +308,12 @@ func OperationsTrace(ctx Context) {
 		return
 	}
 
-	sampler, _ := strconv.ParseFloat(ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace-sampler"], 64)
-	if sampler <= 0 {
-		return
+	var sampler float64 = 1
+	if s := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace-sampler"]; s != "" {
+		sampler, _ = strconv.ParseFloat(s, 64)
+		if sampler <= 0 {
+			return
+		}
 	}
 
 	exp, err := stackdriver.NewExporter(stackdriver.Options{
@@ -325,6 +332,7 @@ func OperationsTrace(ctx Context) {
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				span := trace.FromContext(r.Context())
 				span.AddAttributes(trace.StringAttribute("__parapet_exporter_id", exporterID))
+				b3HTTPFormat.SpanContextToRequest(span.SpanContext(), r)
 
 				h.ServeHTTP(w, r)
 			}),
