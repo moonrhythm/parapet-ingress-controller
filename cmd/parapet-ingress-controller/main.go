@@ -75,6 +75,7 @@ func main() {
 	ctrl.Use(plugin.UpstreamHost)
 	ctrl.Use(plugin.BasicAuth)
 	ctrl.Use(plugin.StripPrefix)
+	ctrl.Use(plugin.OperationsTrace)
 	go ctrl.Watch()
 
 	m := parapet.Middlewares{}
