@@ -294,7 +294,16 @@ func (exp *splitExporter) FormatSpanName(r *http.Request) string {
 var exporter splitExporter
 
 func OperationsTrace(ctx Context) {
+	enable := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace"]
+	if enable != "true" {
+		return
+	}
+
 	projectID := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace-project"]
+	if projectID == "" {
+		return
+	}
+
 	sampler, _ := strconv.ParseFloat(ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace-sampler"], 64)
 	if sampler <= 0 {
 		return
