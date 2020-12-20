@@ -2,6 +2,7 @@ package metric
 
 import (
 	"context"
+	"github.com/golang/glog"
 	"net"
 	"sync/atomic"
 
@@ -129,7 +130,7 @@ func (conn *trackBackendConn) Read(b []byte) (n int, err error) {
 		_backendConnections.read(conn.addr, conn.namespace, conn.serviceType, conn.serviceName, conn.ingress, n)
 	}
 	if err != nil {
-		conn.trackClose()
+		conn.trackClose(err)
 	}
 	return
 }
@@ -140,18 +141,19 @@ func (conn *trackBackendConn) Write(b []byte) (n int, err error) {
 		_backendConnections.write(conn.addr, conn.namespace, conn.serviceType, conn.serviceName, conn.ingress, n)
 	}
 	if err != nil {
-		conn.trackClose()
+		conn.trackClose(err)
 	}
 	return
 }
 
-func (conn *trackBackendConn) trackClose() {
+func (conn *trackBackendConn) trackClose(err error) {
 	if atomic.CompareAndSwapInt32(&conn.closed, 0, 1) {
+		glog.Infof("close connection (namespace=%s, service=%s, addr=%s, err=%s)", conn.namespace, conn.serviceName, conn.addr, err)
 		_backendConnections.dec(conn.addr, conn.namespace, conn.serviceType, conn.serviceName, conn.ingress)
 	}
 }
 
 func (conn *trackBackendConn) Close() error {
-	conn.trackClose()
+	conn.trackClose(nil)
 	return conn.Conn.Close()
 }
