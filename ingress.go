@@ -78,12 +78,12 @@ func (ctrl *Controller) Watch() {
 
 	watch := func(
 		resourceType string,
-		f func(namespace string) (watch.Interface, error),
+		f func(ctx context.Context, namespace string) (watch.Interface, error),
 		filter *map[string]struct{},
 		reload func(),
 	) {
 		for {
-			w, err := f(ctrl.watchNamespace)
+			w, err := f(context.Background(), ctrl.watchNamespace)
 			if err != nil {
 				glog.Errorf("can not watch %s; %v", resourceType, err)
 				time.Sleep(5 * time.Second)
@@ -156,17 +156,19 @@ func (ctrl *Controller) reloadDebounced() {
 		metric.Reload(true)
 	}()
 
-	services, err := k8s.GetServices(ctrl.watchNamespace)
+	ctx := context.Background()
+
+	services, err := k8s.GetServices(ctx, ctrl.watchNamespace)
 	if err != nil {
 		panic(fmt.Errorf("can not get services; %w", err))
 	}
 
-	secrets, err := k8s.GetSecrets(ctrl.watchNamespace)
+	secrets, err := k8s.GetSecrets(ctx, ctrl.watchNamespace)
 	if err != nil {
 		panic(fmt.Errorf("can not get secrets; %w", err))
 	}
 
-	ingresses, err := k8s.GetIngresses(ctrl.watchNamespace)
+	ingresses, err := k8s.GetIngresses(ctx, ctrl.watchNamespace)
 	if err != nil {
 		panic(fmt.Errorf("can not get ingresses; %w", err))
 	}
@@ -378,7 +380,9 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		}
 	}()
 
-	endpoints, err := k8s.GetEndpoints(ctrl.watchNamespace)
+	ctx := context.Background()
+
+	endpoints, err := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
 	if err != nil {
 		glog.Error("can not get endpoints;", err)
 		return
