@@ -55,13 +55,14 @@ var proxy = &httputil.ReverseProxy{
 			return
 		}
 
+		glog.Warningf("upstream error (err=%v)", err)
+
 		var netOpError *net.OpError
 		if errors.As(err, &netOpError) && netOpError.Op == "dial" {
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 			return
 		}
 
-		glog.Warning(err)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	},
 }
@@ -101,14 +102,14 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 		}
 	}
 	if err != nil {
-		glog.Errorf("can not connect to %s (addr=%s, retry=%d, err=%v)", addr, dialAddr, i, err)
+		glog.Errorf("can not connect (addr=%s, dial=%s, retry=%d, err=%v)", addr, dialAddr, i, err)
 		return nil, err
 	}
 
 	if i == 0 {
-		glog.Infof("connected to %s (addr=%s)", addr, dialAddr)
+		glog.Infof("connected (addr=%s, dial=%s)", addr, dialAddr)
 	} else {
-		glog.Warningf("connected to %s (addr=%s, retry=%d)", addr, dialAddr, i)
+		glog.Warningf("connected (addr=%s, dial=%s, retry=%d)", addr, dialAddr, i)
 	}
 
 	conn = metric.BackendConnections(ctx, conn, dialAddr)

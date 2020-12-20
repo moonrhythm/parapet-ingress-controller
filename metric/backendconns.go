@@ -148,7 +148,7 @@ func (conn *trackBackendConn) Write(b []byte) (n int, err error) {
 
 func (conn *trackBackendConn) trackClose(err error) {
 	if atomic.CompareAndSwapInt32(&conn.closed, 0, 1) {
-		glog.Infof("close connection (namespace=%s, service=%s, addr=%s, err=%s)", conn.namespace, conn.serviceName, conn.addr, err)
+		glog.Infof("close connection (namespace=%s, service=%s, addr=%s, err=%v)", conn.namespace, conn.serviceName, conn.addr, err)
 		_backendConnections.dec(conn.addr, conn.namespace, conn.serviceType, conn.serviceName, conn.ingress)
 	}
 }
