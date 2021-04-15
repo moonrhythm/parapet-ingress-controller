@@ -2,10 +2,10 @@ package metric
 
 import (
 	"context"
-	"github.com/golang/glog"
 	"net"
 	"sync/atomic"
 
+	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
 
