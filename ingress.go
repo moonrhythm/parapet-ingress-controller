@@ -387,7 +387,7 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 				b.IPs = append(b.IPs, addr.IP)
 			}
 		}
-		routes[buildHost(ep.Namespace, ep.Namespace)] = &b
+		routes[buildHost(ep.Namespace, ep.Name)] = &b
 	}
 
 	globalRouteTable.SetHostRoute(routes)

@@ -52,12 +52,17 @@ func (t *routeTable) Lookup(addr string) string {
 		return addr
 	}
 
+	hostIP := targetHost.Get()
+	if hostIP == "" {
+		return addr
+	}
+
 	targetPort, ok := portTable[addr]
 	if !ok {
 		return addr
 	}
 
-	return fmt.Sprintf("%s:%s", targetHost.Get(), targetPort)
+	return fmt.Sprintf("%s:%s", hostIP, targetPort)
 }
 
 func (t *routeTable) SetHostRoute(routes map[string]*rrlb) {
