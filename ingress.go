@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/golang/glog"
@@ -36,7 +35,6 @@ type Controller struct {
 	watchedServices   map[string]struct{}
 	watchedSecrets    map[string]struct{}
 	nameToCertificate map[string]*tls.Certificate
-	endpoints         map[string]*rrlb
 
 	plugins                []plugin.Plugin
 	health                 *healthz.Healthz
@@ -173,9 +171,17 @@ func (ctrl *Controller) reloadDebounced() {
 		panic(fmt.Errorf("can not get ingresses; %w", err))
 	}
 
+	addrToPort := make(map[string]string)
 	nameToService := make(map[string]v1.Service)
 	for _, s := range services {
 		nameToService[s.Namespace+"/"+s.Name] = s
+
+		// build route target port
+		for _, p := range s.Spec.Ports {
+			addr := buildHostPort(s.Namespace, s.Name, int(p.Port))
+			target := strconv.Itoa(int(p.TargetPort.IntVal))
+			addrToPort[addr] = target
+		}
 	}
 	nameToSecret := make(map[string]v1.Secret)
 	for _, s := range secrets {
@@ -231,9 +237,8 @@ func (ctrl *Controller) reloadDebounced() {
 
 				// find port
 				var (
-					portVal       int
-					portName      string
-					portTargetVal int
+					portVal  int
+					portName string
 				)
 				if backend.ServicePort.Type == intstr.String {
 					portName = backend.ServicePort.StrVal
@@ -242,7 +247,6 @@ func (ctrl *Controller) reloadDebounced() {
 					for _, p := range svc.Spec.Ports {
 						if p.Name == backend.ServicePort.StrVal {
 							portVal = int(p.Port)
-							portTargetVal = int(p.TargetPort.IntVal)
 						}
 					}
 					if portVal == 0 {
@@ -275,15 +279,7 @@ func (ctrl *Controller) reloadDebounced() {
 				}
 
 				src := strings.ToLower(rule.Host) + path
-				portTargetValStr := strconv.Itoa(portTargetVal)
-				// service.namespace.svc.cluster.local:port
-				target := fmt.Sprintf("%s.%s.svc.cluster.local:%d", backend.ServiceName, ing.Namespace, portVal)
-				var resolve resolver = func() string {
-					if addr := ctrl.resolveAddr(svc.Namespace, svc.Name); addr != "" {
-						return addr + ":" + portTargetValStr
-					}
-					return ""
-				}
+				target := buildHostPort(ing.Namespace, backend.ServiceName, portVal)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
 
@@ -296,10 +292,6 @@ func (ctrl *Controller) reloadDebounced() {
 					s["serviceType"] = string(svc.Spec.Type)
 					s["serviceName"] = svc.Name
 					s["serviceTarget"] = r.URL.Host
-
-					if portTargetVal > 0 {
-						ctx = context.WithValue(ctx, ctxKeyResolver{}, resolve)
-					}
 
 					nr := r.WithContext(ctx)
 					nr.RemoteAddr = ""
@@ -356,6 +348,7 @@ func (ctrl *Controller) reloadDebounced() {
 	ctrl.watchedServices = watchedServices
 	ctrl.watchedSecrets = watchedSecrets
 	ctrl.nameToCertificate = tlsConfig.NameToCertificate
+	globalRouteTable.SetPortRoute(addrToPort)
 	ctrl.mu.Unlock()
 	ctrl.health.SetReady(true)
 	ctrl.reloadEndpoint()
@@ -382,7 +375,7 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		return
 	}
 
-	lbs := make(map[string]*rrlb)
+	routes := make(map[string]*rrlb)
 	for _, ep := range endpoints {
 		if len(ep.Subsets) == 0 {
 			continue
@@ -394,28 +387,10 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 				b.IPs = append(b.IPs, addr.IP)
 			}
 		}
-		lbs[ep.Namespace+"/"+ep.Name] = &b
+		routes[buildHost(ep.Namespace, ep.Namespace)] = &b
 	}
 
-	ctrl.mu.Lock()
-	ctrl.endpoints = lbs
-	ctrl.mu.Unlock()
-}
-
-func (ctrl *Controller) resolveAddr(namespace, name string) string {
-	ctrl.mu.RLock()
-	lbs := ctrl.endpoints
-	ctrl.mu.RUnlock()
-
-	if lbs == nil {
-		return ""
-	}
-
-	lb, _ := lbs[namespace+"/"+name]
-	if lb == nil {
-		return ""
-	}
-	return lb.Get()
+	globalRouteTable.SetHostRoute(routes)
 }
 
 // GetCertificate returns certificate for given client hello information
@@ -455,24 +430,16 @@ func (ctrl *Controller) Healthz() parapet.Middleware {
 }
 
 type backendConfig struct {
+	// TODO: migrate to k8s native's service.ports.appProtocol ?
 	Protocol string `json:"protocol" yaml:"protocol"`
 }
 
-type rrlb struct {
-	IPs     []string
-	current uint32
+func buildHost(namespace, name string) string {
+	// service.namespace.svc.cluster.local
+	return fmt.Sprintf("%s.%s.svc.cluster.local", name, namespace)
 }
 
-func (lb *rrlb) Get() string {
-	l := len(lb.IPs)
-	if l == 0 {
-		return ""
-	}
-	if l == 1 {
-		return lb.IPs[0]
-	}
-
-	p := atomic.AddUint32(&lb.current, 1)
-	i := int(p) % l
-	return lb.IPs[i]
+func buildHostPort(namespace, name string, port int) string {
+	// service.namespace.svc.cluster.local:port
+	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, port)
 }

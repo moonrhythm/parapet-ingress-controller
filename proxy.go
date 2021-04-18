@@ -57,6 +57,7 @@ var h2cTransport = &_h2cTransport{
 		AllowHTTP:          true,
 		DisableCompression: true,
 		DialTLS: func(network, addr string, _ *tls.Config) (net.Conn, error) {
+			// TODO: how to pass state (from parent context) to dialContext, we can not add detail to track backend connection
 			return dialContext(context.Background(), network, addr)
 		},
 	},
@@ -108,23 +109,12 @@ var dialer = &net.Dialer{
 	KeepAlive: time.Minute,
 }
 
-type (
-	ctxKeyResolver struct{}
-	resolver       func() string
-)
-
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
-	resolve, _ := ctx.Value(ctxKeyResolver{}).(resolver)
 	var dialAddr string
 
 	var i int
 	for i = 0; i < 30; i++ {
-		dialAddr = addr
-		if resolve != nil {
-			if resolveAddr := resolve(); resolveAddr != "" {
-				dialAddr = resolveAddr
-			}
-		}
+		dialAddr = globalRouteTable.Lookup(addr)
 
 		conn, err = dialer.DialContext(ctx, network, dialAddr)
 		if err == nil || err == context.Canceled {
