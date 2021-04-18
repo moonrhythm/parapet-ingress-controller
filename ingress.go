@@ -207,6 +207,7 @@ func (ctrl *Controller) reloadDebounced() {
 				Ingress:     &ing,
 			})
 		}
+		h.Use(parapet.MiddlewareFunc(retryMiddleware))
 
 		if ing.Spec.Backend != nil {
 			glog.Warning("ingress spec.backend not support")
@@ -281,8 +282,6 @@ func (ctrl *Controller) reloadDebounced() {
 				src := strings.ToLower(rule.Host) + path
 				target := buildHostPort(ing.Namespace, backend.ServiceName, portVal)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					r.URL.Host = target
-
 					if config.Protocol != "" {
 						r.URL.Scheme = config.Protocol
 					}
@@ -295,8 +294,10 @@ func (ctrl *Controller) reloadDebounced() {
 
 					nr := r.WithContext(ctx)
 					nr.RemoteAddr = ""
+					nr.URL.Host = globalRouteTable.Lookup(target)
 					proxy.ServeHTTP(w, nr)
 				}))
+
 				glog.V(1).Infof("registered: %s => %s", src, target)
 			}
 		}

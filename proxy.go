@@ -93,14 +93,22 @@ var proxy = &httputil.ReverseProxy{
 
 		glog.Warningf("upstream error (err=%v)", err)
 
-		var netOpError *net.OpError
-		if errors.As(err, &netOpError) && netOpError.Op == "dial" {
-			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-			return
+		if isDialError(err) {
+			// lets handler retry
+			panic(err)
 		}
 
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	},
+}
+
+func isDialError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var netOpError *net.OpError
+	return errors.As(err, &netOpError) && netOpError.Op == "dial"
 }
 
 var dialer = &net.Dialer{
@@ -109,44 +117,14 @@ var dialer = &net.Dialer{
 }
 
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
-	var dialAddr string
-
-	var i int
-	for i = 0; i < 30; i++ {
-		dialAddr = globalRouteTable.Lookup(addr)
-
-		conn, err = dialer.DialContext(ctx, network, dialAddr)
-		if err == nil || err == context.Canceled {
-			break
-		}
-
-		select {
-		case <-time.After(backoffDuration(i)):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
+	conn, err = dialer.DialContext(ctx, network, addr)
 	if err != nil {
-		glog.Errorf("can not connect (addr=%s, dial=%s, retry=%d, err=%v)", addr, dialAddr, i, err)
-		return nil, err
+		glog.Errorf("can not connect (addr=%s, err=%v)", addr, err)
+		return
 	}
 
-	if i == 0 {
-		glog.Infof("connected (addr=%s, dial=%s)", addr, dialAddr)
-	} else {
-		glog.Warningf("connected (addr=%s, dial=%s, retry=%d)", addr, dialAddr, i)
-	}
+	glog.Infof("connected (addr=%s)", addr)
 
-	conn = metric.BackendConnections(conn, dialAddr)
-	return
-}
-
-const maxBackoffDuration = 3 * time.Second
-
-func backoffDuration(round int) (t time.Duration) {
-	t = time.Duration(1<<uint(round)) * 10 * time.Millisecond
-	if t > maxBackoffDuration {
-		t = maxBackoffDuration
-	}
+	conn = metric.BackendConnections(conn, addr)
 	return
 }
