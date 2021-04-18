@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
+	"github.com/moonrhythm/parapet/pkg/upstream"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 )
@@ -29,6 +30,35 @@ func (p *bufferPool) Put(b []byte) {
 	p.Pool.Put(b)
 }
 
+// TODO: make Transport configurable
+var httpTransport = &http.Transport{
+	DialContext:           dialContext,
+	MaxIdleConnsPerHost:   1000,
+	IdleConnTimeout:       10 * time.Minute,
+	ExpectContinueTimeout: time.Second,
+	DisableCompression:    true,
+	ResponseHeaderTimeout: 5 * time.Minute,
+	TLSClientConfig: &tls.Config{
+		InsecureSkipVerify: true,
+	},
+}
+
+var h2cTransport = &upstream.H2CTransport{}
+
+type transportGateway struct{}
+
+func (transportGateway) RoundTrip(r *http.Request) (*http.Response, error) {
+	var tr http.RoundTripper
+	switch r.URL.Scheme {
+	default:
+		tr = httpTransport
+	case "h2c":
+		tr = h2cTransport
+	}
+
+	return tr.RoundTrip(r)
+}
+
 var proxy = &httputil.ReverseProxy{
 	Director: func(req *http.Request) {
 		if _, ok := req.Header["User-Agent"]; !ok {
@@ -36,18 +66,7 @@ var proxy = &httputil.ReverseProxy{
 		}
 	},
 	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
-	// TODO: make Transport configurable
-	Transport: &http.Transport{
-		DialContext:           dialContext,
-		MaxIdleConnsPerHost:   1000,
-		IdleConnTimeout:       10 * time.Minute,
-		ExpectContinueTimeout: time.Second,
-		DisableCompression:    true,
-		ResponseHeaderTimeout: 5 * time.Minute,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-	},
+	Transport:  transportGateway{},
 	ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 		if err == context.Canceled {
 			// client canceled request

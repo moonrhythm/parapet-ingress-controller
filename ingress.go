@@ -229,8 +229,6 @@ func (ctrl *Controller) reloadDebounced() {
 					continue
 				}
 
-				// TODO: support custom proto backend
-
 				// find port
 				var (
 					portVal       int
@@ -289,12 +287,8 @@ func (ctrl *Controller) reloadDebounced() {
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					r.URL.Host = target
 
-					// TODO: add support h2c
-					switch config.Protocol {
-					case "http":
-						r.URL.Scheme = "http"
-					case "https":
-						r.URL.Scheme = "https"
+					if config.Protocol != "" {
+						r.URL.Scheme = config.Protocol
 					}
 
 					ctx := r.Context()
