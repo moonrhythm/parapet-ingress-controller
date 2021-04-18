@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/golang/glog"
-	"github.com/moonrhythm/parapet/pkg/upstream"
+	"golang.org/x/net/http2"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 )
@@ -43,7 +43,24 @@ var httpTransport = &http.Transport{
 	},
 }
 
-var h2cTransport = &upstream.H2CTransport{}
+type _h2cTransport struct {
+	*http2.Transport
+}
+
+func (t *_h2cTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r.URL.Scheme = "http"
+	return t.Transport.RoundTrip(r)
+}
+
+var h2cTransport = &_h2cTransport{
+	&http2.Transport{
+		AllowHTTP:          true,
+		DisableCompression: true,
+		DialTLS: func(network, addr string, _ *tls.Config) (net.Conn, error) {
+			return dialContext(context.Background(), network, addr)
+		},
+	},
+}
 
 type transportGateway struct{}
 
