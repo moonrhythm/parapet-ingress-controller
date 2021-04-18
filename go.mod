@@ -12,6 +12,7 @@ require (
 	github.com/moonrhythm/parapet v0.9.4
 	github.com/prometheus/client_golang v1.9.0
 	go.opencensus.io v0.23.0
+	golang.org/x/net v0.0.0-20210410081132-afb366fc7cd1
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b
 	k8s.io/api v0.19.3
