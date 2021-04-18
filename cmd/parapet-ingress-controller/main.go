@@ -112,6 +112,7 @@ func main() {
 			GraceTimeout:       1 * time.Minute,
 			WaitBeforeShutdown: 30 * time.Second,
 			Handler:            http.NotFoundHandler(),
+			H2C:                true,
 		}
 		prom.Connections(s)
 		prom.Networks(s)
