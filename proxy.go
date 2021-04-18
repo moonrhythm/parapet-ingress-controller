@@ -57,7 +57,6 @@ var h2cTransport = &_h2cTransport{
 		AllowHTTP:          true,
 		DisableCompression: true,
 		DialTLS: func(network, addr string, _ *tls.Config) (net.Conn, error) {
-			// TODO: how to pass state (from parent context) to dialContext, we can not add detail to track backend connection
 			return dialContext(context.Background(), network, addr)
 		},
 	},
@@ -138,7 +137,7 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 		glog.Warningf("connected (addr=%s, dial=%s, retry=%d)", addr, dialAddr, i)
 	}
 
-	conn = metric.BackendConnections(ctx, conn, dialAddr)
+	conn = metric.BackendConnections(conn, dialAddr)
 	return
 }
 
