@@ -21,15 +21,15 @@ func init() {
 	_backendConnections.connections = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: prom.Namespace,
 		Name:      "backend_connections",
-	}, []string{"backend"})
+	}, []string{"addr"})
 	_backendConnections.reads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "backend_network_read_bytes",
-	}, []string{"backend"})
+	}, []string{"addr"})
 	_backendConnections.writes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "backend_network_write_bytes",
-	}, []string{"backend"})
+	}, []string{"addr"})
 	prom.Registry().MustRegister(_backendConnections.connections)
 	prom.Registry().MustRegister(_backendConnections.reads)
 	prom.Registry().MustRegister(_backendConnections.writes)
@@ -37,7 +37,7 @@ func init() {
 
 func (p *backendConnections) inc(addr string) {
 	c, err := p.connections.GetMetricWith(prometheus.Labels{
-		"backend": addr,
+		"addr": addr,
 	})
 	if err != nil {
 		return
@@ -47,7 +47,7 @@ func (p *backendConnections) inc(addr string) {
 
 func (p *backendConnections) dec(addr string) {
 	c, err := p.connections.GetMetricWith(prometheus.Labels{
-		"backend": addr,
+		"addr": addr,
 	})
 	if err != nil {
 		return
@@ -57,7 +57,7 @@ func (p *backendConnections) dec(addr string) {
 
 func (p *backendConnections) read(addr string, n int) {
 	c, err := p.reads.GetMetricWith(prometheus.Labels{
-		"backend": addr,
+		"addr": addr,
 	})
 	if err != nil {
 		return
@@ -67,7 +67,7 @@ func (p *backendConnections) read(addr string, n int) {
 
 func (p *backendConnections) write(addr string, n int) {
 	c, err := p.writes.GetMetricWith(prometheus.Labels{
-		"backend": addr,
+		"addr": addr,
 	})
 	if err != nil {
 		return

@@ -70,9 +70,9 @@ annotations:
 #### Ingress Metrics
 
 - parapet_requests{host, status, method, ingress_name, ingress_namespace, service_type, service_name}
-- parapet_backend_connections{backend, service_namespace, service_type, service_name, ingress}
-- parapet_backend_network_read_bytes{backend, service_namespace, service_type, service_name, ingress}
-- parapet_backend_network_write_bytes{backend, service_namespace, service_type, service_name, ingress}
+- parapet_backend_connections{addr}
+- parapet_backend_network_read_bytes{addr}
+- parapet_backend_network_write_bytes{addr}
 
 #### Metrics directly use from parapet
 
