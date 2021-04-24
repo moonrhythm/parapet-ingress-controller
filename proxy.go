@@ -49,6 +49,11 @@ type _h2cTransport struct {
 
 func (t *_h2cTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.URL.Scheme = "http"
+
+	if r.Header.Get("Upgrade") != "" {
+		return httpTransport.RoundTrip(r)
+	}
+
 	return t.Transport.RoundTrip(r)
 }
 
