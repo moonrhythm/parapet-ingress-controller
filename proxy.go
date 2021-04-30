@@ -81,6 +81,11 @@ func (transportGateway) RoundTrip(r *http.Request) (*http.Response, error) {
 	return tr.RoundTrip(r)
 }
 
+var (
+	errBadGateway         = errors.New("bad gateway")
+	errServiceUnavailable = errors.New("service unavailable")
+)
+
 var proxy = &httputil.ReverseProxy{
 	Director: func(req *http.Request) {
 		if _, ok := req.Header["User-Agent"]; !ok {
@@ -89,6 +94,16 @@ var proxy = &httputil.ReverseProxy{
 	},
 	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
 	Transport:  transportGateway{},
+	ModifyResponse: func(resp *http.Response) error {
+		switch resp.StatusCode {
+		case http.StatusBadGateway:
+			return errBadGateway
+		case http.StatusServiceUnavailable:
+			return errServiceUnavailable
+		default:
+			return nil
+		}
+	},
 	ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 		if err == context.Canceled {
 			// client canceled request
@@ -98,7 +113,7 @@ var proxy = &httputil.ReverseProxy{
 
 		glog.Warningf("upstream error (err=%v)", err)
 
-		if isDialError(err) {
+		if isDialError(err) || errors.Is(err, errBadGateway) || errors.Is(err, errServiceUnavailable) {
 			// lets handler retry
 			panic(err)
 		}

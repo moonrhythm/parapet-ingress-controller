@@ -22,7 +22,7 @@ func retryMiddleware(h http.Handler) http.Handler {
 					// retry
 					return
 				}
-				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+				http.Error(w, "Bad Gateway", http.StatusBadGateway)
 			}
 			ok = true
 		}()
