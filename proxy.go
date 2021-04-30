@@ -113,7 +113,7 @@ var proxy = &httputil.ReverseProxy{
 
 		glog.Warningf("upstream error (err=%v)", err)
 
-		if isDialError(err) || errors.Is(err, errBadGateway) || errors.Is(err, errServiceUnavailable) {
+		if isRetryable(err) {
 			// lets handler retry
 			panic(err)
 		}
@@ -129,6 +129,19 @@ func isDialError(err error) bool {
 
 	var netOpError *net.OpError
 	return errors.As(err, &netOpError) && netOpError.Op == "dial"
+}
+
+func isRetryable(err error) bool {
+	if isDialError(err) {
+		return true
+	}
+	if errors.Is(err, errBadGateway) {
+		return true
+	}
+	if errors.Is(err, errServiceUnavailable) {
+		return true
+	}
+	return false
 }
 
 var dialer = &net.Dialer{

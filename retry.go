@@ -18,7 +18,7 @@ func retryMiddleware(h http.Handler) http.Handler {
 					ok = true
 					return
 				}
-				if isDialError(err) {
+				if isRetryable(err) {
 					// retry
 					return
 				}
