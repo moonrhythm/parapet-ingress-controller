@@ -33,6 +33,7 @@ func main() {
 	watchNamespace := config.StringDefault("WATCH_NAMESPACE", "")
 	enableProfiler := config.Bool("PROFILER")
 	disableLog := config.Bool("DISABLE_LOG")
+	waitBeforeShutdown := config.DurationDefault("WAIT_BEFORE_SHUTDOWN", 30*time.Second)
 	hostname, _ := os.Hostname()
 
 	glog.Infoln("parapet-ingress-controller")
@@ -110,7 +111,7 @@ func main() {
 			IdleTimeout:        60 * time.Second,
 			TCPKeepAlivePeriod: 1 * time.Minute,
 			GraceTimeout:       1 * time.Minute,
-			WaitBeforeShutdown: 30 * time.Second,
+			WaitBeforeShutdown: waitBeforeShutdown,
 			Handler:            http.NotFoundHandler(),
 			H2C:                true,
 		}
@@ -144,7 +145,7 @@ func main() {
 			IdleTimeout:        320 * time.Second,
 			TCPKeepAlivePeriod: 1 * time.Minute,
 			GraceTimeout:       1 * time.Minute,
-			WaitBeforeShutdown: 30 * time.Second,
+			WaitBeforeShutdown: waitBeforeShutdown,
 			Handler:            http.NotFoundHandler(),
 			TLSConfig: &tls.Config{
 				MinVersion: tls.VersionTLS12,
