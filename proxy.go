@@ -131,19 +131,6 @@ func isDialError(err error) bool {
 	return errors.As(err, &netOpError) && netOpError.Op == "dial"
 }
 
-func isRetryable(err error) bool {
-	if isDialError(err) {
-		return true
-	}
-	if errors.Is(err, errBadGateway) {
-		return true
-	}
-	if errors.Is(err, errServiceUnavailable) {
-		return true
-	}
-	return false
-}
-
 var dialer = &net.Dialer{
 	Timeout:   2 * time.Second,
 	KeepAlive: time.Minute,
