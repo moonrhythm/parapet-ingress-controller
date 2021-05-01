@@ -158,14 +158,6 @@ func main() {
 				GetCertificate:           ctrl.GetCertificate,
 			},
 		}
-		tlsSessionTicketKey := config.Base64("TLS_SESSION_TICKET_KEY")
-		if l := len(tlsSessionTicketKey); l > 0 {
-			if l == 32 {
-				copy(s.TLSConfig.SessionTicketKey[:], tlsSessionTicketKey)
-			} else {
-				glog.Error("invalid TLS_SESSION_TICKET_KEY")
-			}
-		}
 		prom.Connections(s)
 		prom.Networks(s)
 
