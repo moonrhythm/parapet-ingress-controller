@@ -5,10 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 
-	"contrib.go.opencensus.io/exporter/stackdriver"
-	"github.com/gofrs/uuid"
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/authn"
@@ -17,11 +14,6 @@ import (
 	"github.com/moonrhythm/parapet/pkg/hsts"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"github.com/moonrhythm/parapet/pkg/stripprefix"
-	sdpropagation "go.opencensus.io/exporter/stackdriver/propagation"
-	"go.opencensus.io/plugin/ochttp"
-	"go.opencensus.io/plugin/ochttp/propagation/b3"
-	"go.opencensus.io/trace"
-	octrace "go.opencensus.io/trace"
 	"gopkg.in/yaml.v3"
 	"k8s.io/api/networking/v1beta1"
 
@@ -253,99 +245,4 @@ func StripPrefix(ctx Context) {
 	}
 
 	ctx.Use(stripprefix.New(prefix))
-}
-
-type splitExporter struct {
-	init      sync.Once
-	mu        sync.RWMutex
-	exporters map[string]octrace.Exporter
-}
-
-func (exp *splitExporter) Register(id string, exporter octrace.Exporter) {
-	exp.init.Do(func() {
-		trace.RegisterExporter(exp)
-	})
-
-	exp.mu.Lock()
-	defer exp.mu.Unlock()
-
-	if exp.exporters == nil {
-		exp.exporters = make(map[string]octrace.Exporter)
-	}
-	exp.exporters[id] = exporter
-}
-
-func (exp *splitExporter) ExportSpan(s *trace.SpanData) {
-	exporterID, _ := s.Attributes["__parapet_exporter_id"].(string)
-	delete(s.Attributes, "__parapet_exporter_id")
-
-	exp.mu.RLock()
-	exporter := exp.exporters[exporterID]
-	exp.mu.RUnlock()
-
-	if exporter == nil {
-		return
-	}
-	exporter.ExportSpan(s)
-}
-
-func (exp *splitExporter) FormatSpanName(r *http.Request) string {
-	proto := r.Header.Get("X-Forwarded-Proto")
-	return proto + "://" + r.Host + r.RequestURI
-}
-
-var (
-	exporter     splitExporter
-	b3HTTPFormat b3.HTTPFormat
-)
-
-// OperationsTrace traces to google cloud operation
-func OperationsTrace(ctx Context) {
-	enable := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace"]
-	if enable != "true" {
-		return
-	}
-
-	projectID := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace-project"]
-	if projectID == "" {
-		return
-	}
-
-	var sampler float64 = 1
-	if s := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace-sampler"]; s != "" {
-		sampler, _ = strconv.ParseFloat(s, 64)
-		if sampler <= 0 {
-			return
-		}
-	}
-
-	exp, err := stackdriver.NewExporter(stackdriver.Options{
-		ProjectID: projectID,
-	})
-	if err != nil {
-		glog.Warning("can not create exporter", err)
-		return
-	}
-
-	exporterID := uuid.Must(uuid.NewV4()).String()
-	exporter.Register(exporterID, exp)
-
-	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
-		return &ochttp.Handler{
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				span := trace.FromContext(r.Context())
-				span.AddAttributes(trace.StringAttribute("__parapet_exporter_id", exporterID))
-				b3HTTPFormat.SpanContextToRequest(span.SpanContext(), r)
-
-				h.ServeHTTP(w, r)
-			}),
-			Propagation:    &sdpropagation.HTTPFormat{},
-			FormatSpanName: exporter.FormatSpanName,
-			StartOptions: trace.StartOptions{
-				Sampler:  trace.ProbabilitySampler(sampler),
-				SpanKind: trace.SpanKindServer,
-			},
-			IsPublicEndpoint: true,
-		}
-	}))
 }
