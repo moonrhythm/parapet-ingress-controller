@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -34,7 +35,7 @@ type Controller struct {
 	m                 *http.ServeMux
 	watchedServices   map[string]struct{}
 	watchedSecrets    map[string]struct{}
-	nameToCertificate map[string]*tls.Certificate
+	nameToCertificate map[string][]*tls.Certificate
 
 	plugins                []plugin.Plugin
 	health                 *healthz.Healthz
@@ -327,7 +328,7 @@ func (ctrl *Controller) reloadDebounced() {
 	}
 
 	// build certs
-	var certs []tls.Certificate
+	var certs []*tls.Certificate
 	for key := range watchedSecrets {
 		s, ok := nameToSecret[key]
 		if !ok {
@@ -339,16 +340,15 @@ func (ctrl *Controller) reloadDebounced() {
 			glog.Errorf("can not load x509 certificate %s/%s; %v", s.Namespace, s.Name, err)
 			continue
 		}
-		certs = append(certs, cert)
+		certs = append(certs, &cert)
 	}
-	tlsConfig := tls.Config{Certificates: certs}
-	tlsConfig.BuildNameToCertificate()
+	nameToCert := buildNameToCertificate(certs)
 
 	ctrl.mu.Lock()
 	ctrl.m = mux
 	ctrl.watchedServices = watchedServices
 	ctrl.watchedSecrets = watchedSecrets
-	ctrl.nameToCertificate = tlsConfig.NameToCertificate
+	ctrl.nameToCertificate = nameToCert
 	globalRouteTable.SetPortRoute(addrToPort)
 	ctrl.mu.Unlock()
 	ctrl.health.SetReady(true)
@@ -398,27 +398,27 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	// from tls/common.go
 
-	name := strings.ToLower(clientHello.ServerName)
-	for len(name) > 0 && name[len(name)-1] == '.' {
-		name = name[:len(name)-1]
-	}
-
 	ctrl.mu.RLock()
 	certs := ctrl.nameToCertificate
 	ctrl.mu.RUnlock()
 
+	name := strings.ToLower(clientHello.ServerName)
+
+	// exact name
 	if cert, ok := certs[name]; ok {
-		return cert, nil
+		c := findSupportCert(cert, clientHello)
+		if c != nil {
+			return c, nil
+		}
 	}
 
-	// try replacing labels in the name with wildcards until we get a
-	// match.
-	labels := strings.Split(name, ".")
-	for i := range labels {
-		labels[i] = "*"
-		candidate := strings.Join(labels, ".")
-		if cert, ok := certs[candidate]; ok {
-			return cert, nil
+	// wildcard name
+	if len(name) > 0 {
+		labels := strings.Split(name, ".")
+		labels[0] = "*"
+		wildcardName := strings.Join(labels, ".")
+		if cert, ok := certs[wildcardName]; ok {
+			return findSupportCert(cert, clientHello), nil
 		}
 	}
 
@@ -443,4 +443,33 @@ func buildHost(namespace, name string) string {
 func buildHostPort(namespace, name string, port int) string {
 	// service.namespace.svc.cluster.local:port
 	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, port)
+}
+
+func buildNameToCertificate(certs []*tls.Certificate) map[string][]*tls.Certificate {
+	m := make(map[string][]*tls.Certificate)
+	for _, cert := range certs {
+		var err error
+		x509Cert := cert.Leaf
+		if x509Cert == nil {
+			x509Cert, err = x509.ParseCertificate(cert.Certificate[0])
+			if err != nil {
+				continue
+			}
+		}
+		// use only SAN, CN already deprecated
+		for _, san := range x509Cert.DNSNames {
+			m[san] = append(m[san], cert)
+		}
+	}
+	return m
+}
+
+func findSupportCert(certs []*tls.Certificate, clientHello *tls.ClientHelloInfo) *tls.Certificate {
+	for _, cert := range certs {
+		err := clientHello.SupportsCertificate(cert)
+		if err == nil {
+			return cert
+		}
+	}
+	return nil
 }
