@@ -10,6 +10,7 @@ require (
 	github.com/moonrhythm/parapet v0.9.4
 	github.com/prometheus/client_golang v1.9.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.20.0
+	go.opentelemetry.io/otel/exporters/trace/jaeger v0.20.0
 	go.opentelemetry.io/otel/sdk v0.20.0
 	golang.org/x/net v0.0.0-20210503060351-7fd8e65b6420
 	golang.org/x/sys v0.0.0-20210503173754-0981d6026fa6 // indirect

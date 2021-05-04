@@ -77,6 +77,7 @@ func main() {
 	ctrl.Use(plugin.BasicAuth)
 	ctrl.Use(plugin.StripPrefix)
 	ctrl.Use(plugin.OperationsTrace)
+	ctrl.Use(plugin.JaegerTrace)
 	go ctrl.Watch()
 
 	m := parapet.Middlewares{}
