@@ -24,6 +24,9 @@ func JaegerTrace(ctx Context) {
 		return
 	}
 
+	collectorUsername := ctx.Ingress.Annotations["parapet.moonrhythm.io/jaeger-trace-collector-username"]
+	collectorPassword := ctx.Ingress.Annotations["parapet.moonrhythm.io/jaeger-trace-collector-password"]
+
 	var sampler float64 = 1
 	if s := ctx.Ingress.Annotations["parapet.moonrhythm.io/jaeger-trace-sampler"]; s != "" {
 		sampler, _ = strconv.ParseFloat(s, 64)
@@ -32,10 +35,18 @@ func JaegerTrace(ctx Context) {
 		}
 	}
 
+	collectorOptions := []jaeger.CollectorEndpointOption{
+		jaeger.WithEndpoint(collectorEndpoint),
+	}
+	if collectorUsername != "" {
+		collectorOptions = append(collectorOptions, jaeger.WithUsername(collectorUsername))
+	}
+	if collectorPassword != "" {
+		collectorOptions = append(collectorOptions, jaeger.WithPassword(collectorPassword))
+	}
+
 	exporter, err := jaeger.NewRawExporter(
-		jaeger.WithCollectorEndpoint(
-			jaeger.WithEndpoint(collectorEndpoint),
-		),
+		jaeger.WithCollectorEndpoint(collectorOptions...),
 	)
 	if err != nil {
 		glog.Errorf("plugin/JaegerTrace: NewRawExporter error; %v", err)
