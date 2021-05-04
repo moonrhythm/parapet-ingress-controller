@@ -170,6 +170,7 @@ func UpstreamProtocol(ctx Context) {
 	}))
 }
 
+// UpstreamHost overrides request's host
 func UpstreamHost(ctx Context) {
 	host := ctx.Ingress.Annotations["parapet.moonrhythm.io/upstream-host"]
 	if host == "" {
@@ -183,6 +184,7 @@ func UpstreamHost(ctx Context) {
 	}))
 }
 
+// BasicAuth adds basic auth
 func BasicAuth(ctx Context) {
 	ba := ctx.Ingress.Annotations["parapet.moonrhythm.io/basic-auth"]
 	if ba == "" {
@@ -297,6 +299,7 @@ var (
 	b3HTTPFormat b3.HTTPFormat
 )
 
+// OperationsTrace traces to google cloud operation
 func OperationsTrace(ctx Context) {
 	enable := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace"]
 	if enable != "true" {

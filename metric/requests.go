@@ -13,6 +13,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
+// Requests returns middleware that collect request information
 func Requests() parapet.Middleware {
 	return &_promRequests
 }

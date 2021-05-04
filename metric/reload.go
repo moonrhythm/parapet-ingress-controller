@@ -19,6 +19,7 @@ func init() {
 	prom.Registry().MustRegister(_reload.vec)
 }
 
+// Reload sets reload metric
 func Reload(success bool) {
 	l := prometheus.Labels{
 		"success": "0",
