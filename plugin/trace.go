@@ -50,6 +50,7 @@ func JaegerTrace(ctx Context) {
 	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return otelhttp.NewHandler(h, ctx.Ingress.Namespace+"/"+ctx.Ingress.Name,
 			otelhttp.WithTracerProvider(tp),
+			otelhttp.WithSpanNameFormatter(traceSpanNameFormatter),
 		)
 	}))
 }
@@ -88,6 +89,12 @@ func OperationsTrace(ctx Context) {
 	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return otelhttp.NewHandler(h, ctx.Ingress.Namespace+"/"+ctx.Ingress.Name,
 			otelhttp.WithTracerProvider(tp),
+			otelhttp.WithSpanNameFormatter(traceSpanNameFormatter),
 		)
 	}))
+}
+
+func traceSpanNameFormatter(_ string, r *http.Request) string {
+	proto := r.Header.Get("X-Forwarded-Proto")
+	return proto + "://" + r.Host + r.RequestURI
 }
