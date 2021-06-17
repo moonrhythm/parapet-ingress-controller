@@ -9,7 +9,7 @@ import (
 )
 
 func retryMiddleware(h http.Handler) http.Handler {
-	const maxRetry = 30
+	const maxRetry = 15
 
 	canRequestRetry := func(r *http.Request) bool {
 		if r.Body == nil || r.Body == http.NoBody {
