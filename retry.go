@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,14 +12,59 @@ import (
 func retryMiddleware(h http.Handler) http.Handler {
 	const maxRetry = 15
 
+	replaceBody := func(r *http.Request) error {
+		// empty body
+		if r.Body == nil || r.Body == http.NoBody {
+			return nil
+		}
+
+		// body less than buffer size, load all to buffer
+		if r.ContentLength <= bufferSize {
+			buf := bufferPool.Get()
+
+			_, err := r.Body.Read(buf)
+			if err != nil {
+				bufferPool.Put(buf)
+				return err
+			}
+
+			r.Body = &bufferedBody{
+				Reader: bytes.NewReader(buf),
+				buf:    buf,
+			}
+			return nil
+		}
+
+		// unknown size body
+		r.Body = &trackReadBody{ReadCloser: r.Body}
+		return nil
+	}
+
+	resetBody := func(r *http.Request) {
+		if t, ok := r.Body.(*bufferedBody); ok {
+			t.Reset()
+		}
+	}
+
+	closeBody := func(r *http.Request) {
+		if t, ok := r.Body.(*bufferedBody); ok {
+			t.Close()
+		}
+	}
+
 	canRequestRetry := func(r *http.Request) bool {
 		if r.Body == nil || r.Body == http.NoBody {
 			return true
 		}
-		if t, ok := r.Body.(*trackBodyRead); ok {
+
+		switch t := r.Body.(type) {
+		case *bufferedBody:
+			return true
+		case *trackReadBody:
 			return !t.read
+		default:
+			return false
 		}
-		return false
 	}
 
 	tryServe := func(w http.ResponseWriter, r *http.Request) (ok bool) {
@@ -38,6 +84,7 @@ func retryMiddleware(h http.Handler) http.Handler {
 			ok = true
 		}()
 
+		resetBody(r)
 		h.ServeHTTP(w, r)
 		return
 	}
@@ -45,9 +92,11 @@ func retryMiddleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
-		if r.Body != nil && r.Body != http.NoBody {
-			r.Body = &trackBodyRead{ReadCloser: r.Body}
+		if err := replaceBody(r); err != nil {
+			http.Error(w, "Bad Request", http.StatusBadRequest)
+			return
 		}
+		defer closeBody(r)
 
 		for i := 0; i < maxRetry; i++ {
 			if tryServe(w, r) {
@@ -86,12 +135,38 @@ func isRetryable(err error) bool {
 	return false
 }
 
-type trackBodyRead struct {
+type trackReadBody struct {
 	io.ReadCloser
 	read bool
 }
 
-func (t *trackBodyRead) Read(p []byte) (n int, err error) {
-	t.read = true
-	return t.ReadCloser.Read(p)
+func (b *trackReadBody) Read(p []byte) (n int, err error) {
+	b.read = true
+	return b.ReadCloser.Read(p)
+}
+
+type bufferedBody struct {
+	*bytes.Reader
+	buf    []byte
+	closed bool
+}
+
+func (b *bufferedBody) Read(p []byte) (n int, err error) {
+	if b.closed {
+		return 0, io.EOF
+	}
+	return b.Reader.Read(p)
+}
+
+func (b *bufferedBody) Reset() {
+	b.Reader.Reset(b.buf)
+}
+
+func (b *bufferedBody) Close() error {
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	bufferPool.Put(b.buf)
+	return nil
 }

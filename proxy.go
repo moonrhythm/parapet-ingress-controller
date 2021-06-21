@@ -18,16 +18,24 @@ import (
 
 const bufferSize = 16 * 1024
 
-type bufferPool struct {
+type _bufferPool struct {
 	sync.Pool
 }
 
-func (p *bufferPool) Get() []byte {
+func (p *_bufferPool) Get() []byte {
 	return p.Pool.Get().([]byte)
 }
 
-func (p *bufferPool) Put(b []byte) {
+func (p *_bufferPool) Put(b []byte) {
 	p.Pool.Put(b)
+}
+
+var bufferPool = _bufferPool{
+	sync.Pool{
+		New: func() interface{} {
+			return make([]byte, bufferSize)
+		},
+	},
 }
 
 // TODO: make Transport configurable
@@ -92,7 +100,7 @@ var proxy = &httputil.ReverseProxy{
 			req.Header.Set("User-Agent", "")
 		}
 	},
-	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
+	BufferPool: &bufferPool,
 	Transport:  transportGateway{},
 	ModifyResponse: func(resp *http.Response) error {
 		switch resp.StatusCode {
