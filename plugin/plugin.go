@@ -15,7 +15,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"github.com/moonrhythm/parapet/pkg/stripprefix"
 	"gopkg.in/yaml.v3"
-	"k8s.io/api/networking/v1beta1"
+	networking "k8s.io/api/networking/v1"
 
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
@@ -27,7 +27,7 @@ type Plugin func(ctx Context)
 type Context struct {
 	*parapet.Middlewares
 	Routes  map[string]http.Handler
-	Ingress *v1beta1.Ingress
+	Ingress *networking.Ingress
 }
 
 // InjectStateIngress injects ingress name and namespace to state

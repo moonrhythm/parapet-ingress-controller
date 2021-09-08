@@ -17,7 +17,6 @@ import (
 	"gopkg.in/yaml.v3"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
@@ -210,8 +209,8 @@ func (ctrl *Controller) reloadDebounced() {
 		}
 		h.Use(parapet.MiddlewareFunc(retryMiddleware))
 
-		if ing.Spec.Backend != nil {
-			glog.Warning("ingress spec.backend not support")
+		if ing.Spec.DefaultBackend != nil {
+			glog.Warning("ingress spec.defaultBackend not support")
 		}
 
 		for _, rule := range ing.Spec.Rules {
@@ -219,16 +218,16 @@ func (ctrl *Controller) reloadDebounced() {
 				continue
 			}
 
-			for _, path := range rule.HTTP.Paths {
-				backend := path.Backend
-				path := path.Path
+			for _, httpPath := range rule.HTTP.Paths {
+				backend := httpPath.Backend
+				path := httpPath.Path
 				if path == "" {
 					path = "/"
 				}
 
 				var config backendConfig
 
-				svcKey := ing.Namespace + "/" + backend.ServiceName
+				svcKey := ing.Namespace + "/" + backend.Service.Name
 				watchedServices[svcKey] = struct{}{} // service may create later
 
 				svc, ok := nameToService[svcKey]
@@ -242,25 +241,25 @@ func (ctrl *Controller) reloadDebounced() {
 					portVal  int
 					portName string
 				)
-				if backend.ServicePort.Type == intstr.String {
-					portName = backend.ServicePort.StrVal
+				if backend.Service.Port.Name != "" {
+					portName = backend.Service.Port.Name
 
 					// find port number
 					for _, p := range svc.Spec.Ports {
-						if p.Name == backend.ServicePort.StrVal {
+						if p.Name == backend.Service.Port.Name {
 							portVal = int(p.Port)
 						}
 					}
 					if portVal == 0 {
-						glog.Errorf("port %s on service %s not found", backend.ServicePort.StrVal, svcKey)
+						glog.Errorf("port %s on service %s not found", backend.Service.Port.Name, svcKey)
 						continue
 					}
 				} else {
-					portVal = int(backend.ServicePort.IntVal)
+					portVal = int(backend.Service.Port.Number)
 
 					// find port name
 					for _, p := range svc.Spec.Ports {
-						if p.Port == backend.ServicePort.IntVal {
+						if p.Port == backend.Service.Port.Number {
 							portName = p.Name
 						}
 					}
@@ -281,7 +280,7 @@ func (ctrl *Controller) reloadDebounced() {
 				}
 
 				src := strings.ToLower(rule.Host) + path
-				target := buildHostPort(ing.Namespace, backend.ServiceName, portVal)
+				target := buildHostPort(ing.Namespace, backend.Service.Name, portVal)
 				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					if config.Protocol != "" {
 						r.URL.Scheme = config.Protocol
@@ -298,8 +297,9 @@ func (ctrl *Controller) reloadDebounced() {
 					nr.URL.Host = globalRouteTable.Lookup(target)
 					proxy.ServeHTTP(w, nr)
 				}))
-
 				glog.V(1).Infof("registered: %s => %s", src, target)
+
+				// TODO: implement pathType
 			}
 		}
 

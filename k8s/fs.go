@@ -13,7 +13,7 @@ import (
 
 	"github.com/golang/glog"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/api/networking/v1beta1"
+	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -23,7 +23,7 @@ import (
 type fsClient struct {
 	mu        sync.RWMutex
 	dir       string
-	ingresses []v1beta1.Ingress
+	ingresses []networking.Ingress
 	services  []v1.Service
 	endpoints []v1.Endpoints
 	secrets   []v1.Secret
@@ -135,8 +135,11 @@ func (c *fsClient) addObject(raw []byte) {
 	case runtime.TypeMeta{
 		APIVersion: "extensions/v1beta1",
 		Kind:       "Ingress",
+	}, runtime.TypeMeta{
+		APIVersion: "networking.k8s.io/v1",
+		Kind:       "Ingress",
 	}:
-		var ing v1beta1.Ingress
+		var ing networking.Ingress
 		err := c.decode(raw, &ing)
 		if err != nil {
 			return
@@ -202,7 +205,7 @@ func (c *fsClient) WatchServices(ctx context.Context, namespace string) (watch.I
 	return watch.NewProxyWatcher(ch), nil
 }
 
-func (c *fsClient) GetIngresses(ctx context.Context, namespace string) ([]v1beta1.Ingress, error) {
+func (c *fsClient) GetIngresses(ctx context.Context, namespace string) ([]networking.Ingress, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.ingresses, nil

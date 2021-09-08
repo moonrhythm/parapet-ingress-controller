@@ -6,7 +6,7 @@ import (
 	"os"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/api/networking/v1beta1"
+	networking "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -52,7 +52,7 @@ var client interface {
 	WatchIngresses(ctx context.Context, namespace string) (watch.Interface, error)
 	GetServices(ctx context.Context, namespace string) ([]v1.Service, error)
 	WatchServices(ctx context.Context, namespace string) (watch.Interface, error)
-	GetIngresses(ctx context.Context, namespace string) ([]v1beta1.Ingress, error)
+	GetIngresses(ctx context.Context, namespace string) ([]networking.Ingress, error)
 	GetSecrets(ctx context.Context, namespace string) ([]v1.Secret, error)
 	WatchSecrets(ctx context.Context, namespace string) (watch.Interface, error)
 	GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error)
@@ -75,7 +75,7 @@ func WatchServices(ctx context.Context, namespace string) (watch.Interface, erro
 }
 
 // GetIngresses lists all ingresses for given namespace
-func GetIngresses(ctx context.Context, namespace string) ([]v1beta1.Ingress, error) {
+func GetIngresses(ctx context.Context, namespace string) ([]networking.Ingress, error) {
 	return client.GetIngresses(ctx, namespace)
 }
 
