@@ -100,7 +100,20 @@ func main() {
 			trustProxy = parapet.Trusted()
 		case "false", "":
 		default:
-			trustProxy = parapet.TrustCIDRs(config.Strings("TRUST_PROXY"))
+			// parse cidrs
+
+			var list []string
+			for _, x := range strings.Split(p, ",") {
+				x = strings.TrimSpace(x)
+
+				if t := predefinedCIDRs[x]; len(t) > 0 {
+					list = append(list, t...)
+				} else {
+					list = append(list, x)
+				}
+			}
+
+			trustProxy = parapet.TrustCIDRs(list)
 		}
 	}
 
