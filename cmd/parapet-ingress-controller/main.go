@@ -34,6 +34,7 @@ func main() {
 	enableProfiler := config.Bool("PROFILER")
 	disableLog := config.Bool("DISABLE_LOG")
 	waitBeforeShutdown := config.DurationDefault("WAIT_BEFORE_SHUTDOWN", 30*time.Second)
+	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
 	hostname, _ := os.Hostname()
 
 	glog.Infoln("parapet-ingress-controller")
@@ -121,6 +122,7 @@ func main() {
 	{
 		s := &parapet.Server{
 			Addr:               ":" + httpPort,
+			MaxHeaderBytes:     httpServerMaxHeaderBytes,
 			TrustProxy:         trustProxy,
 			IdleTimeout:        60 * time.Second,
 			TCPKeepAlivePeriod: 1 * time.Minute,
@@ -155,6 +157,7 @@ func main() {
 
 		s := &parapet.Server{
 			Addr:               ":" + httpsPort,
+			MaxHeaderBytes:     httpServerMaxHeaderBytes,
 			TrustProxy:         trustProxy,
 			IdleTimeout:        320 * time.Second,
 			TCPKeepAlivePeriod: 1 * time.Minute,
