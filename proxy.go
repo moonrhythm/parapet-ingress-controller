@@ -143,8 +143,6 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 		return
 	}
 
-	glog.Infof("connected (addr=%s)", addr)
-
 	conn = metric.BackendConnections(conn, addr)
 	return
 }

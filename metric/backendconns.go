@@ -4,7 +4,6 @@ import (
 	"net"
 	"sync/atomic"
 
-	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -115,7 +114,6 @@ func (conn *trackBackendConn) Write(b []byte) (n int, err error) {
 
 func (conn *trackBackendConn) trackClose(err error) {
 	if atomic.CompareAndSwapInt32(&conn.closed, 0, 1) {
-		glog.Infof("close connection (addr=%s, err=%v)", conn.addr, err)
 		_backendConnections.dec(conn.addr)
 	}
 }
