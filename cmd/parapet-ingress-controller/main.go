@@ -165,14 +165,9 @@ func main() {
 			WaitBeforeShutdown: waitBeforeShutdown,
 			Handler:            http.NotFoundHandler(),
 			TLSConfig: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-				CurvePreferences: []tls.CurveID{
-					tls.X25519,
-					tls.CurveP256,
-				},
-				PreferServerCipherSuites: true,
-				Certificates:             []tls.Certificate{cert},
-				GetCertificate:           ctrl.GetCertificate,
+				MinVersion:     tls.VersionTLS12,
+				Certificates:   []tls.Certificate{cert},
+				GetCertificate: ctrl.GetCertificate,
 			},
 		}
 		prom.Connections(s)
