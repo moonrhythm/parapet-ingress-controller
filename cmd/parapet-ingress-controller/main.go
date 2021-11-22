@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"cloud.google.com/go/profiler"
@@ -124,6 +125,8 @@ func main() {
 		}
 	}
 
+	var wg sync.WaitGroup
+
 	// http
 	{
 		s := &parapet.Server{
@@ -142,7 +145,9 @@ func main() {
 
 		s.Use(m)
 
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			err := s.ListenAndServe()
 			if err != nil {
 				glog.Fatal(err)
@@ -181,12 +186,18 @@ func main() {
 
 		s.Use(m)
 
-		err = s.ListenAndServe()
-		if err != nil {
-			glog.Fatal(err)
-			os.Exit(1)
-		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err = s.ListenAndServe()
+			if err != nil {
+				glog.Fatal(err)
+				os.Exit(1)
+			}
+		}()
 	}
+
+	wg.Wait()
 }
 
 func lowerCaseHost(h http.Handler) http.Handler {
