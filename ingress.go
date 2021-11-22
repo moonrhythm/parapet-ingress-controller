@@ -26,7 +26,7 @@ import (
 )
 
 // IngressClass to load ingresses
-const IngressClass = "parapet"
+var IngressClass = "parapet"
 
 // Controller is the parapet ingress controller
 type Controller struct {

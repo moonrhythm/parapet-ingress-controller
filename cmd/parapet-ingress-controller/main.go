@@ -31,17 +31,23 @@ func main() {
 	httpsPort := config.StringDefault("HTTPS_PORT", "443")
 	podNamespace := config.String("POD_NAMESPACE")
 	watchNamespace := config.StringDefault("WATCH_NAMESPACE", "")
+	ingressClass := config.String("INGRESS_CLASS")
 	enableProfiler := config.Bool("PROFILER")
 	disableLog := config.Bool("DISABLE_LOG")
 	waitBeforeShutdown := config.DurationDefault("WAIT_BEFORE_SHUTDOWN", 30*time.Second)
 	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
 	hostname, _ := os.Hostname()
 
+	if ingressClass != "" {
+		controller.IngressClass = ingressClass
+	}
+
 	glog.Infoln("parapet-ingress-controller")
 	glog.Infoln("version:", version)
 	glog.Infoln("hostname:", hostname)
 	glog.Infoln("http_port:", httpPort)
 	glog.Infoln("https_port:", httpsPort)
+	glog.Infoln("ingress_class:", controller.IngressClass)
 	glog.Infoln("pod_namespace:", podNamespace)
 	glog.Infoln("watch_namespace:", watchNamespace)
 	glog.Infoln("profiler:", enableProfiler)
@@ -146,7 +152,7 @@ func main() {
 	}
 
 	// https
-	{
+	if httpsPort != "" {
 		cert, err := parapet.GenerateSelfSignCertificate(parapet.SelfSign{
 			CommonName: "parapet-ingress-controller",
 		})
