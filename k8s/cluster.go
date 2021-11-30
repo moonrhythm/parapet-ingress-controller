@@ -15,7 +15,7 @@ type clusterClient struct {
 }
 
 func (c *clusterClient) WatchIngresses(ctx context.Context, namespace string) (watch.Interface, error) {
-	return c.client.NetworkingV1beta1().Ingresses(namespace).Watch(ctx, metav1.ListOptions{})
+	return c.client.NetworkingV1().Ingresses(namespace).Watch(ctx, metav1.ListOptions{})
 }
 
 func (c *clusterClient) GetServices(ctx context.Context, namespace string) ([]v1.Service, error) {
