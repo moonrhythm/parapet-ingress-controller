@@ -3,6 +3,7 @@ package plugin
 import (
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -174,6 +175,46 @@ func UpstreamHost(ctx Context) {
 			h.ServeHTTP(w, r)
 		})
 	}))
+}
+
+// UpstreamPath adds path prefix before send to upstream
+func UpstreamPath(ctx Context) {
+	prefix := ctx.Ingress.Annotations["parapet.moonrhythm.io/upstream-path"]
+	if prefix == "" {
+		return
+	}
+
+	targetPath, err := url.ParseRequestURI(prefix)
+	if err != nil {
+		glog.Warning("can not parse path", prefix)
+		return
+	}
+
+	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.URL.Path = singleJoiningSlash(targetPath.Path, r.URL.Path)
+
+			if targetPath.RawQuery == "" || r.URL.RawQuery == "" {
+				r.URL.RawQuery = targetPath.RawQuery + r.URL.RawQuery
+			} else {
+				r.URL.RawQuery = targetPath.RawQuery + "&" + r.URL.RawQuery
+			}
+
+			h.ServeHTTP(w, r)
+		})
+	}))
+}
+
+func singleJoiningSlash(a, b string) string {
+	aslash := strings.HasSuffix(a, "/")
+	bslash := strings.HasPrefix(b, "/")
+	switch {
+	case aslash && bslash:
+		return a + b[1:]
+	case !aslash && !bslash:
+		return a + "/" + b
+	}
+	return a + b
 }
 
 // BasicAuth adds basic auth

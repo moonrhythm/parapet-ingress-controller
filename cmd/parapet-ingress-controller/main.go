@@ -82,6 +82,7 @@ func main() {
 	ctrl.Use(plugin.BodyLimit)
 	ctrl.Use(plugin.UpstreamProtocol)
 	ctrl.Use(plugin.UpstreamHost)
+	ctrl.Use(plugin.UpstreamPath)
 	ctrl.Use(plugin.BasicAuth)
 	ctrl.Use(plugin.StripPrefix)
 	ctrl.Use(plugin.OperationsTrace)
