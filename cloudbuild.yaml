@@ -1,5 +1,5 @@
 steps:
-- name: gcr.io/moonrhythm-containers/golang:1.17.4-alpine3.15
+- name: gcr.io/moonrhythm-containers/golang:1.17.5-alpine3.15
   args:
   - go
   - build
