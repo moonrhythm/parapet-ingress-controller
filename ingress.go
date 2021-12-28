@@ -193,7 +193,13 @@ func (ctrl *Controller) reloadDebounced() {
 	watchedSecrets := make(map[string]struct{})
 
 	for _, ing := range ingresses {
-		if ing.Annotations == nil || ing.Annotations["kubernetes.io/ingress.class"] != IngressClass {
+		var ingClass string
+		if ing.Spec.IngressClassName != nil {
+			ingClass = *ing.Spec.IngressClassName
+		} else if ing.Annotations != nil {
+			ingClass = ing.Annotations["kubernetes.io/ingress.class"]
+		}
+		if ingClass != IngressClass {
 			glog.Infof("skip: %s/%s", ing.Namespace, ing.Name)
 			continue
 		}
