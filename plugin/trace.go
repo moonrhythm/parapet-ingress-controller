@@ -8,7 +8,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel/exporters/trace/jaeger"
+	"go.opentelemetry.io/otel/exporters/jaeger"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -45,7 +45,7 @@ func JaegerTrace(ctx Context) {
 		collectorOptions = append(collectorOptions, jaeger.WithPassword(collectorPassword))
 	}
 
-	exporter, err := jaeger.NewRawExporter(
+	exporter, err := jaeger.New(
 		jaeger.WithCollectorEndpoint(collectorOptions...),
 	)
 	if err != nil {
@@ -86,7 +86,7 @@ func OperationsTrace(ctx Context) {
 		}
 	}
 
-	exporter, err := texporter.NewExporter(texporter.WithProjectID(projectID))
+	exporter, err := texporter.New(texporter.WithProjectID(projectID))
 	if err != nil {
 		glog.Errorf("plugin/OperationsTrace: NewExporter error; %v", err)
 		return
