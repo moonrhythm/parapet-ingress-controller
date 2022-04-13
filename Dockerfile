@@ -1,4 +1,4 @@
-FROM golang:1.18-alpine3.15
+FROM golang:1.18.1-alpine3.15
 
 ARG VERSION
 
