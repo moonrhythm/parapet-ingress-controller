@@ -34,10 +34,11 @@ func (p *bufferPool) Put(b []byte) {
 var httpTransport = &http.Transport{
 	DialContext:           dialContext,
 	MaxIdleConnsPerHost:   1000,
-	IdleConnTimeout:       10 * time.Minute,
+	MaxConnsPerHost:       3000,
+	IdleConnTimeout:       30 * time.Second,
 	ExpectContinueTimeout: time.Second,
 	DisableCompression:    true,
-	ResponseHeaderTimeout: 5 * time.Minute,
+	ResponseHeaderTimeout: 3 * time.Minute,
 	TLSClientConfig: &tls.Config{
 		InsecureSkipVerify: true,
 	},
