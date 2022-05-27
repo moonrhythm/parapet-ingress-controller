@@ -1,4 +1,4 @@
-FROM golang:1.18.2-alpine3.15
+FROM golang:1.18.2-alpine3.16
 
 ARG VERSION
 
@@ -18,7 +18,7 @@ RUN go build \
 		-tags=cbrotli \
 		./cmd/parapet-ingress-controller
 
-FROM alpine:3.15
+FROM alpine:3.16
 
 RUN apk add --no-cache ca-certificates tzdata brotli
 
