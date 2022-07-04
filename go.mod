@@ -13,13 +13,13 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.31.0
 	go.opentelemetry.io/otel/exporters/jaeger v1.6.3
 	go.opentelemetry.io/otel/sdk v1.6.3
-	golang.org/x/net v0.0.0-20220526153639-5463443f8c37
+	golang.org/x/net v0.0.0-20220630215102-69896b714898
 	golang.org/x/sys v0.0.0-20220520151302-bc2c85ada10a // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.0
-	k8s.io/api v0.22.10
-	k8s.io/apimachinery v0.22.10
-	k8s.io/client-go v0.22.10
+	k8s.io/api v0.22.11
+	k8s.io/apimachinery v0.22.11
+	k8s.io/client-go v0.22.11
 )
 
 require (
