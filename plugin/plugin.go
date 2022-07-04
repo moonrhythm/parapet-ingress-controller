@@ -9,7 +9,6 @@ import (
 
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
-	"github.com/moonrhythm/parapet/pkg/authn"
 	"github.com/moonrhythm/parapet/pkg/block"
 	"github.com/moonrhythm/parapet/pkg/body"
 	"github.com/moonrhythm/parapet/pkg/hsts"
@@ -215,25 +214,6 @@ func singleJoiningSlash(a, b string) string {
 		return a + "/" + b
 	}
 	return a + b
-}
-
-// BasicAuth adds basic auth
-func BasicAuth(ctx Context) {
-	ba := ctx.Ingress.Annotations["parapet.moonrhythm.io/basic-auth"]
-	if ba == "" {
-		return
-	}
-
-	xs := strings.SplitN(ba, ":", 2)
-	if len(xs) != 2 {
-		return
-	}
-	user, pass := xs[0], xs[1]
-	if user == "" || pass == "" {
-		return
-	}
-
-	ctx.Use(authn.Basic(user, pass))
 }
 
 // AllowRemote allows only request come from given ip range

@@ -83,10 +83,11 @@ func main() {
 	ctrl.Use(plugin.UpstreamProtocol)
 	ctrl.Use(plugin.UpstreamHost)
 	ctrl.Use(plugin.UpstreamPath)
-	ctrl.Use(plugin.BasicAuth)
-	ctrl.Use(plugin.StripPrefix)
 	ctrl.Use(plugin.OperationsTrace)
 	ctrl.Use(plugin.JaegerTrace)
+	ctrl.Use(plugin.BasicAuth)
+	ctrl.Use(plugin.ForwardAuth)
+	ctrl.Use(plugin.StripPrefix)
 	go ctrl.Watch()
 
 	m := parapet.Middlewares{}
