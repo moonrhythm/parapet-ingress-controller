@@ -15,6 +15,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/compress"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
+	"github.com/moonrhythm/parapet/pkg/ratelimit"
 
 	controller "github.com/moonrhythm/parapet-ingress-controller"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
@@ -37,6 +38,8 @@ func main() {
 	disableLog := config.Bool("DISABLE_LOG")
 	waitBeforeShutdown := config.DurationDefault("WAIT_BEFORE_SHUTDOWN", 30*time.Second)
 	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
+	hostConcurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY")
+	hostConcurrentSize := config.Int("HOST_CONCURRENT_SIZE")
 	hostname, _ := os.Hostname()
 
 	if ingressClass != "" {
@@ -93,6 +96,17 @@ func main() {
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
 	m.Use(parapet.MiddlewareFunc(lowerCaseHost))
+	if hostConcurrentCapacity > 0 && hostConcurrentSize > 0 {
+		m.Use(&ratelimit.RateLimiter{
+			Strategy: &ratelimit.ConcurrentQueueStrategy{
+				Capacity: hostConcurrentCapacity,
+				Size:     hostConcurrentSize,
+			},
+			Key: func(r *http.Request) string {
+				return r.Host
+			},
+		})
+	}
 	if !disableLog {
 		m.Use(logger.Stdout())
 	}
