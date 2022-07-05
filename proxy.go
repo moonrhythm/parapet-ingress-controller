@@ -33,9 +33,9 @@ func (p *bufferPool) Put(b []byte) {
 // TODO: make Transport configurable
 var httpTransport = &http.Transport{
 	DialContext:           dialContext,
-	MaxIdleConnsPerHost:   1000,
-	MaxConnsPerHost:       3000,
-	IdleConnTimeout:       30 * time.Second,
+	MaxIdleConnsPerHost:   100,
+	MaxConnsPerHost:       200,
+	IdleConnTimeout:       10 * time.Second,
 	ExpectContinueTimeout: time.Second,
 	DisableCompression:    true,
 	ResponseHeaderTimeout: 3 * time.Minute,
