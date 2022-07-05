@@ -105,6 +105,9 @@ func main() {
 			Key: func(r *http.Request) string {
 				return r.Host
 			},
+			ExceededHandler: func(w http.ResponseWriter, _ *http.Request, _ time.Duration) {
+				http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+			},
 		})
 	}
 	if !disableLog {
