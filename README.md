@@ -15,34 +15,40 @@ Create ingress with an annotation `kubernetes.io/ingress.class: parapet`
 ### Example
 
 ```yaml
-apiVersion: extensions/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   annotations:
-    kubernetes.io/ingress.class: parapet
     parapet.moonrhythm.io/hsts: preload
     parapet.moonrhythm.io/redirect: |
       example.com: https://www.example.com
     parapet.moonrhythm.io/redirect-https: "true"
   name: ingress
 spec:
+  ingressClassName: parapet
   rules:
   - host: www.example.com
     http:
       paths:
       - backend:
-          serviceName: example
-          servicePort: http
+          service:
+            name: example
+            port:
+              name: http
       - path: /assets/
         backend:
-          serviceName: gcs
-          servicePort: https
+          service:
+            name: gcs
+            port:
+              name: https
   - host: api.example.com
     http:
       paths:
       - backend:
-          serviceName: api-example
-          servicePort: http
+          service:
+            name: api-example
+            port:
+              name: http
   tls:
   - secretName: tls-www
   - secretName: tls-api
@@ -73,6 +79,8 @@ annotations:
 - parapet_backend_connections{addr}
 - parapet_backend_network_read_bytes{addr}
 - parapet_backend_network_write_bytes{addr}
+- parapet_reload{success}
+- parapet_host_ratelimit_requests{host}
 
 #### Metrics directly use from parapet
 
