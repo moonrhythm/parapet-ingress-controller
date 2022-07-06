@@ -30,11 +30,10 @@ func (p *bufferPool) Put(b []byte) {
 	p.Pool.Put(b)
 }
 
-// TODO: make Transport configurable
-var httpTransport = &http.Transport{
+var Transport = &http.Transport{
 	DialContext:           dialContext,
 	MaxIdleConnsPerHost:   100,
-	MaxConnsPerHost:       200,
+	MaxConnsPerHost:       1000,
 	IdleConnTimeout:       10 * time.Second,
 	ExpectContinueTimeout: time.Second,
 	DisableCompression:    true,
@@ -52,7 +51,7 @@ func (t *_h2cTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.URL.Scheme = "http"
 
 	if r.Header.Get("Upgrade") != "" {
-		return httpTransport.RoundTrip(r)
+		return Transport.RoundTrip(r)
 	}
 
 	return t.Transport.RoundTrip(r)
@@ -74,7 +73,7 @@ func (transportGateway) RoundTrip(r *http.Request) (*http.Response, error) {
 	var tr http.RoundTripper
 	switch r.URL.Scheme {
 	default:
-		tr = httpTransport
+		tr = Transport
 	case "h2c":
 		tr = h2cTransport
 	}

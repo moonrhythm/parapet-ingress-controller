@@ -40,11 +40,16 @@ func main() {
 	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
 	hostConcurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY")
 	hostConcurrentSize := config.Int("HOST_CONCURRENT_SIZE")
+	maxConnsPerHost := config.IntDefault("MAX_CONNS_PER_HOST", controller.Transport.MaxConnsPerHost)
+	maxIdleConnsPerHost := config.IntDefault("MAX_IDLE_CONNS_PER_HOST", controller.Transport.MaxIdleConnsPerHost)
 	hostname, _ := os.Hostname()
 
 	if ingressClass != "" {
 		controller.IngressClass = ingressClass
 	}
+
+	controller.Transport.MaxConnsPerHost = maxConnsPerHost
+	controller.Transport.MaxIdleConnsPerHost = maxIdleConnsPerHost
 
 	glog.Infoln("parapet-ingress-controller")
 	glog.Infoln("version:", version)
