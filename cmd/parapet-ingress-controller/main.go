@@ -38,18 +38,12 @@ func main() {
 	disableLog := config.Bool("DISABLE_LOG")
 	waitBeforeShutdown := config.DurationDefault("WAIT_BEFORE_SHUTDOWN", 30*time.Second)
 	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
-	hostConcurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY")
-	hostConcurrentSize := config.Int("HOST_CONCURRENT_SIZE")
-	maxConnsPerHost := config.IntDefault("MAX_CONNS_PER_HOST", controller.Transport.MaxConnsPerHost)
-	maxIdleConnsPerHost := config.IntDefault("MAX_IDLE_CONNS_PER_HOST", controller.Transport.MaxIdleConnsPerHost)
+
 	hostname, _ := os.Hostname()
 
 	if ingressClass != "" {
 		controller.IngressClass = ingressClass
 	}
-
-	controller.Transport.MaxConnsPerHost = maxConnsPerHost
-	controller.Transport.MaxIdleConnsPerHost = maxIdleConnsPerHost
 
 	glog.Infoln("parapet-ingress-controller")
 	glog.Infoln("version:", version)
@@ -80,6 +74,8 @@ func main() {
 
 	go prom.Start(":9187")
 
+	configTransport()
+
 	ctrl := controller.New(watchNamespace)
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)
@@ -101,21 +97,8 @@ func main() {
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
 	m.Use(parapet.MiddlewareFunc(lowerCaseHost))
-	if hostConcurrentCapacity > 0 && hostConcurrentSize > 0 {
-		m.Use(&ratelimit.RateLimiter{
-			Strategy: &ratelimit.ConcurrentQueueStrategy{
-				Capacity: hostConcurrentCapacity,
-				Size:     hostConcurrentSize,
-			},
-			Key: func(r *http.Request) string {
-				return r.Host
-			},
-			ExceededHandler: func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
-				http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-				metric.HostRatelimit(r.Host)
-			},
-		})
-	}
+	m.Use(hostRatelimit())
+
 	if !disableLog {
 		m.Use(logger.Stdout())
 	}
@@ -230,4 +213,76 @@ func lowerCaseHost(h http.Handler) http.Handler {
 		r.Host = strings.ToLower(r.Host)
 		h.ServeHTTP(w, r)
 	})
+}
+
+func configTransport() {
+	controller.Transport.MaxConnsPerHost = config.IntDefault(
+		"TR_MAX_CONNS_PER_HOST",
+		controller.Transport.MaxConnsPerHost)
+	controller.Transport.MaxIdleConnsPerHost = config.IntDefault(
+		"TR_MAX_IDLE_CONNS_PER_HOST",
+		controller.Transport.MaxIdleConnsPerHost)
+}
+
+func hostFromRequest(r *http.Request) string {
+	return r.Host
+}
+
+func hostRatelimit() parapet.Middleware {
+	hostConcurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY")
+	hostConcurrentSize := config.Int("HOST_CONCURRENT_SIZE")
+	hostUpgradeCapacity := config.Int("HOST_UPGRADE_CAPACITY")
+
+	isUpgrade := func(r *http.Request) bool {
+		return r.Header.Get("Upgrade") == ""
+	}
+	isNotUpgrade := func(r *http.Request) bool {
+		return r.Header.Get("Upgrade") != ""
+	}
+	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		metric.HostRatelimit(r.Host)
+	}
+
+	m := parapet.Middlewares{}
+
+	if hostConcurrentCapacity > 0 && hostConcurrentSize > 0 {
+		m.Use(parapet.Cond{
+			If: isNotUpgrade,
+			Then: &ratelimit.RateLimiter{
+				Strategy: &ratelimit.ConcurrentQueueStrategy{
+					Capacity: hostConcurrentCapacity,
+					Size:     hostConcurrentSize,
+				},
+				Key:             hostFromRequest,
+				ExceededHandler: exceededHandler,
+			},
+		})
+	} else if hostConcurrentCapacity > 0 {
+		m.Use(parapet.Cond{
+			If: isNotUpgrade,
+			Then: &ratelimit.RateLimiter{
+				Strategy: &ratelimit.ConcurrentStrategy{
+					Capacity: hostConcurrentCapacity,
+				},
+				Key:             hostFromRequest,
+				ExceededHandler: exceededHandler,
+			},
+		})
+	}
+
+	if hostUpgradeCapacity > 0 {
+		m.Use(parapet.Cond{
+			If: isUpgrade,
+			Then: &ratelimit.RateLimiter{
+				Strategy: &ratelimit.ConcurrentStrategy{
+					Capacity: hostUpgradeCapacity,
+				},
+				Key:             hostFromRequest,
+				ExceededHandler: exceededHandler,
+			},
+		})
+	}
+
+	return m
 }

@@ -312,8 +312,8 @@ github.com/modern-go/reflect2 v0.0.0-20180701023420-4b7aa43c6742/go.mod h1:bx2lN
 github.com/modern-go/reflect2 v1.0.1/go.mod h1:bx2lNnkwVCuqBIxFjflWJWanXIb3RllmbCylyMrvgv0=
 github.com/modern-go/reflect2 v1.0.2 h1:xBagoLtFs94CBntxluKeaWgTMpvLxC4ur3nMaC9Gz0M=
 github.com/modern-go/reflect2 v1.0.2/go.mod h1:yWuevngMOJpCy52FWWMvUC8ws7m/LJsjYzDa0/r8luk=
-github.com/moonrhythm/parapet v0.11.1 h1:i9m8nQB84W9eGHJ7cJXKEQPy++BjTkpkvN97xjDh01s=
-github.com/moonrhythm/parapet v0.11.1/go.mod h1:UL7MgKNC3TTSp7on/qnEDwV+2ilGkhIFUAW2K/WgPV8=
+github.com/moonrhythm/parapet v0.11.2-0.20220706162636-ad71925574ea h1:hJwDAY1oT+Gkv8vGXhtMdgDfrFIwkb3F1Nfk5NTR5j0=
+github.com/moonrhythm/parapet v0.11.2-0.20220706162636-ad71925574ea/go.mod h1:UL7MgKNC3TTSp7on/qnEDwV+2ilGkhIFUAW2K/WgPV8=
 github.com/munnerz/goautoneg v0.0.0-20120707110453-a547fc61f48d/go.mod h1:+n7T8mK8HuQTcFwEeznm/DIxMOiR9yIdICNftLE1DvQ=
 github.com/mwitkow/go-conntrack v0.0.0-20161129095857-cc309e4a2223/go.mod h1:qRWi+5nqEBWmkhHvq77mSJWrCKwh8bxhgT7d/eI7P4U=
 github.com/mwitkow/go-conntrack v0.0.0-20190716064945-2f068394615f/go.mod h1:qRWi+5nqEBWmkhHvq77mSJWrCKwh8bxhgT7d/eI7P4U=
