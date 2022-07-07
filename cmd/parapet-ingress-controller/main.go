@@ -241,10 +241,13 @@ func hostRatelimit() parapet.Middleware {
 	}
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		metric.HostRatelimit(r.Host)
+		metric.HostRatelimitRequest(r.Host)
 	}
 
 	m := parapet.Middlewares{}
+
+	m.Use(metric.HostRateLimitActiveTracker())
+	m.Use(metric.HostRateLimitUpgradeTracker())
 
 	if hostConcurrentCapacity > 0 && hostConcurrentSize > 0 {
 		m.Use(parapet.Cond{
