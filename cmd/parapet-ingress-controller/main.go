@@ -13,6 +13,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
+	"github.com/moonrhythm/parapet/pkg/host"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
@@ -96,7 +97,8 @@ func main() {
 
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
-	m.Use(parapet.MiddlewareFunc(lowerCaseHost))
+	m.Use(host.StripPort())
+	m.Use(host.ToLower())
 	m.Use(hostRatelimit())
 
 	if !disableLog {
@@ -206,13 +208,6 @@ func main() {
 	}
 
 	wg.Wait()
-}
-
-func lowerCaseHost(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Host = strings.ToLower(r.Host)
-		h.ServeHTTP(w, r)
-	})
 }
 
 func configTransport() {
