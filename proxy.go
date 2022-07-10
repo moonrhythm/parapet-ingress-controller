@@ -33,7 +33,6 @@ func (p *bufferPool) Put(b []byte) {
 var Transport = &http.Transport{
 	DialContext:           dialContext,
 	MaxIdleConnsPerHost:   100,
-	MaxConnsPerHost:       1000,
 	IdleConnTimeout:       10 * time.Second,
 	ExpectContinueTimeout: time.Second,
 	DisableCompression:    true,
