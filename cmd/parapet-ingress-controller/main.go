@@ -223,6 +223,7 @@ func hostFromRequest(r *http.Request) string {
 	return r.Host
 }
 
+// hostRatelimit protects from unresponsive upstreams by limit concurrent requests to the same host.
 func hostRatelimit() parapet.Middleware {
 	hostConcurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY")
 	hostConcurrentSize := config.Int("HOST_CONCURRENT_SIZE")
@@ -252,8 +253,9 @@ func hostRatelimit() parapet.Middleware {
 					Capacity: hostConcurrentCapacity,
 					Size:     hostConcurrentSize,
 				},
-				Key:             hostFromRequest,
-				ExceededHandler: exceededHandler,
+				Key:                  hostFromRequest,
+				ExceededHandler:      exceededHandler,
+				ReleaseOnWriteHeader: true,
 			},
 		})
 	} else if hostConcurrentCapacity > 0 {
@@ -263,8 +265,9 @@ func hostRatelimit() parapet.Middleware {
 				Strategy: &ratelimit.ConcurrentStrategy{
 					Capacity: hostConcurrentCapacity,
 				},
-				Key:             hostFromRequest,
-				ExceededHandler: exceededHandler,
+				Key:                  hostFromRequest,
+				ExceededHandler:      exceededHandler,
+				ReleaseOnWriteHeader: true,
 			},
 		})
 	}
@@ -276,8 +279,9 @@ func hostRatelimit() parapet.Middleware {
 				Strategy: &ratelimit.ConcurrentStrategy{
 					Capacity: hostUpgradeCapacity,
 				},
-				Key:             hostFromRequest,
-				ExceededHandler: exceededHandler,
+				Key:                  hostFromRequest,
+				ExceededHandler:      exceededHandler,
+				ReleaseOnWriteHeader: true,
 			},
 		})
 	}
