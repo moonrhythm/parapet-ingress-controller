@@ -81,8 +81,7 @@ annotations:
 - parapet_backend_network_write_bytes{addr}
 - parapet_reload{success}
 - parapet_host_ratelimit_requests{host}
-- parapet_host_ratelimit_active_requests{host}
-- parapet_host_ratelimit_active_upgrades{host}
+- parapet_host_active_requests{host, upgrade}
 
 #### Metrics directly use from parapet
 

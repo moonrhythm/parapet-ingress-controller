@@ -55,6 +55,7 @@ func main() {
 	glog.Infoln("pod_namespace:", podNamespace)
 	glog.Infoln("watch_namespace:", watchNamespace)
 	glog.Infoln("profiler:", enableProfiler)
+	glog.Infoln("http_server_max_header_bytes:", httpServerMaxHeaderBytes)
 
 	if enableProfiler {
 		err := profiler.Start(profiler.Config{
@@ -99,6 +100,7 @@ func main() {
 	m.Use(ctrl.Healthz())
 	m.Use(host.StripPort())
 	m.Use(host.ToLower())
+	m.Use(metric.HostActiveTracker())
 	m.Use(hostRatelimit())
 
 	if !disableLog {
@@ -219,72 +221,44 @@ func configTransport() {
 		controller.Transport.MaxIdleConnsPerHost)
 }
 
-func hostFromRequest(r *http.Request) string {
-	return r.Host
-}
-
 // hostRatelimit protects from unresponsive upstreams by limit concurrent requests to the same host.
 func hostRatelimit() parapet.Middleware {
-	hostConcurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY")
-	hostConcurrentSize := config.Int("HOST_CONCURRENT_SIZE")
-	hostUpgradeCapacity := config.Int("HOST_UPGRADE_CAPACITY")
+	hostConcurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY") // concurrent requests
+	hostConcurrentSize := config.Int("HOST_CONCURRENT_SIZE")         // queue size
 
-	isUpgrade := func(r *http.Request) bool {
-		return r.Header.Get("Upgrade") == ""
+	hostFromRequest := func(r *http.Request) string {
+		return r.Host
 	}
-	isNotUpgrade := func(r *http.Request) bool {
-		return r.Header.Get("Upgrade") != ""
-	}
+
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 		metric.HostRatelimitRequest(r.Host)
 	}
 
-	m := parapet.Middlewares{}
-
-	m.Use(metric.HostRateLimitActiveTracker())
-	m.Use(metric.HostRateLimitUpgradeTracker())
-
 	if hostConcurrentCapacity > 0 && hostConcurrentSize > 0 {
-		m.Use(parapet.Cond{
-			If: isNotUpgrade,
-			Then: &ratelimit.RateLimiter{
-				Strategy: &ratelimit.ConcurrentQueueStrategy{
-					Capacity: hostConcurrentCapacity,
-					Size:     hostConcurrentSize,
-				},
-				Key:                  hostFromRequest,
-				ExceededHandler:      exceededHandler,
-				ReleaseOnWriteHeader: true,
+		glog.Infof("host_ratelimit: strategy=ConcurrentQueue, capacity=%d, size=%d", hostConcurrentCapacity, hostConcurrentSize)
+		return ratelimit.RateLimiter{
+			Strategy: &ratelimit.ConcurrentQueueStrategy{
+				Capacity: hostConcurrentCapacity,
+				Size:     hostConcurrentSize,
 			},
-		})
+			Key:                  hostFromRequest,
+			ExceededHandler:      exceededHandler,
+			ReleaseOnWriteHeader: true,
+			ReleaseOnHijacked:    true,
+		}
 	} else if hostConcurrentCapacity > 0 {
-		m.Use(parapet.Cond{
-			If: isNotUpgrade,
-			Then: &ratelimit.RateLimiter{
-				Strategy: &ratelimit.ConcurrentStrategy{
-					Capacity: hostConcurrentCapacity,
-				},
-				Key:                  hostFromRequest,
-				ExceededHandler:      exceededHandler,
-				ReleaseOnWriteHeader: true,
+		glog.Infof("host_ratelimit: strategy=Concurrent, capacity=%d")
+		return ratelimit.RateLimiter{
+			Strategy: &ratelimit.ConcurrentStrategy{
+				Capacity: hostConcurrentCapacity,
 			},
-		})
+			Key:                  hostFromRequest,
+			ExceededHandler:      exceededHandler,
+			ReleaseOnWriteHeader: true,
+			ReleaseOnHijacked:    true,
+		}
 	}
 
-	if hostUpgradeCapacity > 0 {
-		m.Use(parapet.Cond{
-			If: isUpgrade,
-			Then: &ratelimit.RateLimiter{
-				Strategy: &ratelimit.ConcurrentStrategy{
-					Capacity: hostUpgradeCapacity,
-				},
-				Key:                  hostFromRequest,
-				ExceededHandler:      exceededHandler,
-				ReleaseOnWriteHeader: true,
-			},
-		})
-	}
-
-	return m
+	return nil
 }
