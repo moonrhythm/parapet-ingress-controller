@@ -248,7 +248,7 @@ func hostRatelimit() parapet.Middleware {
 			ReleaseOnHijacked:    true,
 		}
 	} else if hostConcurrentCapacity > 0 {
-		glog.Infof("host_ratelimit: strategy=Concurrent, capacity=%d")
+		glog.Infof("host_ratelimit: strategy=Concurrent, capacity=%d", hostConcurrentCapacity)
 		return ratelimit.RateLimiter{
 			Strategy: &ratelimit.ConcurrentStrategy{
 				Capacity: hostConcurrentCapacity,

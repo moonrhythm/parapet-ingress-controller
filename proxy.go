@@ -125,6 +125,10 @@ func isDialError(err error) bool {
 	if err == nil {
 		return false
 	}
+	// go1.19 i/o timeout error will now satisfy errors.Is(err, context.DeadlineExceeded)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
 
 	var netOpError *net.OpError
 	return errors.As(err, &netOpError) && netOpError.Op == "dial"
