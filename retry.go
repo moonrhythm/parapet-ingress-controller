@@ -51,7 +51,7 @@ func retryMiddleware(h http.Handler) http.Handler {
 
 		for i := 0; i < maxRetry; i++ {
 			if tryServe(w, r) {
-				break
+				return
 			}
 
 			select {
@@ -60,6 +60,7 @@ func retryMiddleware(h http.Handler) http.Handler {
 				break
 			}
 		}
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	})
 }
 
