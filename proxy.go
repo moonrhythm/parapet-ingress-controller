@@ -86,11 +86,6 @@ var (
 )
 
 var proxy = &httputil.ReverseProxy{
-	Director: func(req *http.Request) {
-		if _, ok := req.Header["User-Agent"]; !ok {
-			req.Header.Set("User-Agent", "")
-		}
-	},
 	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
 	Transport:  transportGateway{},
 	ModifyResponse: func(resp *http.Response) error {
