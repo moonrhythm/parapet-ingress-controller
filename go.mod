@@ -5,7 +5,7 @@ go 1.20
 require (
 	cloud.google.com/go v0.107.0 // indirect
 	cloud.google.com/go/profiler v0.3.1
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.11.1
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.11.2
 	github.com/acoshift/configfile v1.7.0
 	github.com/golang/glog v1.0.0
 	github.com/moonrhythm/parapet v0.11.3-0.20220717132039-46704e3b5509
@@ -26,7 +26,7 @@ require (
 	cloud.google.com/go/compute v1.14.0 // indirect
 	cloud.google.com/go/compute/metadata v0.2.3 // indirect
 	cloud.google.com/go/trace v1.8.0 // indirect
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.35.1 // indirect
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.35.2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.1.2 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
