@@ -93,44 +93,47 @@ func init() {
 }
 
 type badAddrTable struct {
-	mu    sync.RWMutex
-	addrs map[string]struct{}
+	addrs sync.Map
 }
+
+const badDuration = 2 * time.Second
 
 func (t *badAddrTable) MarkBad(addr string) {
 	glog.Warningf("badAddrTable: mark bad %s", addr)
-
-	t.mu.Lock()
-	if t.addrs == nil {
-		t.addrs = make(map[string]struct{})
-	}
-	t.addrs[addr] = struct{}{}
-	t.mu.Unlock()
+	t.addrs.Store(addr, time.Now())
 }
 
 func (t *badAddrTable) IsBad(addr string) bool {
-	t.mu.RLock()
-	_, ok := t.addrs[addr]
-	t.mu.RUnlock()
-	return ok
+	p, ok := t.addrs.Load(addr)
+	if !ok {
+		return false
+	}
+	return time.Since(p.(time.Time)) <= badDuration
 }
 
 func (t *badAddrTable) Clear() {
-	t.mu.Lock()
-	t.addrs = nil
-	t.mu.Unlock()
+	glog.Info("badAddrTable: clearing table")
+
+	start := time.Now()
+	var clear int
+	t.addrs.Range(func(key, value any) bool {
+		k, v := key.(string), value.(time.Time)
+		if time.Since(v) > badDuration {
+			t.addrs.Delete(k)
+			clear++
+		}
+		return true
+	})
+	glog.Infof("badAddrTable: cleared table in %s, removed %d records", time.Since(start), clear)
 }
 
 func (t *badAddrTable) clearLoop() {
 	glog.Info("badAddrTable: clear loop started")
 
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
+	const clearDuration = 1 * time.Minute
 
 	for {
-		select {
-		case <-ticker.C:
-			t.Clear()
-		}
+		time.Sleep(clearDuration)
+		t.Clear()
 	}
 }
