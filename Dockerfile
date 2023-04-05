@@ -1,11 +1,13 @@
-FROM golang:1.20.3-alpine3.17
+FROM golang:1.20.3-bullseye
 
 ARG VERSION
+ARG GOAMD64
 
-RUN apk --no-cache add git build-base brotli-dev
+RUN apt-get update && \
+	apt-get -y install libbrotli-dev
 
 ENV CGO_ENABLED=1
-ENV GOAMD64=v3
+ENV GOAMD64=$GOAMD64
 
 WORKDIR /workspace
 ADD go.mod go.sum ./
@@ -18,9 +20,11 @@ RUN go build \
 		-tags=cbrotli \
 		./cmd/parapet-ingress-controller
 
-FROM alpine:3.17
+FROM debian:bullseye-slim
 
-RUN apk add --no-cache ca-certificates tzdata brotli
+RUN apt-get update && \
+	apt-get -y install libbrotli1 && \
+	rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

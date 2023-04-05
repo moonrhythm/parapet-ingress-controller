@@ -4,12 +4,30 @@ steps:
   - build
   - --build-arg
   - VERSION=$TAG_NAME
+  - --build-arg
+  - GOAMD64=v3
   - -t
-  - gcr.io/$PROJECT_ID/parapet-ingress-controller
+  - gcr.io/$PROJECT_ID/parapet-ingress-controller:latest
   - '.'
+  waitFor: ['-']
 - name: gcr.io/cloud-builders/docker
-  args: [tag, gcr.io/$PROJECT_ID/parapet-ingress-controller, gcr.io/$PROJECT_ID/parapet-ingress-controller:$TAG_NAME]
+  args:
+  - build
+  - --build-arg
+  - VERSION=$TAG_NAME
+  - --build-arg
+  - GOAMD64=v1
+  - -t
+  - gcr.io/$PROJECT_ID/parapet-ingress-controller:latest-amd64v1
+  - '.'
+  waitFor: ['-']
+- name: gcr.io/cloud-builders/docker
+  args: [tag, gcr.io/$PROJECT_ID/parapet-ingress-controller:latest, gcr.io/$PROJECT_ID/parapet-ingress-controller:$TAG_NAME]
+- name: gcr.io/cloud-builders/docker
+  args: [tag, gcr.io/$PROJECT_ID/parapet-ingress-controller:latest-amd64v1, gcr.io/$PROJECT_ID/parapet-ingress-controller:$TAG_NAME-amd64v1]
 
 images:
-- gcr.io/$PROJECT_ID/parapet-ingress-controller
+- gcr.io/$PROJECT_ID/parapet-ingress-controller:latest
+- gcr.io/$PROJECT_ID/parapet-ingress-controller:latest-amd64v1
 - gcr.io/$PROJECT_ID/parapet-ingress-controller:$TAG_NAME
+- gcr.io/$PROJECT_ID/parapet-ingress-controller:$TAG_NAME-amd64v1
