@@ -138,7 +138,12 @@ var dialer = &net.Dialer{
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
 	conn, err = dialer.DialContext(ctx, network, addr)
 	if err != nil {
-		globalBadAddrTable.MarkBad(addr)
+		select {
+		default:
+			globalBadAddrTable.MarkBad(addr)
+		case <-ctx.Done(): // parent context canceled, do not mark bad
+		}
+
 		glog.Errorf("can not connect (addr=%s, err=%v)", addr, err)
 		return
 	}
