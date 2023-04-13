@@ -134,7 +134,7 @@ func (t *badAddrTable) Clear() {
 func (t *badAddrTable) clearLoop() {
 	glog.Info("badAddrTable: clear loop started")
 
-	const clearDuration = 1 * time.Minute
+	const clearDuration = 10 * time.Minute
 
 	for {
 		time.Sleep(clearDuration)
