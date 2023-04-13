@@ -116,8 +116,6 @@ func (t *badAddrTable) IsBad(host string) bool {
 }
 
 func (t *badAddrTable) Clear() {
-	glog.Info("badAddrTable: clearing table")
-
 	start := time.Now()
 	var clear int
 	t.addrs.Range(func(key, value any) bool {
@@ -128,7 +126,9 @@ func (t *badAddrTable) Clear() {
 		}
 		return true
 	})
-	glog.Infof("badAddrTable: cleared table in %s, removed %d records", time.Since(start), clear)
+	if clear > 0 {
+		glog.Infof("badAddrTable: cleared table in %s, removed %d records", time.Since(start), clear)
+	}
 }
 
 func (t *badAddrTable) clearLoop() {
