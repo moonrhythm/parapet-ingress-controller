@@ -60,8 +60,8 @@ var h2cTransport = &_h2cTransport{
 	&http2.Transport{
 		AllowHTTP:          true,
 		DisableCompression: true,
-		DialTLS: func(network, addr string, _ *tls.Config) (net.Conn, error) {
-			return dialContext(context.Background(), network, addr)
+		DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
+			return dialContext(ctx, network, addr)
 		},
 	},
 }
@@ -100,7 +100,7 @@ var proxy = &httputil.ReverseProxy{
 		}
 	},
 	ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-		if err == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			// client canceled request
 			w.WriteHeader(499)
 			return
@@ -132,16 +132,14 @@ func isDialError(err error) bool {
 
 var dialer = &net.Dialer{
 	Timeout:   2 * time.Second,
-	KeepAlive: time.Minute,
+	KeepAlive: 30 * time.Second,
 }
 
 func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err error) {
 	conn, err = dialer.DialContext(ctx, network, addr)
 	if err != nil {
-		select {
-		default:
+		if ctx.Err() == nil { // parent context is not canceled
 			globalBadAddrTable.MarkBad(addr)
-		case <-ctx.Done(): // parent context canceled, do not mark bad
 		}
 
 		glog.Errorf("can not connect (addr=%s, err=%v)", addr, err)

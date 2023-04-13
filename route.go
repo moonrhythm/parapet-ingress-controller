@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,22 +12,28 @@ import (
 )
 
 type rrlb struct {
-	IPs     []string
+	IPs     []string // immutable
 	current uint32
 }
 
-func (lb *rrlb) Get() (ip string, length int) {
+func (lb *rrlb) Get() (ip string) {
 	l := len(lb.IPs)
 	if l == 0 {
-		return "", l
+		return ""
 	}
 	if l == 1 {
-		return lb.IPs[0], l
+		return lb.IPs[0]
 	}
 
-	p := atomic.AddUint32(&lb.current, 1)
-	i := int(p) % l
-	return lb.IPs[i], l
+	p := int(atomic.AddUint32(&lb.current, 1)) % l
+	for k := 0; k < l; k++ { // try gets not bad address
+		i := (p + k) % l
+		ip = lb.IPs[i]
+		if !globalBadAddrTable.IsBad(ip) {
+			return
+		}
+	}
+	return lb.IPs[p] // all bad, return first
 }
 
 var globalRouteTable routeTable
@@ -60,18 +67,11 @@ func (t *routeTable) Lookup(addr string) string {
 		return addr
 	}
 
-	for i := 0; i < 100; i++ { // hard limit to prevent infinite loop
-		hostIP, n := targetHost.Get()
-		if hostIP == "" {
-			return addr
-		}
-
-		addr = fmt.Sprintf("%s:%s", hostIP, targetPort)
-		if n <= 1 || i >= n+2 || !globalBadAddrTable.IsBad(addr) {
-			return addr
-		}
+	hostIP := targetHost.Get()
+	if hostIP == "" {
+		hostIP = addr
 	}
-	return addr
+	return fmt.Sprintf("%s:%s", hostIP, targetPort)
 }
 
 func (t *routeTable) SetHostRoute(routes map[string]*rrlb) {
@@ -99,12 +99,16 @@ type badAddrTable struct {
 const badDuration = 2 * time.Second
 
 func (t *badAddrTable) MarkBad(addr string) {
-	glog.Warningf("badAddrTable: mark bad %s", addr)
-	t.addrs.Store(addr, time.Now())
+	host, _, _ := net.SplitHostPort(addr)
+	if host == "" {
+		host = addr
+	}
+	glog.Warningf("badAddrTable: mark bad %s", host)
+	t.addrs.Store(host, time.Now())
 }
 
-func (t *badAddrTable) IsBad(addr string) bool {
-	p, ok := t.addrs.Load(addr)
+func (t *badAddrTable) IsBad(host string) bool {
+	p, ok := t.addrs.Load(host)
 	if !ok {
 		return false
 	}
