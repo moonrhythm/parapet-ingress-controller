@@ -140,9 +140,8 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 	if err != nil {
 		if ctx.Err() == nil { // parent context is not canceled
 			globalBadAddrTable.MarkBad(addr)
+			glog.Errorf("can not connect (addr=%s, err=%v)", addr, err)
 		}
-
-		glog.Errorf("can not connect (addr=%s, err=%v)", addr, err)
 		return
 	}
 
