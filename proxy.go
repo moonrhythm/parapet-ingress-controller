@@ -106,7 +106,7 @@ var proxy = &httputil.ReverseProxy{
 			return
 		}
 
-		glog.Warningf("upstream error (err=%v)", err)
+		glog.Warningf("proxy: upstream error; host=%s, err=%v", r.Host, err)
 
 		if isRetryable(err) {
 			// lets handler retry
@@ -140,7 +140,7 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 	if err != nil {
 		if ctx.Err() == nil { // parent context is not canceled
 			globalBadAddrTable.MarkBad(addr)
-			glog.Errorf("can not connect (addr=%s, err=%v)", addr, err)
+			glog.Errorf("proxy: can not connect; addr=%s, err=%v", addr, err)
 		}
 		return
 	}
