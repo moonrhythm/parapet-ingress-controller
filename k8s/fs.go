@@ -73,7 +73,7 @@ func (c *fsClient) load() error {
 	return nil
 }
 
-func (c *fsClient) decode(raw []byte, out interface{}) error {
+func (c *fsClient) decode(raw []byte, out any) error {
 	return yaml.NewYAMLOrJSONDecoder(bytes.NewReader(raw), 32*1024).Decode(out)
 }
 

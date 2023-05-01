@@ -87,7 +87,7 @@ var (
 
 var proxy = &httputil.ReverseProxy{
 	Director:   func(_ *http.Request) {},
-	BufferPool: &bufferPool{sync.Pool{New: func() interface{} { return make([]byte, bufferSize) }}},
+	BufferPool: &bufferPool{sync.Pool{New: func() any { return make([]byte, bufferSize) }}},
 	Transport:  transportGateway{},
 	ModifyResponse: func(resp *http.Response) error {
 		switch resp.StatusCode {

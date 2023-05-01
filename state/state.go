@@ -9,7 +9,9 @@ import (
 )
 
 // State holds request state
-type State map[string]interface{}
+//
+// It's not safe for concurrent use by multiple goroutines.
+type State map[string]any
 
 type ctxKey struct{}
 
