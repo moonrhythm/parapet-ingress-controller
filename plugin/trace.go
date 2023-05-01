@@ -14,21 +14,21 @@ import (
 
 // JaegerTrace traces to jaeger
 func JaegerTrace(ctx Context) {
-	enable := ctx.Ingress.Annotations["parapet.moonrhythm.io/jaeger-trace"]
+	enable := ctx.Ingress.Annotations[namespace+"/jaeger-trace"]
 	if enable != "true" {
 		return
 	}
 
-	collectorEndpoint := ctx.Ingress.Annotations["parapet.moonrhythm.io/jaeger-trace-collector-endpoint"]
+	collectorEndpoint := ctx.Ingress.Annotations[namespace+"/jaeger-trace-collector-endpoint"]
 	if collectorEndpoint == "" {
 		return
 	}
 
-	collectorUsername := ctx.Ingress.Annotations["parapet.moonrhythm.io/jaeger-trace-collector-username"]
-	collectorPassword := ctx.Ingress.Annotations["parapet.moonrhythm.io/jaeger-trace-collector-password"]
+	collectorUsername := ctx.Ingress.Annotations[namespace+"/jaeger-trace-collector-username"]
+	collectorPassword := ctx.Ingress.Annotations[namespace+"/jaeger-trace-collector-password"]
 
 	var sampler float64 = 1
-	if s := ctx.Ingress.Annotations["parapet.moonrhythm.io/jaeger-trace-sampler"]; s != "" {
+	if s := ctx.Ingress.Annotations[namespace+"/jaeger-trace-sampler"]; s != "" {
 		sampler, _ = strconv.ParseFloat(s, 64)
 		if sampler <= 0 {
 			return
@@ -68,18 +68,18 @@ func JaegerTrace(ctx Context) {
 
 // OperationsTrace traces to google cloud operation
 func OperationsTrace(ctx Context) {
-	enable := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace"]
+	enable := ctx.Ingress.Annotations[namespace+"/operations-trace"]
 	if enable != "true" {
 		return
 	}
 
-	projectID := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace-project"]
+	projectID := ctx.Ingress.Annotations[namespace+"/operations-trace-project"]
 	if projectID == "" {
 		return
 	}
 
 	var sampler float64 = 1
-	if s := ctx.Ingress.Annotations["parapet.moonrhythm.io/operations-trace-sampler"]; s != "" {
+	if s := ctx.Ingress.Annotations[namespace+"/operations-trace-sampler"]; s != "" {
 		sampler, _ = strconv.ParseFloat(s, 64)
 		if sampler <= 0 {
 			return

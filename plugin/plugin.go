@@ -20,6 +20,8 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
+const namespace = "parapet.moonrhythm.io"
+
 // Plugin injects middleware or mutate router while reading ingress object
 type Plugin func(ctx Context)
 
@@ -48,7 +50,7 @@ func InjectStateIngress(ctx Context) {
 // RedirectHTTPS redirects http to https
 // except /.well-known/acme-challenge
 func RedirectHTTPS(ctx Context) {
-	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/redirect-https"]; a == "true" {
+	if a := ctx.Ingress.Annotations[namespace+"/redirect-https"]; a == "true" {
 		ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasPrefix(r.RequestURI, "/.well-known/acme-challenge") {
@@ -70,7 +72,7 @@ func RedirectHTTPS(ctx Context) {
 
 // InjectHSTS injects hsts header
 func InjectHSTS(ctx Context) {
-	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/hsts"]; a != "" {
+	if a := ctx.Ingress.Annotations[namespace+"/hsts"]; a != "" {
 		if a == "preload" {
 			ctx.Use(hsts.Preload())
 		} else {
@@ -81,7 +83,7 @@ func InjectHSTS(ctx Context) {
 
 // RedirectRules load redirect rules from annotation and inject to routes
 func RedirectRules(ctx Context) {
-	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/redirect"]; a != "" {
+	if a := ctx.Ingress.Annotations[namespace+"/redirect"]; a != "" {
 		var obj map[string]string
 		yaml.Unmarshal([]byte(a), &obj)
 		for srcHost, targetURL := range obj {
@@ -112,19 +114,19 @@ func RedirectRules(ctx Context) {
 
 // RateLimit injects rate limit middleware
 func RateLimit(ctx Context) {
-	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/ratelimit-s"]; a != "" {
+	if a := ctx.Ingress.Annotations[namespace+"/ratelimit-s"]; a != "" {
 		rate, _ := strconv.Atoi(a)
 		if rate > 0 {
 			ctx.Use(ratelimit.FixedWindowPerSecond(rate))
 		}
 	}
-	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/ratelimit-m"]; a != "" {
+	if a := ctx.Ingress.Annotations[namespace+"/ratelimit-m"]; a != "" {
 		rate, _ := strconv.Atoi(a)
 		if rate > 0 {
 			ctx.Use(ratelimit.FixedWindowPerMinute(rate))
 		}
 	}
-	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/ratelimit-h"]; a != "" {
+	if a := ctx.Ingress.Annotations[namespace+"/ratelimit-h"]; a != "" {
 		rate, _ := strconv.Atoi(a)
 		if rate > 0 {
 			ctx.Use(ratelimit.FixedWindowPerHour(rate))
@@ -134,7 +136,7 @@ func RateLimit(ctx Context) {
 
 // BodyLimit injects body limit middleware
 func BodyLimit(ctx Context) {
-	if a := ctx.Ingress.Annotations["parapet.moonrhythm.io/body-limitrequest"]; a != "" {
+	if a := ctx.Ingress.Annotations[namespace+"/body-limitrequest"]; a != "" {
 		size, _ := strconv.ParseInt(a, 10, 64)
 		if size > 0 {
 			ctx.Use(body.LimitRequest(size))
@@ -144,7 +146,7 @@ func BodyLimit(ctx Context) {
 
 // UpstreamProtocol changes upstream protocol
 func UpstreamProtocol(ctx Context) {
-	proto := ctx.Ingress.Annotations["parapet.moonrhythm.io/upstream-protocol"]
+	proto := ctx.Ingress.Annotations[namespace+"/upstream-protocol"]
 	scheme := "http"
 	switch proto {
 	case "", "http":
@@ -164,7 +166,7 @@ func UpstreamProtocol(ctx Context) {
 
 // UpstreamHost overrides request's host
 func UpstreamHost(ctx Context) {
-	host := ctx.Ingress.Annotations["parapet.moonrhythm.io/upstream-host"]
+	host := ctx.Ingress.Annotations[namespace+"/upstream-host"]
 	if host == "" {
 		return
 	}
@@ -178,7 +180,7 @@ func UpstreamHost(ctx Context) {
 
 // UpstreamPath adds path prefix before send to upstream
 func UpstreamPath(ctx Context) {
-	prefix := ctx.Ingress.Annotations["parapet.moonrhythm.io/upstream-path"]
+	prefix := ctx.Ingress.Annotations[namespace+"/upstream-path"]
 	if prefix == "" {
 		return
 	}
@@ -219,7 +221,7 @@ func singleJoiningSlash(a, b string) string {
 // AllowRemote allows only request come from given ip range
 // except /.well-known/acme-challenge
 func AllowRemote(ctx Context) {
-	allowRemote := ctx.Ingress.Annotations["parapet.moonrhythm.io/allow-remote"]
+	allowRemote := ctx.Ingress.Annotations[namespace+"/allow-remote"]
 	if allowRemote == "" {
 		return
 	}
@@ -260,7 +262,7 @@ func AllowRemote(ctx Context) {
 
 // StripPrefix strip prefix request path
 func StripPrefix(ctx Context) {
-	prefix := ctx.Ingress.Annotations["parapet.moonrhythm.io/strip-prefix"]
+	prefix := ctx.Ingress.Annotations[namespace+"/strip-prefix"]
 	if prefix == "" {
 		return
 	}

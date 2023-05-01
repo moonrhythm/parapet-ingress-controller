@@ -22,7 +22,7 @@ var authHTTPClient = &http.Client{
 
 // BasicAuth adds basic auth
 func BasicAuth(ctx Context) {
-	ba := ctx.Ingress.Annotations["parapet.moonrhythm.io/basic-auth"]
+	ba := ctx.Ingress.Annotations[namespace+"/basic-auth"]
 	if ba == "" {
 		return
 	}
@@ -41,7 +41,7 @@ func BasicAuth(ctx Context) {
 
 // ForwardAuth adds forward auth
 func ForwardAuth(ctx Context) {
-	a := ctx.Ingress.Annotations["parapet.moonrhythm.io/forward-auth"]
+	a := ctx.Ingress.Annotations[namespace+"/forward-auth"]
 	if a == "" {
 		return
 	}
