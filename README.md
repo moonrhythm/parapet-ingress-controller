@@ -1,5 +1,9 @@
 # parapet-ingress-controller
 
+![Build Status](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/test.yaml/badge.svg?branch=master)
+[![codecov](https://codecov.io/gh/moonrhythm/parapet-ingress-controller/branch/master/graph/badge.svg)](https://codecov.io/gh/moonrhythm/parapet-ingress-controller)
+[![Go Report Card](https://goreportcard.com/badge/github.com/moonrhythm/parapet-ingress-controller)](https://goreportcard.com/report/github.com/moonrhythm/parapet-ingress-controller)
+
 Parapet Ingress Controller use [parapet](https://github.com/moonrhythm/parapet) framework
 to create Kubernetes ingress controller.
 
