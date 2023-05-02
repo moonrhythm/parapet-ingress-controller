@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
+	"github.com/moonrhythm/parapet-ingress-controller/cert"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
@@ -31,11 +31,11 @@ var IngressClass = "parapet"
 
 // Controller is the parapet ingress controller
 type Controller struct {
-	mu                sync.RWMutex
-	m                 *http.ServeMux
-	watchedServices   map[string]struct{}
-	watchedSecrets    map[string]struct{}
-	nameToCertificate map[string][]*tls.Certificate
+	mu              sync.RWMutex
+	m               *http.ServeMux
+	watchedServices map[string]struct{}
+	watchedSecrets  map[string]struct{}
+	certTable       cert.Table
 
 	plugins                []plugin.Plugin
 	health                 *healthz.Healthz
@@ -349,13 +349,12 @@ func (ctrl *Controller) reloadDebounced() {
 		}
 		certs = append(certs, &cert)
 	}
-	nameToCert := buildNameToCertificate(certs)
 
+	ctrl.certTable.Set(certs)
 	ctrl.mu.Lock()
 	ctrl.m = mux
 	ctrl.watchedServices = watchedServices
 	ctrl.watchedSecrets = watchedSecrets
-	ctrl.nameToCertificate = nameToCert
 	route.SetPortRoute(addrToPort)
 	ctrl.mu.Unlock()
 	ctrl.health.SetReady(true)
@@ -401,35 +400,8 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 	route.SetHostRoute(routes)
 }
 
-// GetCertificate returns certificate for given client hello information
 func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	// from tls/common.go
-
-	ctrl.mu.RLock()
-	certs := ctrl.nameToCertificate
-	ctrl.mu.RUnlock()
-
-	name := strings.ToLower(clientHello.ServerName)
-
-	// exact name
-	if cert, ok := certs[name]; ok {
-		c := findSupportCert(cert, clientHello)
-		if c != nil {
-			return c, nil
-		}
-	}
-
-	// wildcard name
-	if len(name) > 0 {
-		labels := strings.Split(name, ".")
-		labels[0] = "*"
-		wildcardName := strings.Join(labels, ".")
-		if cert, ok := certs[wildcardName]; ok {
-			return findSupportCert(cert, clientHello), nil
-		}
-	}
-
-	return nil, nil
+	return ctrl.certTable.Get(clientHello)
 }
 
 // Healthz returns health check middleware
@@ -450,33 +422,4 @@ func buildHost(namespace, name string) string {
 func buildHostPort(namespace, name string, port int) string {
 	// service.namespace.svc.cluster.local:port
 	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, port)
-}
-
-func buildNameToCertificate(certs []*tls.Certificate) map[string][]*tls.Certificate {
-	m := make(map[string][]*tls.Certificate)
-	for _, cert := range certs {
-		var err error
-		x509Cert := cert.Leaf
-		if x509Cert == nil {
-			x509Cert, err = x509.ParseCertificate(cert.Certificate[0])
-			if err != nil {
-				continue
-			}
-		}
-		// use only SAN, CN already deprecated
-		for _, san := range x509Cert.DNSNames {
-			m[san] = append(m[san], cert)
-		}
-	}
-	return m
-}
-
-func findSupportCert(certs []*tls.Certificate, clientHello *tls.ClientHelloInfo) *tls.Certificate {
-	for _, cert := range certs {
-		err := clientHello.SupportsCertificate(cert)
-		if err == nil {
-			return cert
-		}
-	}
-	return nil
 }
