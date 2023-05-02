@@ -1,6 +1,7 @@
 package debounce
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,22 +11,27 @@ import (
 func TestDebounce(t *testing.T) {
 	t.Parallel()
 
-	var cnt int
+	var cnt int64
 	d := New(func() {
-		cnt++
+		atomic.AddInt64(&cnt, 1)
 	}, 10*time.Millisecond)
-	assert.Equal(t, 0, cnt)
+
+	eq := func(v int64) {
+		p := atomic.LoadInt64(&cnt)
+		assert.Equal(t, v, p)
+	}
+	eq(0)
 	d.Call() // block
-	assert.Equal(t, 1, cnt)
+	eq(1)
 	d.Call() // non-block
-	assert.Equal(t, 1, cnt)
+	eq(1)
 	time.Sleep(15 * time.Millisecond)
-	assert.Equal(t, 2, cnt)
+	eq(2)
 
 	d.Call()
 	d.Call()
 	d.Call()
 
 	time.Sleep(15 * time.Millisecond)
-	assert.Equal(t, 3, cnt)
+	eq(3)
 }
