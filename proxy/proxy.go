@@ -15,8 +15,9 @@ var (
 )
 
 type Proxy struct {
-	ReverseProxy httputil.ReverseProxy
+	OnDialError func(addr string)
 
+	reverseProxy  httputil.ReverseProxy
 	httpTransport *http.Transport
 	h2cTransport  *h2cTransport
 }
@@ -25,9 +26,10 @@ func New() *Proxy {
 	d := newDialer()
 
 	var p Proxy
+	d.onError = p.onDialError
 	p.httpTransport = newHTTPTransport(d.DialContext)
 	p.h2cTransport = newH2CTransport(d.DialContext, p.httpTransport)
-	p.ReverseProxy = httputil.ReverseProxy{
+	p.reverseProxy = httputil.ReverseProxy{
 		Director:   func(_ *http.Request) {},
 		BufferPool: newBufferPool(),
 		Transport: &gateway{
@@ -64,8 +66,14 @@ func New() *Proxy {
 	return &p
 }
 
+func (p *Proxy) onDialError(addr string) {
+	if p.OnDialError != nil {
+		p.OnDialError(addr)
+	}
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	p.ReverseProxy.ServeHTTP(w, r)
+	p.reverseProxy.ServeHTTP(w, r)
 }
 
 func (p *Proxy) ConfigTransport(f func(tr *http.Transport)) {

@@ -9,11 +9,11 @@ import (
 	"github.com/golang/glog"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
-	"github.com/moonrhythm/parapet-ingress-controller/route"
 )
 
 type dialer struct {
-	inner net.Dialer
+	inner   net.Dialer
+	onError func(addr string)
 }
 
 func newDialer() *dialer {
@@ -29,7 +29,9 @@ func (d *dialer) DialContext(ctx context.Context, network, addr string) (conn ne
 	conn, err = d.inner.DialContext(ctx, network, addr)
 	if err != nil {
 		if ctx.Err() == nil { // parent context is not canceled
-			route.MarkBad(addr)
+			if d.onError != nil {
+				d.onError(addr)
+			}
 			glog.Errorf("proxy: can not connect; addr=%s, err=%v", addr, err)
 		}
 		return

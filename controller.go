@@ -38,6 +38,7 @@ type Controller struct {
 	watchedServices map[string]struct{}
 	watchedSecrets  map[string]struct{}
 	certTable       cert.Table
+	routeTable      route.Table
 	proxy           *proxy.Proxy
 
 	plugins                []plugin.Plugin
@@ -56,6 +57,8 @@ func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl.reloadDebounce = debounce.New(ctrl.reloadDebounced, 300*time.Millisecond)
 	ctrl.reloadEndpointDebounce = debounce.New(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
 	ctrl.proxy = proxy
+	ctrl.routeTable.RunBackgroundJob()
+	ctrl.proxy.OnDialError = ctrl.routeTable.MarkBad
 	return ctrl
 }
 
@@ -305,7 +308,7 @@ func (ctrl *Controller) reloadDebounced() {
 
 					nr := r.WithContext(ctx)
 					nr.RemoteAddr = ""
-					nr.URL.Host = route.Lookup(target)
+					nr.URL.Host = ctrl.routeTable.Lookup(target)
 					ctrl.proxy.ServeHTTP(w, nr)
 				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)
@@ -359,7 +362,7 @@ func (ctrl *Controller) reloadDebounced() {
 	ctrl.m = mux
 	ctrl.watchedServices = watchedServices
 	ctrl.watchedSecrets = watchedSecrets
-	route.SetPortRoute(addrToPort)
+	ctrl.routeTable.SetPortRoute(addrToPort)
 	ctrl.mu.Unlock()
 	ctrl.health.SetReady(true)
 	ctrl.reloadEndpoint()
@@ -401,7 +404,7 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		routes[buildHost(ep.Namespace, ep.Name)] = &b
 	}
 
-	route.SetHostRoute(routes)
+	ctrl.routeTable.SetHostRoute(routes)
 }
 
 func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {

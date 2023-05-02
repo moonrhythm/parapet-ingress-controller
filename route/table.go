@@ -6,20 +6,21 @@ import (
 	"sync"
 )
 
-var globalRouteTable routeTable
-
-type routeTable struct {
+type Table struct {
 	mu               sync.RWMutex
+	onceStartBgJob   sync.Once
 	addrToTargetHost map[string]*RRLB
 	addrToTargetPort map[string]string
 	badAddr          badAddrTable
 }
 
-func init() {
-	go globalRouteTable.badAddr.clearLoop()
+func (t *Table) RunBackgroundJob() {
+	t.onceStartBgJob.Do(func() {
+		go t.badAddr.clearLoop()
+	})
 }
 
-func (t *routeTable) Lookup(addr string) string {
+func (t *Table) Lookup(addr string) string {
 	// addr only in dns name service.namespace.svc.cluster.local:port
 	i := strings.LastIndex(addr, ":")
 	if i < 0 {
@@ -49,30 +50,18 @@ func (t *routeTable) Lookup(addr string) string {
 	return fmt.Sprintf("%s:%s", hostIP, targetPort)
 }
 
-func (t *routeTable) SetHostRoute(routes map[string]*RRLB) {
+func (t *Table) SetHostRoute(routes map[string]*RRLB) {
 	t.mu.Lock()
 	t.addrToTargetHost = routes
 	t.mu.Unlock()
 }
 
-func (t *routeTable) SetPortRoute(routes map[string]string) {
+func (t *Table) SetPortRoute(routes map[string]string) {
 	t.mu.Lock()
 	t.addrToTargetPort = routes
 	t.mu.Unlock()
 }
 
-func Lookup(addr string) string {
-	return globalRouteTable.Lookup(addr)
-}
-
-func SetHostRoute(routes map[string]*RRLB) {
-	globalRouteTable.SetHostRoute(routes)
-}
-
-func SetPortRoute(routes map[string]string) {
-	globalRouteTable.SetPortRoute(routes)
-}
-
-func MarkBad(addr string) {
-	globalRouteTable.badAddr.MarkBad(addr)
+func (t *Table) MarkBad(addr string) {
+	t.badAddr.MarkBad(addr)
 }
