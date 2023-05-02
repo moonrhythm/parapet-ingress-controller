@@ -14,6 +14,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
+	"github.com/moonrhythm/parapet-ingress-controller/route"
 )
 
 const bufferSize = 16 * 1024
@@ -139,7 +140,7 @@ func dialContext(ctx context.Context, network, addr string) (conn net.Conn, err 
 	conn, err = dialer.DialContext(ctx, network, addr)
 	if err != nil {
 		if ctx.Err() == nil { // parent context is not canceled
-			globalBadAddrTable.MarkBad(addr)
+			route.MarkBad(addr)
 			glog.Errorf("proxy: can not connect; addr=%s, err=%v", addr, err)
 		}
 		return

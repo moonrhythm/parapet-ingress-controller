@@ -22,6 +22,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
+	"github.com/moonrhythm/parapet-ingress-controller/route"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
@@ -300,7 +301,7 @@ func (ctrl *Controller) reloadDebounced() {
 
 					nr := r.WithContext(ctx)
 					nr.RemoteAddr = ""
-					nr.URL.Host = globalRouteTable.Lookup(target)
+					nr.URL.Host = route.Lookup(target)
 					proxy.ServeHTTP(w, nr)
 				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)
@@ -355,7 +356,7 @@ func (ctrl *Controller) reloadDebounced() {
 	ctrl.watchedServices = watchedServices
 	ctrl.watchedSecrets = watchedSecrets
 	ctrl.nameToCertificate = nameToCert
-	globalRouteTable.SetPortRoute(addrToPort)
+	route.SetPortRoute(addrToPort)
 	ctrl.mu.Unlock()
 	ctrl.health.SetReady(true)
 	ctrl.reloadEndpoint()
@@ -382,13 +383,13 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		return
 	}
 
-	routes := make(map[string]*rrlb)
+	routes := make(map[string]*route.RRLB)
 	for _, ep := range endpoints {
 		if len(ep.Subsets) == 0 {
 			continue
 		}
 
-		var b rrlb
+		var b route.RRLB
 		for _, ss := range ep.Subsets {
 			for _, addr := range ss.Addresses {
 				b.IPs = append(b.IPs, addr.IP)
@@ -397,7 +398,7 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		routes[buildHost(ep.Namespace, ep.Name)] = &b
 	}
 
-	globalRouteTable.SetHostRoute(routes)
+	route.SetHostRoute(routes)
 }
 
 // GetCertificate returns certificate for given client hello information
