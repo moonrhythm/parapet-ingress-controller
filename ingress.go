@@ -19,6 +19,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/moonrhythm/parapet-ingress-controller/cert"
+	"github.com/moonrhythm/parapet-ingress-controller/debounce"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
@@ -39,8 +40,8 @@ type Controller struct {
 
 	plugins                []plugin.Plugin
 	health                 *healthz.Healthz
-	reloadDebounce         *debounce
-	reloadEndpointDebounce *debounce
+	reloadDebounce         *debounce.Debounce
+	reloadEndpointDebounce *debounce.Debounce
 	watchNamespace         string
 }
 
@@ -50,8 +51,8 @@ func New(watchNamespace string) *Controller {
 	ctrl.health = healthz.New()
 	ctrl.health.SetReady(false)
 	ctrl.watchNamespace = watchNamespace
-	ctrl.reloadDebounce = newDebounce(ctrl.reloadDebounced, 300*time.Millisecond)
-	ctrl.reloadEndpointDebounce = newDebounce(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
+	ctrl.reloadDebounce = debounce.New(ctrl.reloadDebounced, 300*time.Millisecond)
+	ctrl.reloadEndpointDebounce = debounce.New(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
 	return ctrl
 }
 

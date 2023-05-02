@@ -1,25 +1,25 @@
-package controller
+package debounce
 
 import (
 	"sync"
 	"time"
 )
 
-type debounce struct {
+type Debounce struct {
 	mu sync.Mutex
 	t  *time.Timer
 	f  func()
 	d  time.Duration
 }
 
-func newDebounce(f func(), d time.Duration) *debounce {
-	return &debounce{
+func New(f func(), d time.Duration) *Debounce {
+	return &Debounce{
 		f: f,
 		d: d,
 	}
 }
 
-func (d *debounce) Call() {
+func (d *Debounce) Call() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -30,6 +30,8 @@ func (d *debounce) Call() {
 		return
 	}
 
-	d.t.Stop()
+	if d.t != nil {
+		d.t.Stop()
+	}
 	d.t = time.AfterFunc(d.d, d.f)
 }
