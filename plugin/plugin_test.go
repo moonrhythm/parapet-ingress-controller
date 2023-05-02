@@ -41,6 +41,31 @@ func TestInjectStateIngress(t *testing.T) {
 	assert.True(t, called)
 }
 
+func TestUpstreamPath(t *testing.T) {
+	t.Parallel()
+
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/upstream-path": "/api",
+				},
+			},
+		},
+	}
+	UpstreamPath(ctx)
+
+	var called bool
+	r := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	w := httptest.NewRecorder()
+	ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/profile", r.URL.Path)
+		called = true
+	})).ServeHTTP(w, r)
+	assert.True(t, called)
+}
+
 func TestStripPrefix(t *testing.T) {
 	t.Parallel()
 
