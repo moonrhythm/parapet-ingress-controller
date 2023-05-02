@@ -22,6 +22,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
+	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
@@ -76,9 +77,10 @@ func main() {
 
 	go prom.Start(":9187")
 
-	configTransport()
+	proxy := proxy.New()
+	proxy.ConfigTransport(configTransport)
 
-	ctrl := controller.New(watchNamespace)
+	ctrl := controller.New(watchNamespace, proxy)
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)
 	ctrl.Use(plugin.RedirectHTTPS)
@@ -120,7 +122,7 @@ func main() {
 			trustProxy = parapet.Trusted()
 		case "false", "":
 		default:
-			// parse cidrs
+			// parse CIDRs
 
 			var list []string
 			for _, x := range strings.Split(p, ",") {
@@ -212,13 +214,11 @@ func main() {
 	wg.Wait()
 }
 
-func configTransport() {
-	controller.Transport.MaxConnsPerHost = config.IntDefault(
-		"TR_MAX_CONNS_PER_HOST",
-		controller.Transport.MaxConnsPerHost)
-	controller.Transport.MaxIdleConnsPerHost = config.IntDefault(
-		"TR_MAX_IDLE_CONNS_PER_HOST",
-		controller.Transport.MaxIdleConnsPerHost)
+func configTransport(tr *http.Transport) {
+	tr.MaxConnsPerHost = config.IntDefault(
+		"TR_MAX_CONNS_PER_HOST", tr.MaxConnsPerHost)
+	tr.MaxIdleConnsPerHost = config.IntDefault(
+		"TR_MAX_IDLE_CONNS_PER_HOST", tr.MaxIdleConnsPerHost)
 }
 
 // hostRatelimit protects from unresponsive upstreams by limit concurrent requests to the same host.

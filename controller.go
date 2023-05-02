@@ -23,6 +23,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
+	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 	"github.com/moonrhythm/parapet-ingress-controller/route"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
@@ -37,6 +38,7 @@ type Controller struct {
 	watchedServices map[string]struct{}
 	watchedSecrets  map[string]struct{}
 	certTable       cert.Table
+	proxy           *proxy.Proxy
 
 	plugins                []plugin.Plugin
 	health                 *healthz.Healthz
@@ -46,13 +48,14 @@ type Controller struct {
 }
 
 // New creates new ingress controller
-func New(watchNamespace string) *Controller {
+func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl := &Controller{}
 	ctrl.health = healthz.New()
 	ctrl.health.SetReady(false)
 	ctrl.watchNamespace = watchNamespace
 	ctrl.reloadDebounce = debounce.New(ctrl.reloadDebounced, 300*time.Millisecond)
 	ctrl.reloadEndpointDebounce = debounce.New(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
+	ctrl.proxy = proxy
 	return ctrl
 }
 
@@ -303,7 +306,7 @@ func (ctrl *Controller) reloadDebounced() {
 					nr := r.WithContext(ctx)
 					nr.RemoteAddr = ""
 					nr.URL.Host = route.Lookup(target)
-					proxy.ServeHTTP(w, nr)
+					ctrl.proxy.ServeHTTP(w, nr)
 				}))
 				glog.V(1).Infof("registered: %s => %s", src, target)
 

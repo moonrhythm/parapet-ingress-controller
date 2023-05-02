@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 )
 
 func retryMiddleware(h http.Handler) http.Handler {
@@ -29,7 +31,7 @@ func retryMiddleware(h http.Handler) http.Handler {
 					ok = true
 					return
 				}
-				if canRequestRetry(r) && isRetryable(err) {
+				if canRequestRetry(r) && proxy.IsRetryable(err) {
 					// retry
 					return
 				}
@@ -72,19 +74,6 @@ func backoffDuration(round int) (t time.Duration) {
 		t = maxBackoffDuration
 	}
 	return
-}
-
-func isRetryable(err error) bool {
-	if isDialError(err) {
-		return true
-	}
-	if errors.Is(err, errBadGateway) {
-		return true
-	}
-	if errors.Is(err, errServiceUnavailable) {
-		return true
-	}
-	return false
 }
 
 type trackBodyRead struct {
