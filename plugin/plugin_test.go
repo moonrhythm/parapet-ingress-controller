@@ -40,3 +40,28 @@ func TestInjectStateIngress(t *testing.T) {
 	})).ServeHTTP(w, r)
 	assert.True(t, called)
 }
+
+func TestStripPrefix(t *testing.T) {
+	t.Parallel()
+
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/strip-prefix": "/api",
+				},
+			},
+		},
+	}
+	StripPrefix(ctx)
+
+	var called bool
+	r := httptest.NewRequest(http.MethodGet, "/api/profile", nil)
+	w := httptest.NewRecorder()
+	ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/profile", r.URL.Path)
+		called = true
+	})).ServeHTTP(w, r)
+	assert.True(t, called)
+}
