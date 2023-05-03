@@ -92,6 +92,56 @@ func TestRedirectHTTPS(t *testing.T) {
 	})
 }
 
+func TestInjectHSTS(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Default", func(t *testing.T) {
+		ctx := Context{
+			Middlewares: &parapet.Middlewares{},
+			Ingress: &networking.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"parapet.moonrhythm.io/hsts": "true",
+					},
+				},
+			},
+		}
+		InjectHSTS(ctx)
+
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.True(t, called)
+		assert.Equal(t, "max-age=31536000", w.Header().Get("Strict-Transport-Security"))
+	})
+
+	t.Run("Preload", func(t *testing.T) {
+		ctx := Context{
+			Middlewares: &parapet.Middlewares{},
+			Ingress: &networking.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"parapet.moonrhythm.io/hsts": "preload",
+					},
+				},
+			},
+		}
+		InjectHSTS(ctx)
+
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.True(t, called)
+		assert.Equal(t, "max-age=63072000; includeSubDomains; preload", w.Header().Get("Strict-Transport-Security"))
+	})
+}
+
 func TestBodyLimit(t *testing.T) {
 	t.Parallel()
 
