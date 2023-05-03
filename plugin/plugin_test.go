@@ -79,6 +79,17 @@ func TestRedirectHTTPS(t *testing.T) {
 		assert.True(t, called)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
+
+	t.Run("Do not redirect HTTP with acme-challenge", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/.well-known/acme-challenge/xxx", nil)
+		w := httptest.NewRecorder()
+		r.Header.Set("X-Forwarded-Proto", "http")
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.True(t, called)
+	})
 }
 
 func TestBodyLimit(t *testing.T) {
