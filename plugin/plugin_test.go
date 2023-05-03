@@ -41,6 +41,44 @@ func TestInjectStateIngress(t *testing.T) {
 	assert.True(t, called)
 }
 
+func TestRedirectHTTPS(t *testing.T) {
+	t.Parallel()
+
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/redirect-https": "true",
+				},
+			},
+		},
+	}
+	RedirectHTTPS(ctx)
+
+	t.Run("Redirect HTTP to HTTPS", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		r.Header.Set("X-Forwarded-Proto", "http")
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Fail(t, "should not call")
+		})).ServeHTTP(w, r)
+		assert.Equal(t, http.StatusMovedPermanently, w.Code)
+	})
+
+	t.Run("Do not redirect HTTPS to HTTPS", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		r.Header.Set("X-Forwarded-Proto", "https")
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.True(t, called)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+}
+
 func TestUpstreamHost(t *testing.T) {
 	t.Parallel()
 
