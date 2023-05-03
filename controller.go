@@ -57,7 +57,6 @@ func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl.reloadDebounce = debounce.New(ctrl.reloadDebounced, 300*time.Millisecond)
 	ctrl.reloadEndpointDebounce = debounce.New(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
 	ctrl.proxy = proxy
-	ctrl.routeTable.RunBackgroundJob()
 	ctrl.proxy.OnDialError = ctrl.routeTable.MarkBad
 	return ctrl
 }
