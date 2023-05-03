@@ -60,9 +60,11 @@ func TestRedirectHTTPS(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		w := httptest.NewRecorder()
 		r.Header.Set("X-Forwarded-Proto", "http")
+		var called bool
 		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			assert.Fail(t, "should not call")
+			called = true
 		})).ServeHTTP(w, r)
+		assert.False(t, called)
 		assert.Equal(t, http.StatusMovedPermanently, w.Code)
 	})
 
@@ -70,6 +72,46 @@ func TestRedirectHTTPS(t *testing.T) {
 		r := httptest.NewRequest(http.MethodGet, "/", nil)
 		w := httptest.NewRecorder()
 		r.Header.Set("X-Forwarded-Proto", "https")
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.True(t, called)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+}
+
+func TestBodyLimit(t *testing.T) {
+	t.Parallel()
+
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/body-limitrequest": "1024", // 1KiB
+				},
+			},
+		},
+	}
+	BodyLimit(ctx)
+
+	t.Run("Limit request body", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		w := httptest.NewRecorder()
+		r.ContentLength = 1024 * 2
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.False(t, called)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+	})
+
+	t.Run("Do not limit request body", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		w := httptest.NewRecorder()
+		r.ContentLength = 1024 / 2
 		var called bool
 		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			called = true
