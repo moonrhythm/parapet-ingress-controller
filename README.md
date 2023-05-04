@@ -14,7 +14,7 @@ directory.
 
 ## Usage
 
-Create ingress with an annotation `kubernetes.io/ingress.class: parapet`
+Create ingress with `ingressClassName: parapet`
 
 ### Example
 
