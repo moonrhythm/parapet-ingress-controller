@@ -15,7 +15,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/healthz"
 	"gopkg.in/yaml.v3"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	networking "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/moonrhythm/parapet-ingress-controller/cert"
@@ -33,19 +33,31 @@ var IngressClass = "parapet"
 
 // Controller is the parapet ingress controller
 type Controller struct {
-	mu              sync.RWMutex
-	m               *http.ServeMux
-	watchedServices map[string]struct{}
-	watchedSecrets  map[string]struct{}
-	certTable       cert.Table
-	routeTable      route.Table
-	proxy           *proxy.Proxy
+	// mu is the mutex for mux
+	mu  sync.RWMutex
+	mux *http.ServeMux
 
-	plugins                []plugin.Plugin
-	health                 *healthz.Healthz
-	reloadDebounce         *debounce.Debounce
+	// namespace to watch, or empty to watch all
+	watchNamespace string
+
+	// holds current k8s state
+	watchedIngresses sync.Map
+	watchedServices  sync.Map
+	watchedSecrets   sync.Map
+	watchedEndpoints sync.Map
+
+	certTable  cert.Table
+	routeTable route.Table
+
+	proxy *proxy.Proxy
+
+	plugins []plugin.Plugin
+	health  *healthz.Healthz
+
+	reloadIngressDebounce  *debounce.Debounce
+	reloadServiceDebounce  *debounce.Debounce
+	reloadSecretDebounce   *debounce.Debounce
 	reloadEndpointDebounce *debounce.Debounce
-	watchNamespace         string
 }
 
 // New creates new ingress controller
@@ -54,7 +66,9 @@ func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl.health = healthz.New()
 	ctrl.health.SetReady(false)
 	ctrl.watchNamespace = watchNamespace
-	ctrl.reloadDebounce = debounce.New(ctrl.reloadDebounced, 300*time.Millisecond)
+	ctrl.reloadIngressDebounce = debounce.New(ctrl.reloadIngressDebounced, 300*time.Millisecond)
+	ctrl.reloadServiceDebounce = debounce.New(ctrl.reloadServiceDebounced, 300*time.Millisecond)
+	ctrl.reloadSecretDebounce = debounce.New(ctrl.reloadSecretDebounced, 300*time.Millisecond)
 	ctrl.reloadEndpointDebounce = debounce.New(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
 	ctrl.proxy = proxy
 	ctrl.proxy.OnDialError = ctrl.routeTable.MarkBad
@@ -70,7 +84,7 @@ func (ctrl *Controller) Use(m plugin.Plugin) {
 func (ctrl *Controller) ServeHandler(_ http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctrl.mu.RLock()
-		mux := ctrl.m
+		mux := ctrl.mux
 		ctrl.mu.RUnlock()
 
 		mux.ServeHTTP(w, r)
@@ -79,78 +93,172 @@ func (ctrl *Controller) ServeHandler(_ http.Handler) http.Handler {
 
 // Watch starts watch k8s resource
 func (ctrl *Controller) Watch() {
-	ctrl.Reload()
+	ctx := context.Background()
 
-	watch := func(
-		resourceType string,
-		f func(ctx context.Context, namespace string) (watch.Interface, error),
-		filter *map[string]struct{},
-		reload func(),
-	) {
-		for {
-			w, err := f(context.Background(), ctrl.watchNamespace)
-			if err != nil {
-				glog.Errorf("can not watch %s; %v", resourceType, err)
-				time.Sleep(5 * time.Second)
-				continue
-			}
+	// preload all resources
+	{
+		ingresses, _ := k8s.GetIngresses(ctx, ctrl.watchNamespace)
+		for _, i := range ingresses {
+			i := i
+			ctrl.watchedIngresses.Store(i.Namespace+"/"+i.Name, &i)
+		}
 
-			for event := range w.ResultChan() {
-				if event.Type == watch.Error {
-					continue
-				}
+		services, _ := k8s.GetServices(ctx, ctrl.watchNamespace)
+		for _, s := range services {
+			s := s
+			ctrl.watchedServices.Store(s.Namespace+"/"+s.Name, &s)
+		}
 
-				// filter out unrelated resources
-				if filter != nil {
-					var meta *metav1.ObjectMeta
-					switch obj := event.Object.(type) {
-					case *v1.Service:
-						meta = &obj.ObjectMeta
-					case *v1.Secret:
-						meta = &obj.ObjectMeta
-					case *v1.Endpoints:
-						meta = &obj.ObjectMeta
-					}
-					if meta == nil {
-						continue
-					}
+		secrets, _ := k8s.GetSecrets(ctx, ctrl.watchNamespace)
+		for _, s := range secrets {
+			s := s
+			ctrl.watchedSecrets.Store(s.Namespace+"/"+s.Name, &s)
+		}
 
-					key := meta.Namespace + "/" + meta.Name
-					ctrl.mu.RLock()
-					var ok bool
-					if *filter != nil {
-						_, ok = (*filter)[key]
-					}
-					ctrl.mu.RUnlock()
-					if !ok {
-						continue
-					}
-
-					glog.Infof("reload because %s %s/%s changed", resourceType, meta.Namespace, meta.Name)
-				}
-
-				reload()
-			}
-
-			// channel closed, retry watch again
-			w.Stop()
-			glog.Infof("restart %s watcher", resourceType)
+		endpoints, _ := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
+		for _, e := range endpoints {
+			e := e
+			ctrl.watchedEndpoints.Store(e.Namespace+"/"+e.Name, &e)
 		}
 	}
 
-	go watch("ingresses", k8s.WatchIngresses, nil, ctrl.Reload)
-	go watch("services", k8s.WatchServices, &ctrl.watchedServices, ctrl.Reload)
-	go watch("endpoints", k8s.WatchEndpoints, &ctrl.watchedServices, ctrl.reloadEndpoint)
-	go watch("secrets", k8s.WatchSecrets, &ctrl.watchedSecrets, ctrl.Reload)
+	ctrl.reloadServiceDebounced()
+	ctrl.reloadIngressDebounced()
+	ctrl.reloadEndpointDebounced()
+	ctrl.reloadSecretDebounced()
+
+	// ready to serve requests
+	ctrl.health.SetReady(true)
+
+	go ctrl.watchIngresses(ctx)
+	go ctrl.watchServices(ctx)
+	go ctrl.watchSecrets(ctx)
+	go ctrl.watchEndpoints(ctx)
 }
 
-// Reload reloads ingresses
-func (ctrl *Controller) Reload() {
-	ctrl.reloadDebounce.Call()
+func (ctrl *Controller) watchIngresses(ctx context.Context) {
+	for {
+		w, err := k8s.WatchIngresses(ctx, ctrl.watchNamespace)
+		if err != nil {
+			glog.Errorf("can not watch ingresses; %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		for event := range w.ResultChan() {
+			obj := event.Object.(*networking.Ingress)
+			key := obj.Namespace + "/" + obj.Name
+
+			switch event.Type {
+			case watch.Added, watch.Modified:
+				ctrl.watchedIngresses.Store(key, obj)
+			case watch.Deleted:
+				ctrl.watchedIngresses.Delete(key)
+			default:
+				continue
+			}
+			ctrl.reloadIngress()
+		}
+
+		w.Stop()
+		glog.Infof("restart ingresses watcher")
+	}
 }
 
-func (ctrl *Controller) reloadDebounced() {
-	glog.Info("reload")
+func (ctrl *Controller) watchServices(ctx context.Context) {
+	for {
+		w, err := k8s.WatchServices(ctx, ctrl.watchNamespace)
+		if err != nil {
+			glog.Errorf("can not watch services; %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		for event := range w.ResultChan() {
+			obj := event.Object.(*v1.Service)
+			key := obj.Namespace + "/" + obj.Name
+
+			switch event.Type {
+			case watch.Added, watch.Modified:
+				ctrl.watchedServices.Store(key, obj)
+			case watch.Deleted:
+				ctrl.watchedServices.Delete(key)
+			default:
+				continue
+			}
+			ctrl.reloadService()
+			ctrl.reloadIngress()
+		}
+
+		w.Stop()
+		glog.Infof("restart services watcher")
+	}
+}
+
+func (ctrl *Controller) watchSecrets(ctx context.Context) {
+	for {
+		w, err := k8s.WatchSecrets(ctx, ctrl.watchNamespace)
+		if err != nil {
+			glog.Errorf("can not watch secrets; %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		for event := range w.ResultChan() {
+			obj := event.Object.(*v1.Secret)
+			key := obj.Namespace + "/" + obj.Name
+
+			switch event.Type {
+			case watch.Added, watch.Modified:
+				ctrl.watchedSecrets.Store(key, obj)
+			case watch.Deleted:
+				ctrl.watchedSecrets.Delete(key)
+			default:
+				continue
+			}
+			ctrl.reloadSecret()
+		}
+
+		w.Stop()
+		glog.Infof("restart secrets watcher")
+	}
+}
+
+func (ctrl *Controller) watchEndpoints(ctx context.Context) {
+	for {
+		w, err := k8s.WatchEndpoints(ctx, ctrl.watchNamespace)
+		if err != nil {
+			glog.Errorf("can not watch endpoints; %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		for event := range w.ResultChan() {
+			obj := event.Object.(*v1.Endpoints)
+			key := obj.Namespace + "/" + obj.Name
+
+			switch event.Type {
+			case watch.Added, watch.Modified:
+				ctrl.watchedEndpoints.Store(key, obj)
+			case watch.Deleted:
+				ctrl.watchedEndpoints.Delete(key)
+			default:
+				continue
+			}
+			ctrl.reloadEndpoint()
+		}
+
+		w.Stop()
+		glog.Infof("restart endpoints watcher")
+	}
+}
+
+func (ctrl *Controller) reloadIngress() {
+	ctrl.reloadIngressDebounce.Call()
+}
+
+func (ctrl *Controller) reloadIngressDebounced() {
+	glog.Info("reload ingresses")
 
 	defer func() {
 		if err := recover(); err != nil {
@@ -161,55 +269,16 @@ func (ctrl *Controller) reloadDebounced() {
 		metric.Reload(true)
 	}()
 
-	ctx := context.Background()
-
-	services, err := k8s.GetServices(ctx, ctrl.watchNamespace)
-	if err != nil {
-		panic(fmt.Errorf("can not get services; %w", err))
-	}
-
-	secrets, err := k8s.GetSecrets(ctx, ctrl.watchNamespace)
-	if err != nil {
-		panic(fmt.Errorf("can not get secrets; %w", err))
-	}
-
-	ingresses, err := k8s.GetIngresses(ctx, ctrl.watchNamespace)
-	if err != nil {
-		panic(fmt.Errorf("can not get ingresses; %w", err))
-	}
-
-	addrToPort := make(map[string]string)
-	nameToService := make(map[string]v1.Service)
-	for _, s := range services {
-		nameToService[s.Namespace+"/"+s.Name] = s
-
-		// build route target port
-		for _, p := range s.Spec.Ports {
-			addr := buildHostPort(s.Namespace, s.Name, int(p.Port))
-			target := strconv.Itoa(int(p.TargetPort.IntVal))
-			addrToPort[addr] = target
-		}
-	}
-	nameToSecret := make(map[string]v1.Secret)
-	for _, s := range secrets {
-		nameToSecret[s.Namespace+"/"+s.Name] = s
-	}
-
 	routes := make(map[string]http.Handler)
-	watchedServices := make(map[string]struct{})
-	watchedSecrets := make(map[string]struct{})
 
-	for _, ing := range ingresses {
-		var ingClass string
-		if ing.Spec.IngressClassName != nil {
-			ingClass = *ing.Spec.IngressClassName
-		} else if ing.Annotations != nil {
-			ingClass = ing.Annotations["kubernetes.io/ingress.class"]
-		}
-		if ingClass != IngressClass {
+	ctrl.watchedIngresses.Range(func(_, value any) bool {
+		ing := value.(*networking.Ingress)
+
+		if getIngressClass(ing) != IngressClass {
 			glog.Infof("skip: %s/%s", ing.Namespace, ing.Name)
-			continue
+			return true
 		}
+
 		glog.Infof("load: %s/%s", ing.Namespace, ing.Name)
 
 		var h parapet.Middlewares
@@ -217,7 +286,7 @@ func (ctrl *Controller) reloadDebounced() {
 			m(plugin.Context{
 				Middlewares: &h,
 				Routes:      routes,
-				Ingress:     &ing,
+				Ingress:     ing,
 			})
 		}
 		h.Use(parapet.MiddlewareFunc(retryMiddleware))
@@ -238,121 +307,106 @@ func (ctrl *Controller) reloadDebounced() {
 					path = "/"
 				}
 
-				var config backendConfig
-
 				svcKey := ing.Namespace + "/" + backend.Service.Name
-				watchedServices[svcKey] = struct{}{} // service may create later
 
-				svc, ok := nameToService[svcKey]
+				v, ok := ctrl.watchedServices.Load(svcKey)
 				if !ok {
 					glog.Errorf("service %s not found", svcKey)
 					continue
 				}
+				svc := v.(*v1.Service)
 
 				// find port
-				var (
-					portVal  int
-					portName string
-				)
-				if backend.Service.Port.Name != "" {
-					portName = backend.Service.Port.Name
-
-					// find port number
-					for _, p := range svc.Spec.Ports {
-						if p.Name == backend.Service.Port.Name {
-							portVal = int(p.Port)
-						}
-					}
-					if portVal == 0 {
-						glog.Errorf("port %s on service %s not found", backend.Service.Port.Name, svcKey)
-						continue
-					}
-				} else {
-					portVal = int(backend.Service.Port.Number)
-
-					// find port name
-					for _, p := range svc.Spec.Ports {
-						if p.Port == backend.Service.Port.Number {
-							portName = p.Name
-						}
-					}
+				portVal, portName, ok := findBackendPort(&backend, svc)
+				if !ok {
+					glog.Errorf("port %s on service %s not found", backend.Service.Port.Name, svcKey)
+					continue
 				}
-
-				if svc.Annotations != nil {
-					if a := svc.Annotations["parapet.moonrhythm.io/backend-config"]; a != "" {
-						var cfg map[string]backendConfig
-						err = yaml.Unmarshal([]byte(a), &cfg)
-						if err != nil {
-							glog.Errorf("can not parse backend-config from annotation; %v", err)
-						}
-						config = cfg[portName]
-					}
-				}
-				if portVal <= 0 {
+				if portVal <= 0 { // missing port
 					continue
 				}
 
+				config := findBackendConfig(svc, portName)
+
 				src := strings.ToLower(rule.Host) + path
 				target := buildHostPort(ing.Namespace, backend.Service.Name, portVal)
-				routes[src] = h.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if config.Protocol != "" {
-						r.URL.Scheme = config.Protocol
-					}
-
-					ctx := r.Context()
-					s := state.Get(ctx)
-					s["serviceType"] = string(svc.Spec.Type)
-					s["serviceName"] = svc.Name
-					s["serviceTarget"] = r.URL.Host
-
-					nr := r.WithContext(ctx)
-					nr.RemoteAddr = ""
-					nr.URL.Host = ctrl.routeTable.Lookup(target)
-					ctrl.proxy.ServeHTTP(w, nr)
-				}))
+				routes[src] = h.ServeHandler(ctrl.makeHandler(ing, svc, config, target))
 				glog.V(1).Infof("registered: %s => %s", src, target)
 
 				// TODO: implement pathType
 			}
 		}
 
-		for _, t := range ing.Spec.TLS {
-			key := ing.Namespace + "/" + t.SecretName
-			watchedSecrets[key] = struct{}{} // watch not exists secret
-			if _, ok := nameToSecret[key]; !ok {
-				glog.Errorf("secret %s not found", key)
-				continue
-			}
-		}
-	}
+		return true
+	})
 
 	mux := buildRoutes(routes)
+	ctrl.mu.Lock()
+	ctrl.mux = mux
+	ctrl.mu.Unlock()
+}
+
+func (ctrl *Controller) reloadService() {
+	ctrl.reloadServiceDebounce.Call()
+}
+
+func (ctrl *Controller) reloadServiceDebounced() {
+	glog.Info("reload services")
+
+	addrToPort := map[string]string{}
+
+	ctrl.watchedServices.Range(func(_, value any) bool {
+		s := value.(*v1.Service)
+
+		// build route target port
+		for _, p := range s.Spec.Ports {
+			addr := buildHostPort(s.Namespace, s.Name, int(p.Port))
+			target := strconv.Itoa(int(p.TargetPort.IntVal))
+			addrToPort[addr] = target
+		}
+
+		return true
+	})
+
+	ctrl.routeTable.SetPortRoute(addrToPort)
+}
+
+func (ctrl *Controller) reloadSecret() {
+	ctrl.reloadSecretDebounce.Call()
+}
+
+func (ctrl *Controller) reloadSecretDebounced() {
+	glog.Info("reload secrets")
+
+	secretToBuild := map[string]struct{}{}
+
+	ctrl.watchedIngresses.Range(func(_, value any) bool {
+		ing := value.(*networking.Ingress)
+		for _, t := range ing.Spec.TLS {
+			key := ing.Namespace + "/" + t.SecretName
+			secretToBuild[key] = struct{}{}
+		}
+		return true
+	})
 
 	// build certs
 	var certs []*tls.Certificate
-	for key := range watchedSecrets {
-		s, ok := nameToSecret[key]
+	for key := range secretToBuild {
+		v, ok := ctrl.watchedSecrets.Load(key)
 		if !ok {
+			glog.Errorf("secret %s not found", key)
 			continue
 		}
-		crt, key := s.Data["tls.crt"], s.Data["tls.key"]
-		cert, err := tls.X509KeyPair(crt, key)
+		s := v.(*v1.Secret)
+		crt, err := tls.X509KeyPair(s.Data["tls.crt"], s.Data["tls.key"])
 		if err != nil {
 			glog.Errorf("can not load x509 certificate %s/%s; %v", s.Namespace, s.Name, err)
 			continue
 		}
-		certs = append(certs, &cert)
+		certs = append(certs, &crt)
 	}
 
 	ctrl.certTable.Set(certs)
-	ctrl.mu.Lock()
-	ctrl.m = mux
-	ctrl.watchedServices = watchedServices
-	ctrl.watchedSecrets = watchedSecrets
-	ctrl.routeTable.SetPortRoute(addrToPort)
-	ctrl.mu.Unlock()
-	ctrl.health.SetReady(true)
-	ctrl.reloadEndpoint()
 }
 
 func (ctrl *Controller) reloadEndpoint() {
@@ -368,18 +422,11 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		}
 	}()
 
-	ctx := context.Background()
-
-	endpoints, err := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
-	if err != nil {
-		glog.Error("can not get endpoints;", err)
-		return
-	}
-
 	routes := make(map[string]*route.RRLB)
-	for _, ep := range endpoints {
+	ctrl.watchedEndpoints.Range(func(_, value any) bool {
+		ep := value.(*v1.Endpoints)
 		if len(ep.Subsets) == 0 {
-			continue
+			return true
 		}
 
 		var b route.RRLB
@@ -389,7 +436,8 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 			}
 		}
 		routes[buildHost(ep.Namespace, ep.Name)] = &b
-	}
+		return true
+	})
 
 	ctrl.routeTable.SetHostRoute(routes)
 }
@@ -432,4 +480,82 @@ func buildRoutes(routes map[string]http.Handler) *http.ServeMux {
 		}()
 	}
 	return mux
+}
+
+func getIngressClass(ing *networking.Ingress) string {
+	if ing.Spec.IngressClassName != nil {
+		return *ing.Spec.IngressClassName
+	}
+	if ing.Annotations != nil {
+		return ing.Annotations["kubernetes.io/ingress.class"]
+	}
+	return ""
+}
+
+func findBackendPort(backend *networking.IngressBackend, svc *v1.Service) (val int, name string, ok bool) {
+	// specifies port by name
+	if backend.Service.Port.Name != "" {
+		name = backend.Service.Port.Name
+
+		// find port number
+		for _, p := range svc.Spec.Ports {
+			if p.Name == backend.Service.Port.Name {
+				val = int(p.Port)
+			}
+		}
+		if val == 0 {
+			return 0, "", false
+		}
+		ok = true
+		return
+	}
+
+	// specifies port by number
+	val = int(backend.Service.Port.Number)
+
+	// find port name
+	for _, p := range svc.Spec.Ports {
+		if p.Port == backend.Service.Port.Number {
+			name = p.Name
+		}
+	}
+	ok = true
+	return
+}
+
+func findBackendConfig(svc *v1.Service, portName string) backendConfig {
+	if svc.Annotations == nil {
+		return backendConfig{}
+	}
+	a := svc.Annotations["parapet.moonrhythm.io/backend-config"]
+	if a == "" {
+		return backendConfig{}
+	}
+
+	var cfg map[string]backendConfig
+	err := yaml.Unmarshal([]byte(a), &cfg)
+	if err != nil {
+		glog.Errorf("can not parse backend-config from annotation; %v", err)
+		return backendConfig{}
+	}
+	return cfg[portName]
+}
+
+func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, config backendConfig, target string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if config.Protocol != "" {
+			r.URL.Scheme = config.Protocol
+		}
+
+		ctx := r.Context()
+		s := state.Get(ctx)
+		s["serviceType"] = string(svc.Spec.Type)
+		s["serviceName"] = svc.Name
+		s["serviceTarget"] = r.URL.Host
+
+		nr := r.WithContext(ctx)
+		nr.RemoteAddr = ""
+		nr.URL.Host = ctrl.routeTable.Lookup(target)
+		ctrl.proxy.ServeHTTP(w, nr)
+	})
 }
