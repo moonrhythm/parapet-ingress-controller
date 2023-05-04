@@ -240,6 +240,8 @@ func (ctrl *Controller) watchEndpoints(ctx context.Context) {
 			switch event.Type {
 			case watch.Added, watch.Modified:
 				ctrl.watchedEndpoints.Store(key, obj)
+				ctrl.reloadSingleEndpoint(obj)
+				continue
 			case watch.Deleted:
 				ctrl.watchedEndpoints.Delete(key)
 			default:
@@ -368,7 +370,7 @@ func (ctrl *Controller) reloadServiceDebounced() {
 		return true
 	})
 
-	ctrl.routeTable.SetPortRoute(addrToPort)
+	ctrl.routeTable.SetPortRoutes(addrToPort)
 }
 
 func (ctrl *Controller) reloadSecret() {
@@ -439,7 +441,24 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		return true
 	})
 
-	ctrl.routeTable.SetHostRoute(routes)
+	ctrl.routeTable.SetHostRoutes(routes)
+}
+
+func (ctrl *Controller) reloadSingleEndpoint(ep *v1.Endpoints) {
+	glog.Infof("reload endpoint: %s/%s", ep.Namespace, ep.Name)
+
+	if len(ep.Subsets) == 0 {
+		ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), nil)
+		return
+	}
+
+	var b route.RRLB
+	for _, ss := range ep.Subsets {
+		for _, addr := range ss.Addresses {
+			b.IPs = append(b.IPs, addr.IP)
+		}
+	}
+	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), &b)
 }
 
 func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {

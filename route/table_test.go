@@ -10,13 +10,13 @@ func TestTable(t *testing.T) {
 	t.Parallel()
 
 	tb := Table{}
-	tb.SetHostRoute(map[string]*RRLB{
+	tb.SetHostRoutes(map[string]*RRLB{
 		"api.default.svc.cluster.local":        {IPs: []string{"192.168.0.1"}},
 		"backoffice.default.svc.cluster.local": {IPs: []string{"192.168.0.2"}},
 		"api.service.svc.cluster.local":        {IPs: []string{"192.168.1.1", "192.168.1.2"}},
 		"payment.service.svc.cluster.local":    {IPs: []string{"192.168.2.1", "192.168.2.2"}},
 	})
-	tb.SetPortRoute(map[string]string{
+	tb.SetPortRoutes(map[string]string{
 		"api.default.svc.cluster.local:8080":     "9000",
 		"api.service.svc.cluster.local:8000":     "9001",
 		"payment.service.svc.cluster.local:8000": "9002",

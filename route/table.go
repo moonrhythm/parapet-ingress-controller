@@ -30,19 +30,12 @@ func (t *Table) Lookup(addr string) string {
 	host := addr[:i]
 
 	t.mu.RLock()
-	hostTable := t.addrToTargetHost
-	portTable := t.addrToTargetPort
+	targetHost, okHost := t.addrToTargetHost[host]
+	targetPort, okPort := t.addrToTargetPort[addr]
 	t.mu.RUnlock()
 
-	targetHost, ok := hostTable[host]
-	if !ok {
-		// host not found in table, lets proxy try to resolve it from dialer
-		return addr
-	}
-
-	targetPort, ok := portTable[addr]
-	if !ok {
-		// port not found in table, lets proxy connect to service directly
+	if !okHost || !okPort {
+		// host or port not found in table, lets proxy try to resolve it from dialer
 		return addr
 	}
 
@@ -57,11 +50,11 @@ func (t *Table) Lookup(addr string) string {
 	return fmt.Sprintf("%s:%s", hostIP, targetPort)
 }
 
-// SetHostRoute sets route from host to RRLB (IPs)
+// SetHostRoutes sets route from host to RRLB (IPs)
 //
 // In Kubernetes cluster, host is dns name service.namespace.svc.cluster.local
 // and IPs is list of pod IPs from service's endpoint.
-func (t *Table) SetHostRoute(routes map[string]*RRLB) {
+func (t *Table) SetHostRoutes(routes map[string]*RRLB) {
 	t.onceStartBgJob.Do(t.runBackgroundJob)
 
 	t.mu.Lock()
@@ -69,9 +62,24 @@ func (t *Table) SetHostRoute(routes map[string]*RRLB) {
 	t.mu.Unlock()
 }
 
-// SetPortRoute sets route from service's addr to pod's port
+func (t *Table) SetHostRoute(host string, lb *RRLB) {
+	t.onceStartBgJob.Do(t.runBackgroundJob)
+
+	t.mu.Lock()
+	if t.addrToTargetHost == nil {
+		t.addrToTargetHost = map[string]*RRLB{}
+	}
+	if lb != nil {
+		t.addrToTargetHost[host] = lb
+	} else {
+		delete(t.addrToTargetHost, host)
+	}
+	t.mu.Unlock()
+}
+
+// SetPortRoutes sets route from service's addr to pod's port
 // to make proxy connect directly to pod.
-func (t *Table) SetPortRoute(routes map[string]string) {
+func (t *Table) SetPortRoutes(routes map[string]string) {
 	t.mu.Lock()
 	t.addrToTargetPort = routes
 	t.mu.Unlock()
