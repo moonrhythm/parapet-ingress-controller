@@ -294,6 +294,58 @@ func TestUpstreamPath(t *testing.T) {
 	assert.True(t, called)
 }
 
+func TestAllowRemote(t *testing.T) {
+	t.Parallel()
+
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/allow-remote": "192.168.0.0/24,127.0.0.1/32",
+				},
+			},
+		},
+	}
+	AllowRemote(ctx)
+
+	t.Run("Allow", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		r.RemoteAddr = "192.168.0.32:1234"
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.True(t, called)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("Deny", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		r.RemoteAddr = "192.168.1.32:1234"
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.False(t, called)
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
+
+	t.Run("Skip acme-challenge", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/.well-known/acme-challenge/xxx", nil)
+		w := httptest.NewRecorder()
+		r.RemoteAddr = "192.168.1.32:1234"
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.True(t, called)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+}
+
 func TestStripPrefix(t *testing.T) {
 	t.Parallel()
 
