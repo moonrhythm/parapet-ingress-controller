@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -107,6 +108,7 @@ func RedirectRules(ctx Context) {
 			ctx.Routes[srcHost] = ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, target, status)
 			}))
+			log.Printf("registered: %s ==> %d,%s", srcHost, status, target)
 			glog.V(1).Infof("registered: %s ==> %d,%s", srcHost, status, target)
 		}
 	}

@@ -326,19 +326,7 @@ func (ctrl *Controller) reloadDebounced() {
 		}
 	}
 
-	// build routes
-	mux := http.NewServeMux()
-	for r, h := range routes {
-		func() {
-			defer func() {
-				err := recover()
-				if err != nil {
-					glog.Errorf("register handler at %s; %v", r, err)
-				}
-			}()
-			mux.Handle(r, h)
-		}()
-	}
+	mux := buildRoutes(routes)
 
 	// build certs
 	var certs []*tls.Certificate
@@ -428,4 +416,20 @@ func buildHost(namespace, name string) string {
 func buildHostPort(namespace, name string, port int) string {
 	// service.namespace.svc.cluster.local:port
 	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, port)
+}
+
+func buildRoutes(routes map[string]http.Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	for r, h := range routes {
+		func() {
+			defer func() {
+				err := recover()
+				if err != nil {
+					glog.Errorf("register handler at %s; %v", r, err)
+				}
+			}()
+			mux.Handle(r, h)
+		}()
+	}
+	return mux
 }

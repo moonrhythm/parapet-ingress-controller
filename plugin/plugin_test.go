@@ -142,6 +142,42 @@ func TestInjectHSTS(t *testing.T) {
 	})
 }
 
+func TestRedirectRules(t *testing.T) {
+	t.Parallel()
+
+	config := `
+example.com: https://www.example.com
+api.example.com: 308,https://www.example.com/api`
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/redirect": config,
+				},
+			},
+		},
+		Routes: map[string]http.Handler{},
+	}
+	RedirectRules(ctx)
+
+	t.Run("Default status code", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+		w := httptest.NewRecorder()
+		ctx.Routes[r.Host+"/"].ServeHTTP(w, r)
+		assert.Equal(t, http.StatusFound, w.Code)
+		assert.Equal(t, "https://www.example.com", w.Header().Get("Location"))
+	})
+
+	t.Run("Custom status code", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "http://api.example.com/", nil)
+		w := httptest.NewRecorder()
+		ctx.Routes[r.Host+"/"].ServeHTTP(w, r)
+		assert.Equal(t, 308, w.Code)
+		assert.Equal(t, "https://www.example.com/api", w.Header().Get("Location"))
+	})
+}
+
 func TestBodyLimit(t *testing.T) {
 	t.Parallel()
 
