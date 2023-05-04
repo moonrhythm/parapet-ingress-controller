@@ -317,19 +317,19 @@ func (ctrl *Controller) reloadIngressDebounced() {
 				svc := v.(*v1.Service)
 
 				// find port
-				portVal, portName, ok := findBackendPort(&backend, svc)
+				config, ok := findBackendConfig(&backend, svc)
 				if !ok {
 					glog.Errorf("port %s on service %s not found", backend.Service.Port.Name, svcKey)
 					continue
 				}
-				if portVal <= 0 { // missing port
+				if config.PortNumber <= 0 { // missing port
 					continue
 				}
 
-				config := findBackendConfig(svc, portName)
+				loadBackendConfigFromAnnotation(&config, svc)
 
 				src := strings.ToLower(rule.Host) + path
-				target := buildHostPort(ing.Namespace, backend.Service.Name, portVal)
+				target := buildHostPort(ing.Namespace, backend.Service.Name, config.PortNumber)
 				routes[src] = h.ServeHandler(ctrl.makeHandler(ing, svc, config, target))
 				glog.V(1).Infof("registered: %s => %s", src, target)
 
@@ -452,8 +452,9 @@ func (ctrl *Controller) Healthz() parapet.Middleware {
 }
 
 type backendConfig struct {
-	// TODO: migrate to k8s native's service.ports.appProtocol ?
-	Protocol string `json:"protocol" yaml:"protocol"`
+	Protocol   string
+	PortName   string
+	PortNumber int
 }
 
 func buildHost(namespace, name string) string {
@@ -492,53 +493,66 @@ func getIngressClass(ing *networking.Ingress) string {
 	return ""
 }
 
-func findBackendPort(backend *networking.IngressBackend, svc *v1.Service) (val int, name string, ok bool) {
+func findBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (config backendConfig, ok bool) {
 	// specifies port by name
 	if backend.Service.Port.Name != "" {
-		name = backend.Service.Port.Name
+		config.PortName = backend.Service.Port.Name
 
 		// find port number
 		for _, p := range svc.Spec.Ports {
 			if p.Name == backend.Service.Port.Name {
-				val = int(p.Port)
+				config.PortNumber = int(p.Port)
+				if p.AppProtocol != nil {
+					config.Protocol = *p.AppProtocol
+				}
 			}
 		}
-		if val == 0 {
-			return 0, "", false
+		if config.PortNumber == 0 {
+			return config, false
 		}
 		ok = true
 		return
 	}
 
 	// specifies port by number
-	val = int(backend.Service.Port.Number)
+	config.PortNumber = int(backend.Service.Port.Number)
 
 	// find port name
 	for _, p := range svc.Spec.Ports {
 		if p.Port == backend.Service.Port.Number {
-			name = p.Name
+			config.PortName = p.Name
+			if p.AppProtocol != nil {
+				config.Protocol = *p.AppProtocol
+			}
 		}
 	}
 	ok = true
 	return
 }
 
-func findBackendConfig(svc *v1.Service, portName string) backendConfig {
+// deprecated
+func loadBackendConfigFromAnnotation(cfg *backendConfig, svc *v1.Service) {
 	if svc.Annotations == nil {
-		return backendConfig{}
+		return
 	}
 	a := svc.Annotations["parapet.moonrhythm.io/backend-config"]
 	if a == "" {
-		return backendConfig{}
+		return
 	}
 
-	var cfg map[string]backendConfig
-	err := yaml.Unmarshal([]byte(a), &cfg)
+	type config struct {
+		Protocol string `json:"protocol" yaml:"protocol"`
+	}
+
+	var cfgs map[string]config
+	err := yaml.Unmarshal([]byte(a), &cfgs)
 	if err != nil {
 		glog.Errorf("can not parse backend-config from annotation; %v", err)
-		return backendConfig{}
+		return
 	}
-	return cfg[portName]
+	if p := cfgs[cfg.PortName].Protocol; p != "" {
+		cfg.Protocol = p
+	}
 }
 
 func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, config backendConfig, target string) http.Handler {
