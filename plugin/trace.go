@@ -53,17 +53,7 @@ func JaegerTrace(ctx Context) {
 		return
 	}
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exporter),
-		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(sampler)),
-	)
-
-	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
-		return otelhttp.NewHandler(h, ctx.Ingress.Namespace+"/"+ctx.Ingress.Name,
-			otelhttp.WithTracerProvider(tp),
-			otelhttp.WithSpanNameFormatter(traceSpanNameFormatter),
-		)
-	}))
+	generalTrace(ctx, exporter, sampler)
 }
 
 // OperationsTrace traces to google cloud operation
@@ -92,6 +82,10 @@ func OperationsTrace(ctx Context) {
 		return
 	}
 
+	generalTrace(ctx, exporter, sampler)
+}
+
+func generalTrace(ctx Context, exporter sdktrace.SpanExporter, sampler float64) {
 	tp := sdktrace.NewTracerProvider(
 		sdktrace.WithSyncer(exporter),
 		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(sampler)),
