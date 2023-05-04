@@ -13,7 +13,6 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/healthz"
-	"gopkg.in/yaml.v3"
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -328,8 +327,6 @@ func (ctrl *Controller) reloadIngressDebounced() {
 					continue
 				}
 
-				loadBackendConfigFromAnnotation(&config, svc)
-
 				src := strings.ToLower(rule.Host) + path
 				target := buildHostPort(ing.Namespace, backend.Service.Name, config.PortNumber)
 				routes[src] = h.ServeHandler(ctrl.makeHandler(ing, svc, config, target))
@@ -541,31 +538,6 @@ func findBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (con
 	}
 	ok = true
 	return
-}
-
-// deprecated
-func loadBackendConfigFromAnnotation(cfg *backendConfig, svc *v1.Service) {
-	if svc.Annotations == nil {
-		return
-	}
-	a := svc.Annotations["parapet.moonrhythm.io/backend-config"]
-	if a == "" {
-		return
-	}
-
-	type config struct {
-		Protocol string `json:"protocol" yaml:"protocol"`
-	}
-
-	var cfgs map[string]config
-	err := yaml.Unmarshal([]byte(a), &cfgs)
-	if err != nil {
-		glog.Errorf("can not parse backend-config from annotation; %v", err)
-		return
-	}
-	if p := cfgs[cfg.PortName].Protocol; p != "" {
-		cfg.Protocol = p
-	}
 }
 
 func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, config backendConfig, target string) http.Handler {
