@@ -124,8 +124,8 @@ func (ctrl *Controller) Watch() {
 
 	ctrl.reloadServiceDebounced()
 	ctrl.reloadIngressDebounced()
-	ctrl.reloadEndpointDebounced()
 	ctrl.reloadSecretDebounced()
+	ctrl.reloadEndpointDebounced()
 
 	// ready to serve requests
 	ctrl.health.SetReady(true)
@@ -346,6 +346,7 @@ func (ctrl *Controller) reloadIngressDebounced() {
 	ctrl.mu.Lock()
 	ctrl.mux = mux
 	ctrl.mu.Unlock()
+	ctrl.reloadSecret()
 }
 
 func (ctrl *Controller) reloadService() {
@@ -354,6 +355,12 @@ func (ctrl *Controller) reloadService() {
 
 func (ctrl *Controller) reloadServiceDebounced() {
 	glog.Info("reload services")
+
+	defer func() {
+		if err := recover(); err != nil {
+			glog.Error(err)
+		}
+	}()
 
 	addrToPort := map[string]string{}
 
@@ -379,6 +386,12 @@ func (ctrl *Controller) reloadSecret() {
 
 func (ctrl *Controller) reloadSecretDebounced() {
 	glog.Info("reload secrets")
+
+	defer func() {
+		if err := recover(); err != nil {
+			glog.Error(err)
+		}
+	}()
 
 	secretToBuild := map[string]struct{}{}
 
@@ -427,17 +440,9 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 	routes := make(map[string]*route.RRLB)
 	ctrl.watchedEndpoints.Range(func(_, value any) bool {
 		ep := value.(*v1.Endpoints)
-		if len(ep.Subsets) == 0 {
-			return true
+		if lb := endpointToRRLB(ep); lb != nil {
+			routes[buildHost(ep.Namespace, ep.Name)] = lb
 		}
-
-		var b route.RRLB
-		for _, ss := range ep.Subsets {
-			for _, addr := range ss.Addresses {
-				b.IPs = append(b.IPs, addr.IP)
-			}
-		}
-		routes[buildHost(ep.Namespace, ep.Name)] = &b
 		return true
 	})
 
@@ -447,18 +452,7 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 func (ctrl *Controller) reloadSingleEndpoint(ep *v1.Endpoints) {
 	glog.Infof("reload endpoint: %s/%s", ep.Namespace, ep.Name)
 
-	if len(ep.Subsets) == 0 {
-		ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), nil)
-		return
-	}
-
-	var b route.RRLB
-	for _, ss := range ep.Subsets {
-		for _, addr := range ss.Addresses {
-			b.IPs = append(b.IPs, addr.IP)
-		}
-	}
-	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), &b)
+	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), endpointToRRLB(ep))
 }
 
 func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -591,4 +585,17 @@ func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, co
 		nr.URL.Host = ctrl.routeTable.Lookup(target)
 		ctrl.proxy.ServeHTTP(w, nr)
 	})
+}
+
+func endpointToRRLB(ep *v1.Endpoints) *route.RRLB {
+	var b route.RRLB
+	for _, ss := range ep.Subsets {
+		for _, addr := range ss.Addresses {
+			b.IPs = append(b.IPs, addr.IP)
+		}
+	}
+	if len(b.IPs) == 0 {
+		return nil
+	}
+	return &b
 }
