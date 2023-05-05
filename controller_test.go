@@ -92,6 +92,57 @@ func TestMux(t *testing.T) {
 	})
 }
 
+func TestBuildRoutes(t *testing.T) {
+	var called string
+	h := func(p string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			called = p
+		}
+	}
+
+	routes := map[string]http.Handler{}
+	routes["example.com/"] = h("example.com/")
+	routes["example.com/path"] = h("example.com/path")
+	routes["example.com/path/"] = h("example.com/path/")
+	routes["example.com/path/path2"] = h("example.com/path/path2")
+
+	mux := buildRoutes(routes)
+
+	f := func(path string, expected string) {
+		called = ""
+		r := httptest.NewRequest(http.MethodGet, "http://"+path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		assert.Equal(t, expected, called)
+	}
+	f("example.com/", "example.com/")
+	f("example.com/path", "example.com/path")
+	f("example.com/path/test", "example.com/path/")
+	f("example.com/path/path2", "example.com/path/path2")
+	f("example.com/path/path2/path3", "example.com/path/")
+}
+
+func TestBuildRoutes_Duplicate(t *testing.T) {
+	t.Parallel()
+
+	routes := map[string]http.Handler{}
+	routes["example.com/path"] = http.NotFoundHandler()
+	routes["example.com/path"] = http.NotFoundHandler()
+	var called bool
+	routes["example.com/path2"] = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+
+	var mux *http.ServeMux
+	assert.NotPanics(t, func() {
+		mux = buildRoutes(routes)
+	})
+	r := httptest.NewRequest(http.MethodGet, "http://example.com/path2", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, r)
+	assert.True(t, called)
+}
+
 func TestEndpointToRRLB(t *testing.T) {
 	t.Parallel()
 

@@ -310,16 +310,10 @@ func (ctrl *Controller) reloadIngressDebounced() {
 				if !strings.HasPrefix(path, "/") { // path must start with /
 					path = "/" + path
 				}
-				if !strings.HasSuffix(path, "/") { // path must end with /
-					path = path + "/"
-				}
 
-				pathType := networking.PathTypePrefix
+				pathType := networking.PathTypeImplementationSpecific
 				if httpPath.PathType != nil {
 					pathType = *httpPath.PathType
-				}
-				if pathType == networking.PathTypeImplementationSpecific {
-					pathType = networking.PathTypePrefix // default to prefix
 				}
 
 				svcKey := ing.Namespace + "/" + backend.Service.Name
@@ -347,24 +341,24 @@ func (ctrl *Controller) reloadIngressDebounced() {
 				switch pathType {
 				case networking.PathTypePrefix:
 					// register path as prefix
-					src := host + path
-					routes[src] = h.ServeHandler(handler)
-					glog.V(1).Infof("registered: %s => %s", src, target)
-
+					src := host + strings.TrimSuffix(path, "/")
 					if path != "/" {
-						// register path as exact, to avoid redirect
-						src := host + strings.TrimSuffix(path, "/")
 						routes[src] = h.ServeHandler(handler)
-						glog.V(1).Infof("registered: %s => %s", src, target)
 					}
+					routes[src+"/"] = h.ServeHandler(handler)
+					glog.V(1).Infof("registered: [prefix] %s => %s", src+"/", target)
 				case networking.PathTypeExact:
 					src := host + strings.TrimSuffix(path, "/")
 					if path == "/" {
 						glog.Warningf("register: %s => %s; path type exact at root path is not supported, switch to prefix", src, target)
-						src = host + path // support exact root path
+						src = host + path
 					}
 					routes[src] = h.ServeHandler(handler)
-					glog.V(1).Infof("registered: %s => %s", src, target)
+					glog.V(1).Infof("registered: [exact] %s => %s", src, target)
+				case networking.PathTypeImplementationSpecific:
+					src := host + path
+					routes[src] = h.ServeHandler(handler)
+					glog.V(1).Infof("registered: [specific] %s => %s", src, target)
 				}
 			}
 		}
