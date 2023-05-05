@@ -10,7 +10,40 @@ import (
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
+
+	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 )
+
+func TestHealthy(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Readiness not healthy when create", func(t *testing.T) {
+		ctrl := New("default", proxy.New())
+
+		r := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/healthz?ready=1", nil)
+		w := httptest.NewRecorder()
+		ctrl.Healthz().ServeHandler(http.NotFoundHandler()).ServeHTTP(w, r)
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	})
+
+	t.Run("Liveness healthy when create", func(t *testing.T) {
+		ctrl := New("default", proxy.New())
+
+		r := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/healthz", nil)
+		w := httptest.NewRecorder()
+		ctrl.Healthz().ServeHandler(http.NotFoundHandler()).ServeHTTP(w, r)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("Readiness healthy after reload", func(t *testing.T) {
+		ctrl := New("default", proxy.New())
+		ctrl.firstReload()
+		r := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/healthz?ready=1", nil)
+		w := httptest.NewRecorder()
+		ctrl.Healthz().ServeHandler(http.NotFoundHandler()).ServeHTTP(w, r)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+}
 
 // verify http.ServeMux behavior
 func TestMux(t *testing.T) {
@@ -93,6 +126,18 @@ func TestMux(t *testing.T) {
 			assert.False(t, called)
 		})
 	})
+}
+
+func TestBuildHost(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "api.default.svc.cluster.local", buildHost("default", "api"))
+}
+
+func TestBuildHostPort(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "api.default.svc.cluster.local:8080", buildHostPort("default", "api", 8080))
 }
 
 func TestBuildRoutes(t *testing.T) {

@@ -94,33 +94,42 @@ func (ctrl *Controller) ServeHandler(_ http.Handler) http.Handler {
 func (ctrl *Controller) Watch() {
 	ctx := context.Background()
 
-	// preload all resources
-	{
-		ingresses, _ := k8s.GetIngresses(ctx, ctrl.watchNamespace)
-		for _, i := range ingresses {
-			i := i
-			ctrl.watchedIngresses.Store(i.Namespace+"/"+i.Name, &i)
-		}
+	ctrl.preloadResources(ctx)
+	ctrl.firstReload()
 
-		services, _ := k8s.GetServices(ctx, ctrl.watchNamespace)
-		for _, s := range services {
-			s := s
-			ctrl.watchedServices.Store(s.Namespace+"/"+s.Name, &s)
-		}
+	go ctrl.watchIngresses(ctx)
+	go ctrl.watchServices(ctx)
+	go ctrl.watchSecrets(ctx)
+	go ctrl.watchEndpoints(ctx)
+}
 
-		secrets, _ := k8s.GetSecrets(ctx, ctrl.watchNamespace)
-		for _, s := range secrets {
-			s := s
-			ctrl.watchedSecrets.Store(s.Namespace+"/"+s.Name, &s)
-		}
-
-		endpoints, _ := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
-		for _, e := range endpoints {
-			e := e
-			ctrl.watchedEndpoints.Store(e.Namespace+"/"+e.Name, &e)
-		}
+func (ctrl *Controller) preloadResources(ctx context.Context) {
+	ingresses, _ := k8s.GetIngresses(ctx, ctrl.watchNamespace)
+	for _, i := range ingresses {
+		i := i
+		ctrl.watchedIngresses.Store(i.Namespace+"/"+i.Name, &i)
 	}
 
+	services, _ := k8s.GetServices(ctx, ctrl.watchNamespace)
+	for _, s := range services {
+		s := s
+		ctrl.watchedServices.Store(s.Namespace+"/"+s.Name, &s)
+	}
+
+	secrets, _ := k8s.GetSecrets(ctx, ctrl.watchNamespace)
+	for _, s := range secrets {
+		s := s
+		ctrl.watchedSecrets.Store(s.Namespace+"/"+s.Name, &s)
+	}
+
+	endpoints, _ := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
+	for _, e := range endpoints {
+		e := e
+		ctrl.watchedEndpoints.Store(e.Namespace+"/"+e.Name, &e)
+	}
+}
+
+func (ctrl *Controller) firstReload() {
 	ctrl.reloadServiceDebounced()
 	ctrl.reloadIngressDebounced()
 	ctrl.reloadSecretDebounced()
@@ -128,11 +137,6 @@ func (ctrl *Controller) Watch() {
 
 	// ready to serve requests
 	ctrl.health.SetReady(true)
-
-	go ctrl.watchIngresses(ctx)
-	go ctrl.watchServices(ctx)
-	go ctrl.watchSecrets(ctx)
-	go ctrl.watchEndpoints(ctx)
 }
 
 func (ctrl *Controller) watchIngresses(ctx context.Context) {
