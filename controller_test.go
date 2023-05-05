@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
 )
 
 // verify http.ServeMux behavior
@@ -88,5 +89,55 @@ func TestMux(t *testing.T) {
 			mux.ServeHTTP(w, r)
 			assert.False(t, called)
 		})
+	})
+}
+
+func TestEndpointToRRLB(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Empty", func(t *testing.T) {
+		ep := v1.Endpoints{}
+		lb := endpointToRRLB(&ep)
+		assert.Nil(t, lb)
+	})
+
+	t.Run("Single Subset", func(t *testing.T) {
+		ep := v1.Endpoints{
+			Subsets: []v1.EndpointSubset{
+				{
+					Addresses: []v1.EndpointAddress{
+						{IP: "192.168.0.1"},
+						{IP: "192.168.0.2"},
+						{IP: "192.168.0.3"},
+					},
+				},
+			},
+		}
+		lb := endpointToRRLB(&ep)
+		if assert.NotNil(t, lb) {
+			assert.EqualValues(t, []string{"192.168.0.1", "192.168.0.2", "192.168.0.3"}, lb.IPs)
+		}
+	})
+
+	t.Run("Multiple Subsets", func(t *testing.T) {
+		ep := v1.Endpoints{
+			Subsets: []v1.EndpointSubset{
+				{
+					Addresses: []v1.EndpointAddress{
+						{IP: "192.168.0.1"},
+						{IP: "192.168.0.2"},
+					},
+				},
+				{
+					Addresses: []v1.EndpointAddress{
+						{IP: "192.168.0.3"},
+					},
+				},
+			},
+		}
+		lb := endpointToRRLB(&ep)
+		if assert.NotNil(t, lb) {
+			assert.EqualValues(t, []string{"192.168.0.1", "192.168.0.2", "192.168.0.3"}, lb.IPs)
+		}
 	})
 }
