@@ -304,8 +304,22 @@ func (ctrl *Controller) reloadIngressDebounced() {
 			for _, httpPath := range rule.HTTP.Paths {
 				backend := httpPath.Backend
 				path := httpPath.Path
-				if path == "" {
+				if path == "" { // path can not be empty
 					path = "/"
+				}
+				if !strings.HasPrefix(path, "/") { // path must start with /
+					path = "/" + path
+				}
+				if !strings.HasSuffix(path, "/") { // path must end with /
+					path = path + "/"
+				}
+
+				pathType := networking.PathTypePrefix
+				if httpPath.PathType != nil {
+					pathType = *httpPath.PathType
+				}
+				if pathType == networking.PathTypeImplementationSpecific {
+					pathType = networking.PathTypePrefix // default to prefix
 				}
 
 				svcKey := ing.Namespace + "/" + backend.Service.Name
@@ -327,12 +341,31 @@ func (ctrl *Controller) reloadIngressDebounced() {
 					continue
 				}
 
-				src := strings.ToLower(rule.Host) + path
 				target := buildHostPort(ing.Namespace, backend.Service.Name, config.PortNumber)
-				routes[src] = h.ServeHandler(ctrl.makeHandler(ing, svc, config, target))
-				glog.V(1).Infof("registered: %s => %s", src, target)
+				handler := ctrl.makeHandler(ing, svc, config, target)
+				host := strings.ToLower(rule.Host)
+				switch pathType {
+				case networking.PathTypePrefix:
+					// register path as prefix
+					src := host + path
+					routes[src] = h.ServeHandler(handler)
+					glog.V(1).Infof("registered: %s => %s", src, target)
 
-				// TODO: implement pathType
+					if path != "/" {
+						// register path as exact, to avoid redirect
+						src := host + strings.TrimSuffix(path, "/")
+						routes[src] = h.ServeHandler(handler)
+						glog.V(1).Infof("registered: %s => %s", src, target)
+					}
+				case networking.PathTypeExact:
+					src := host + strings.TrimSuffix(path, "/")
+					if path == "/" {
+						glog.Warningf("register: %s => %s; path type exact at root path is not supported, switch to prefix", src, target)
+						src = host + path // support exact root path
+					}
+					routes[src] = h.ServeHandler(handler)
+					glog.V(1).Infof("registered: %s => %s", src, target)
+				}
 			}
 		}
 
