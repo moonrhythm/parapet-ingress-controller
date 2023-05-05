@@ -7,6 +7,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
+	networking "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/pointer"
 )
 
 // verify http.ServeMux behavior
@@ -141,6 +144,35 @@ func TestBuildRoutes_Duplicate(t *testing.T) {
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	assert.True(t, called)
+}
+
+func TestGetIngressClass(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Empty", func(t *testing.T) {
+		ing := networking.Ingress{}
+		assert.Equal(t, "", getIngressClass(&ing))
+	})
+
+	t.Run("Annotation", func(t *testing.T) {
+		ing := networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"kubernetes.io/ingress.class": "parapet",
+				},
+			},
+		}
+		assert.Equal(t, "parapet", getIngressClass(&ing))
+	})
+
+	t.Run("ingressClassName", func(t *testing.T) {
+		ing := networking.Ingress{
+			Spec: networking.IngressSpec{
+				IngressClassName: pointer.String("parapet"),
+			},
+		}
+		assert.Equal(t, "parapet", getIngressClass(&ing))
+	})
 }
 
 func TestEndpointToRRLB(t *testing.T) {
