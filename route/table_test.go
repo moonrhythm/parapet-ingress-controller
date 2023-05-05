@@ -20,6 +20,7 @@ func TestTable(t *testing.T) {
 		"api.default.svc.cluster.local:8080":     "9000",
 		"api.service.svc.cluster.local:8000":     "9001",
 		"payment.service.svc.cluster.local:8000": "9002",
+		"about.service.svc.cluster.local:8000":   "9003",
 	})
 
 	t.Run("Not Found", func(t *testing.T) {
@@ -49,5 +50,15 @@ func TestTable(t *testing.T) {
 			res := tb.Lookup("api.service.svc.cluster.local:8000")
 			assert.Equal(t, "192.168.1.2:9001", res)
 		}
+	})
+
+	t.Run("SetHostRoute", func(t *testing.T) {
+		tb.SetHostRoute("about.service.svc.cluster.local", &RRLB{IPs: []string{"192.168.3.1"}})
+		res := tb.Lookup("about.service.svc.cluster.local:8000")
+		assert.Equal(t, "192.168.3.1:9003", res)
+
+		tb.SetHostRoute("about.service.svc.cluster.local", &RRLB{IPs: []string{"192.168.3.2"}})
+		res = tb.Lookup("about.service.svc.cluster.local:8000")
+		assert.Equal(t, "192.168.3.2:9003", res)
 	})
 }

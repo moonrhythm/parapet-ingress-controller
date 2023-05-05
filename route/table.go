@@ -66,6 +66,7 @@ func (t *Table) SetHostRoute(host string, lb *RRLB) {
 	t.onceStartBgJob.Do(t.runBackgroundJob)
 
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	if t.addrToTargetHost == nil {
 		t.addrToTargetHost = map[string]*RRLB{}
 	}
@@ -74,7 +75,6 @@ func (t *Table) SetHostRoute(host string, lb *RRLB) {
 	} else {
 		delete(t.addrToTargetHost, host)
 	}
-	t.mu.Unlock()
 }
 
 // SetPortRoutes sets route from service's addr to pod's port
