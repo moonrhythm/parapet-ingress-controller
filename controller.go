@@ -303,6 +303,11 @@ func (ctrl *Controller) reloadIngressDebounced() {
 
 			for _, httpPath := range rule.HTTP.Paths {
 				backend := httpPath.Backend
+				if backend.Service == nil {
+					glog.Warningf("ingress %s/%s: backend service empty", ing.Namespace, ing.Name)
+					continue
+				}
+
 				path := httpPath.Path
 				if path == "" { // path can not be empty
 					path = "/"
@@ -326,7 +331,7 @@ func (ctrl *Controller) reloadIngressDebounced() {
 				svc := v.(*v1.Service)
 
 				// find port
-				config, ok := findBackendConfig(&backend, svc)
+				config, ok := getBackendConfig(&backend, svc)
 				if !ok {
 					glog.Errorf("port %s on service %s not found", backend.Service.Port.Name, svcKey)
 					continue
@@ -530,7 +535,7 @@ func getIngressClass(ing *networking.Ingress) string {
 	return ""
 }
 
-func findBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (config backendConfig, ok bool) {
+func getBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (config backendConfig, ok bool) {
 	// specifies port by name
 	if backend.Service.Port.Name != "" {
 		config.PortName = backend.Service.Port.Name

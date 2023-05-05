@@ -175,6 +175,72 @@ func TestGetIngressClass(t *testing.T) {
 	})
 }
 
+func TestGetBackendConfig(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Port Name", func(t *testing.T) {
+		backend := networking.IngressBackend{
+			Service: &networking.IngressServiceBackend{
+				Name: "service",
+				Port: networking.ServiceBackendPort{
+					Name: "http",
+				},
+			},
+		}
+		service := v1.Service{
+			Spec: v1.ServiceSpec{
+				Ports: []v1.ServicePort{
+					{
+						Name: "tcp",
+						Port: 9000,
+					},
+					{
+						Name:        "http",
+						Port:        8080,
+						AppProtocol: pointer.String("h2c"),
+					},
+				},
+			},
+		}
+		config, ok := getBackendConfig(&backend, &service)
+		assert.True(t, ok)
+		assert.Equal(t, "http", config.PortName)
+		assert.Equal(t, 8080, config.PortNumber)
+		assert.Equal(t, "h2c", config.Protocol)
+	})
+
+	t.Run("Port Number", func(t *testing.T) {
+		backend := networking.IngressBackend{
+			Service: &networking.IngressServiceBackend{
+				Name: "service",
+				Port: networking.ServiceBackendPort{
+					Number: 8080,
+				},
+			},
+		}
+		service := v1.Service{
+			Spec: v1.ServiceSpec{
+				Ports: []v1.ServicePort{
+					{
+						Name: "tcp",
+						Port: 9000,
+					},
+					{
+						Name:        "http",
+						Port:        8080,
+						AppProtocol: pointer.String("h2c"),
+					},
+				},
+			},
+		}
+		config, ok := getBackendConfig(&backend, &service)
+		assert.True(t, ok)
+		assert.Equal(t, "http", config.PortName)
+		assert.Equal(t, 8080, config.PortNumber)
+		assert.Equal(t, "h2c", config.Protocol)
+	})
+}
+
 func TestEndpointToRRLB(t *testing.T) {
 	t.Parallel()
 
