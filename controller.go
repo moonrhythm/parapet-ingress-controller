@@ -149,7 +149,10 @@ func (ctrl *Controller) watchIngresses(ctx context.Context) {
 		}
 
 		for event := range w.ResultChan() {
-			obj := event.Object.(*networking.Ingress)
+			obj, ok := event.Object.(*networking.Ingress)
+			if !ok {
+				continue
+			}
 			key := obj.Namespace + "/" + obj.Name
 
 			switch event.Type {
@@ -178,7 +181,10 @@ func (ctrl *Controller) watchServices(ctx context.Context) {
 		}
 
 		for event := range w.ResultChan() {
-			obj := event.Object.(*v1.Service)
+			obj, ok := event.Object.(*v1.Service)
+			if !ok {
+				continue
+			}
 			key := obj.Namespace + "/" + obj.Name
 
 			switch event.Type {
@@ -208,7 +214,10 @@ func (ctrl *Controller) watchSecrets(ctx context.Context) {
 		}
 
 		for event := range w.ResultChan() {
-			obj := event.Object.(*v1.Secret)
+			obj, ok := event.Object.(*v1.Secret)
+			if !ok {
+				continue
+			}
 			key := obj.Namespace + "/" + obj.Name
 
 			switch event.Type {
@@ -237,7 +246,10 @@ func (ctrl *Controller) watchEndpoints(ctx context.Context) {
 		}
 
 		for event := range w.ResultChan() {
-			obj := event.Object.(*v1.Endpoints)
+			obj, ok := event.Object.(*v1.Endpoints)
+			if !ok {
+				continue
+			}
 			key := obj.Namespace + "/" + obj.Name
 
 			switch event.Type {
