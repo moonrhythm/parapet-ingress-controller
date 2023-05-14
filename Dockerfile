@@ -23,7 +23,7 @@ RUN go build \
 FROM debian:bullseye-slim
 
 RUN apt-get update && \
-	apt-get -y install libbrotli1 && \
+	apt-get -y install libbrotli1 ca-certificates && \
 	rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
