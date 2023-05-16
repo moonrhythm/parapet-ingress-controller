@@ -24,15 +24,15 @@ jobs:
         version: v0.10.4
     - uses: docker/build-push-action@v4
       with:
-        build-args:
-        - VERSION=${{ github.sha }}
-        - GOAMD64=v3
+        build-args: |
+          VERSION=${{ github.sha }}
+          GOAMD64=v3
         push: true
         tags: gcr.io/moonrhythm-containers/parapet-ingress-controller:${{ github.sha }}
     - uses: docker/build-push-action@v4
       with:
-        build-args:
-        - VERSION=${{ github.sha }}
-        - GOAMD64=v1
+        build-args: |
+          VERSION=${{ github.sha }}
+          GOAMD64=v1
         push: true
         tags: gcr.io/moonrhythm-containers/parapet-ingress-controller:${{ github.sha }}-amd64v1
