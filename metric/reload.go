@@ -9,6 +9,9 @@ var _reload reload
 
 type reload struct {
 	vec *prometheus.CounterVec
+
+	successCounter prometheus.Counter
+	failCounter    prometheus.Counter
 }
 
 func init() {
@@ -16,21 +19,16 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "reload",
 	}, []string{"success"})
+	_reload.successCounter, _ = _reload.vec.GetMetricWith(prometheus.Labels{"success": "1"})
+	_reload.failCounter, _ = _reload.vec.GetMetricWith(prometheus.Labels{"success": "0"})
 	prom.Registry().MustRegister(_reload.vec)
 }
 
 // Reload sets reload metric
 func Reload(success bool) {
-	l := prometheus.Labels{
-		"success": "0",
-	}
-	if success {
-		l["success"] = "1"
-	}
-
-	counter, err := _reload.vec.GetMetricWith(l)
-	if err != nil {
+	if !success {
+		_reload.failCounter.Inc()
 		return
 	}
-	counter.Inc()
+	_reload.successCounter.Inc()
 }
