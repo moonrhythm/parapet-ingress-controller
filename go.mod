@@ -2,7 +2,7 @@ module github.com/moonrhythm/parapet-ingress-controller
 
 go 1.20
 
-replace github.com/prometheus/client_golang => github.com/moonrhythm/prometheus-client_golang v0.0.0-20230517054445-d5f625b85ef5
+replace github.com/prometheus/client_golang => github.com/moonrhythm/prometheus-client_golang v1.15.1
 
 require (
 	cloud.google.com/go v0.110.2 // indirect
@@ -10,7 +10,7 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.13.1
 	github.com/acoshift/configfile v1.8.0
 	github.com/golang/glog v1.1.1
-	github.com/moonrhythm/parapet v0.12.3
+	github.com/moonrhythm/parapet v0.12.4-0.20230519172548-528300c8f360
 	github.com/prometheus/client_golang v1.15.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.41.1
 	go.opentelemetry.io/otel/exporters/jaeger v1.15.1
@@ -19,13 +19,13 @@ require (
 	golang.org/x/sys v0.8.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1
-	k8s.io/api v0.25.9
-	k8s.io/apimachinery v0.25.9
-	k8s.io/client-go v0.25.9
+	k8s.io/api v0.25.10
+	k8s.io/apimachinery v0.25.10
+	k8s.io/client-go v0.25.10
 )
 
 require (
-	github.com/stretchr/testify v1.8.2
+	github.com/stretchr/testify v1.8.3
 	go.opentelemetry.io/otel/trace v1.15.1
 	k8s.io/utils v0.0.0-20220728103510-ee6ede2d64ed
 )
