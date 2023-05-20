@@ -46,10 +46,10 @@ func (p *promRequests) ServeHandler(h http.Handler) http.Handler {
 		defer func() {
 			s := state.Get(ctx)
 			l["status"] = strconv.Itoa(nw.status)
-			l["ingress_name"], _ = s["ingress"].(string)
-			l["ingress_namespace"], _ = s["namespace"].(string)
-			l["service_type"], _ = s["serviceType"].(string)
-			l["service_name"], _ = s["serviceName"].(string)
+			l["ingress_name"] = s["ingress"]
+			l["ingress_namespace"] = s["namespace"]
+			l["service_type"] = s["serviceType"]
+			l["service_name"] = s["serviceName"]
 			counter, err := p.vec.GetMetricWith(l)
 			if err != nil {
 				return
