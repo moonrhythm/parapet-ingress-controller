@@ -2,7 +2,7 @@ module github.com/moonrhythm/parapet-ingress-controller
 
 go 1.20
 
-replace github.com/prometheus/client_golang => github.com/moonrhythm/prometheus-client_golang v1.15.1
+replace github.com/prometheus/client_golang => github.com/moonrhythm/prometheus-client_golang v1.15.1-patch.2
 
 require (
 	cloud.google.com/go v0.110.2 // indirect
