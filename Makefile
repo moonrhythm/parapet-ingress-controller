@@ -18,4 +18,6 @@ build-hack:
 		--frontend dockerfile.v0 \
 		--local dockerfile=. \
 		--local context=. \
+		--opt build-arg:VERSION=$(COMMIT_SHA) \
+		--opt build-arg:GOAMD64=v3 \
 		--output type=image,name=gcr.io/moonrhythm-containers/parapet-ingress-controller:$(COMMIT_SHA)-hack,push=true
