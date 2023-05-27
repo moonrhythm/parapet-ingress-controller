@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/prom"
@@ -12,6 +14,8 @@ import (
 
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
+
+const requestSizeHint = 1000
 
 // Requests returns middleware that collect request information
 func Requests() parapet.Middleware {
@@ -22,6 +26,9 @@ var _promRequests promRequests
 
 type promRequests struct {
 	vec *prometheus.CounterVec
+
+	mu sync.RWMutex
+	m  map[string]prometheus.Counter // host/namespace/ingress/service/type/method/status
 }
 
 func init() {
@@ -29,33 +36,55 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "requests",
 	}, []string{"host", "status", "method", "ingress_name", "ingress_namespace", "service_type", "service_name"})
+	_promRequests.m = make(map[string]prometheus.Counter, requestSizeHint)
+
 	prom.Registry().MustRegister(_promRequests.vec)
+}
+
+func (p *promRequests) Inc(r *http.Request, status int) {
+	ctx := r.Context()
+	s := state.Get(ctx)
+
+	key := strings.Join([]string{
+		r.Host,
+		s["namespace"],
+		s["ingress"],
+		s["serviceName"],
+		s["serviceType"],
+		r.Method,
+		strconv.Itoa(status),
+	}, "/")
+
+	p.mu.RLock()
+	m := p.m[key]
+	p.mu.RUnlock()
+
+	if m == nil {
+		p.mu.Lock()
+		if p.m[key] == nil {
+			p.m[key] = p.vec.With(prometheus.Labels{
+				"host":              r.Host,
+				"method":            r.Method,
+				"ingress_name":      s["ingress"],
+				"ingress_namespace": s["namespace"],
+				"service_type":      s["serviceType"],
+				"service_name":      s["serviceName"],
+				"status":            strconv.Itoa(status),
+			})
+		}
+		m = p.m[key]
+		p.mu.Unlock()
+	}
+
+	m.Inc()
 }
 
 func (p *promRequests) ServeHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-
-		l := prometheus.Labels{
-			"method": r.Method,
-			"host":   r.Host,
-		}
 		nw := requestTrackRW{
 			ResponseWriter: w,
 		}
-		defer func() {
-			s := state.Get(ctx)
-			l["status"] = strconv.Itoa(nw.status)
-			l["ingress_name"] = s["ingress"]
-			l["ingress_namespace"] = s["namespace"]
-			l["service_type"] = s["serviceType"]
-			l["service_name"] = s["serviceName"]
-			counter, err := p.vec.GetMetricWith(l)
-			if err != nil {
-				return
-			}
-			counter.Inc()
-		}()
+		defer func() { p.Inc(r, nw.status) }()
 
 		h.ServeHTTP(&nw, r)
 	})
@@ -82,6 +111,10 @@ func (w *requestTrackRW) Write(p []byte) (int, error) {
 		w.WriteHeader(http.StatusOK)
 	}
 	return w.ResponseWriter.Write(p)
+}
+
+func (w *requestTrackRW) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 // Push implements Pusher interface

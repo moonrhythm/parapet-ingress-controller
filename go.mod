@@ -10,7 +10,7 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.13.1
 	github.com/acoshift/configfile v1.8.0
 	github.com/golang/glog v1.1.1
-	github.com/moonrhythm/parapet v0.12.4-0.20230520144115-87f8ad745aed
+	github.com/moonrhythm/parapet v0.12.4
 	github.com/prometheus/client_golang v1.15.1
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.41.1
 	go.opentelemetry.io/otel/exporters/jaeger v1.15.1

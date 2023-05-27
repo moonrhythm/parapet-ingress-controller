@@ -2,16 +2,28 @@ package metric
 
 import (
 	"net"
+	"sync"
 	"sync/atomic"
 
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+const addrSizeHint = 300
+
+type backendMetrics struct {
+	connections prometheus.Gauge
+	reads       prometheus.Counter
+	writes      prometheus.Counter
+}
+
 type backendConnections struct {
 	connections *prometheus.GaugeVec
 	reads       *prometheus.CounterVec
 	writes      *prometheus.CounterVec
+
+	mu sync.RWMutex
+	m  map[string]*backendMetrics // addr
 }
 
 var _backendConnections backendConnections
@@ -29,59 +41,59 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "backend_network_write_bytes",
 	}, []string{"addr"})
+	_backendConnections.m = make(map[string]*backendMetrics, addrSizeHint)
+
 	prom.Registry().MustRegister(_backendConnections.connections)
 	prom.Registry().MustRegister(_backendConnections.reads)
 	prom.Registry().MustRegister(_backendConnections.writes)
 }
 
-func (p *backendConnections) getConnectionGauge(addr string) prometheus.Gauge {
-	c, _ := p.connections.GetMetricWith(prometheus.Labels{
-		"addr": addr,
-	})
-	return c
-}
+func (p *backendConnections) getM(addr string) *backendMetrics {
+	p.mu.RLock()
+	m := p.m[addr]
+	p.mu.RUnlock()
 
-func (p *backendConnections) getReadCounter(addr string) prometheus.Counter {
-	c, _ := p.reads.GetMetricWith(prometheus.Labels{
-		"addr": addr,
-	})
-	return c
-}
+	if m == nil {
+		p.mu.Lock()
+		if p.m[addr] == nil {
+			l := prometheus.Labels{
+				"addr": addr,
+			}
+			p.m[addr] = &backendMetrics{
+				connections: p.connections.With(l),
+				reads:       p.reads.With(l),
+				writes:      p.writes.With(l),
+			}
+		}
+		m = p.m[addr]
+		p.mu.Unlock()
+	}
 
-func (p *backendConnections) getWriteCounter(addr string) prometheus.Counter {
-	c, _ := p.writes.GetMetricWith(prometheus.Labels{
-		"addr": addr,
-	})
-	return c
+	return m
 }
 
 // BackendConnections collects backend connection metrics
 func BackendConnections(conn net.Conn, addr string) net.Conn {
+	m := _backendConnections.getM(addr)
 	trackConn := &trackBackendConn{
-		Conn:         conn,
-		connGauge:    _backendConnections.getConnectionGauge(addr),
-		readCounter:  _backendConnections.getReadCounter(addr),
-		writeCounter: _backendConnections.getWriteCounter(addr),
+		Conn: conn,
+		m:    m,
 	}
-	trackConn.connGauge.Inc()
+	m.connections.Inc()
 
 	return trackConn
 }
 
 type trackBackendConn struct {
 	net.Conn
-	connGauge    prometheus.Gauge
-	readCounter  prometheus.Counter
-	writeCounter prometheus.Counter
-	closed       int32
+	m      *backendMetrics
+	closed int32
 }
 
 func (conn *trackBackendConn) Read(b []byte) (n int, err error) {
 	n, err = conn.Conn.Read(b)
 	if n > 0 {
-		if conn.readCounter != nil {
-			conn.readCounter.Add(float64(n))
-		}
+		conn.m.reads.Add(float64(n))
 	}
 	if err != nil {
 		conn.trackClose()
@@ -92,9 +104,7 @@ func (conn *trackBackendConn) Read(b []byte) (n int, err error) {
 func (conn *trackBackendConn) Write(b []byte) (n int, err error) {
 	n, err = conn.Conn.Write(b)
 	if n > 0 {
-		if conn.writeCounter != nil {
-			conn.writeCounter.Add(float64(n))
-		}
+		conn.m.writes.Add(float64(n))
 	}
 	if err != nil {
 		conn.trackClose()
@@ -104,9 +114,7 @@ func (conn *trackBackendConn) Write(b []byte) (n int, err error) {
 
 func (conn *trackBackendConn) trackClose() {
 	if atomic.CompareAndSwapInt32(&conn.closed, 0, 1) {
-		if conn.connGauge != nil {
-			conn.connGauge.Dec()
-		}
+		conn.m.connections.Dec()
 	}
 }
 

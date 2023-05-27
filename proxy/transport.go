@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/moonrhythm/parapet/pkg/header"
 	"golang.org/x/net/http2"
 )
 
@@ -34,7 +35,7 @@ type h2cTransport struct {
 func (t *h2cTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r.URL.Scheme = "http"
 
-	if r.Header.Get("Upgrade") != "" {
+	if header.Exists(r.Header, header.Upgrade) {
 		return t.fallback.RoundTrip(r)
 	}
 

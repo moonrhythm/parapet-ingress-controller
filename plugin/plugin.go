@@ -11,6 +11,7 @@ import (
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/block"
 	"github.com/moonrhythm/parapet/pkg/body"
+	"github.com/moonrhythm/parapet/pkg/header"
 	"github.com/moonrhythm/parapet/pkg/hsts"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"github.com/moonrhythm/parapet/pkg/stripprefix"
@@ -58,7 +59,7 @@ func RedirectHTTPS(ctx Context) {
 					return
 				}
 
-				proto := r.Header.Get("X-Forwarded-Proto")
+				proto := header.Get(r.Header, header.XForwardedProto)
 				if proto == "http" {
 					http.Redirect(w, r, "https://"+r.Host+r.RequestURI, http.StatusMovedPermanently)
 					return

@@ -7,6 +7,7 @@ import (
 	texporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace"
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
+	"github.com/moonrhythm/parapet/pkg/header"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/exporters/jaeger"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -100,6 +101,6 @@ func generalTrace(ctx Context, exporter sdktrace.SpanExporter, sampler float64) 
 }
 
 func traceSpanNameFormatter(_ string, r *http.Request) string {
-	proto := r.Header.Get("X-Forwarded-Proto")
+	proto := header.Get(r.Header, header.XForwardedProto)
 	return proto + "://" + r.Host + r.RequestURI
 }
