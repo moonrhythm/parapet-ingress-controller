@@ -1,0 +1,215 @@
+From e4e9bd54af58e4efa363ad527c2276da9c88abc0 Mon Sep 17 00:00:00 2001
+From: Thanatat Tamtan <acoshift@gmail.com>
+Date: Sun, 28 May 2023 00:03:14 +0700
+Subject: [PATCH] patch
+
+---
+ src/net/http/h2_bundle.go             |  2 +-
+ src/net/http/httputil/reverseproxy.go | 60 +++++++++++++++++----------
+ src/net/http/request.go               |  4 ++
+ src/net/http/server.go                |  2 +-
+ 4 files changed, 44 insertions(+), 24 deletions(-)
+
+diff --git a/src/net/http/h2_bundle.go b/src/net/http/h2_bundle.go
+index 1e0b83d493..382faf5384 100644
+--- a/src/net/http/h2_bundle.go
++++ b/src/net/http/h2_bundle.go
+@@ -6003,7 +6003,7 @@ func (sc *http2serverConn) newWriterAndRequestNoBody(st *http2stream, rp http2re
+ 		Body:       body,
+ 		Trailer:    trailer,
+ 	}
+-	req = req.WithContext(st.ctx)
++	req.SetContext(st.ctx)
+ 
+ 	rw := sc.newResponseWriter(st, req)
+ 	return rw, req, nil
+diff --git a/src/net/http/httputil/reverseproxy.go b/src/net/http/httputil/reverseproxy.go
+index 58064a5332..f4e8854d18 100644
+--- a/src/net/http/httputil/reverseproxy.go
++++ b/src/net/http/httputil/reverseproxy.go
+@@ -280,9 +280,7 @@ func rewriteRequestURL(req *http.Request, target *url.URL) {
+ 
+ func copyHeader(dst, src http.Header) {
+ 	for k, vv := range src {
+-		for _, v := range vv {
+-			dst.Add(k, v)
+-		}
++		dst[k] = append([]string(nil), vv...)
+ 	}
+ }
+ 
+@@ -404,24 +402,24 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+ 	// mentioning.) Note that we look at req.Header, not outreq.Header, since
+ 	// the latter has passed through removeHopByHopHeaders.
+ 	if httpguts.HeaderValuesContainsToken(req.Header["Te"], "trailers") {
+-		outreq.Header.Set("Te", "trailers")
++		outreq.Header["Te"] = []string{"trailers"}
+ 	}
+ 
+ 	// After stripping all the hop-by-hop connection headers above, add back any
+ 	// necessary for protocol upgrades, such as for websockets.
+ 	if reqUpType != "" {
+-		outreq.Header.Set("Connection", "Upgrade")
+-		outreq.Header.Set("Upgrade", reqUpType)
++		outreq.Header["Connection"] = []string{"upgrade"}
++		outreq.Header["Upgrade"] = []string{reqUpType}
+ 	}
+ 
+ 	if p.Rewrite != nil {
+ 		// Strip client-provided forwarding headers.
+ 		// The Rewrite func may use SetXForwarded to set new values
+ 		// for these or copy the previous values from the inbound request.
+-		outreq.Header.Del("Forwarded")
+-		outreq.Header.Del("X-Forwarded-For")
+-		outreq.Header.Del("X-Forwarded-Host")
+-		outreq.Header.Del("X-Forwarded-Proto")
++		delete(outreq.Header, "Forwarded")
++		delete(outreq.Header, "X-Forwarded-For")
++		delete(outreq.Header, "X-Forwarded-Host")
++		delete(outreq.Header, "X-Forwarded-Proto")
+ 
+ 		// Remove unparsable query parameters from the outbound request.
+ 		outreq.URL.RawQuery = cleanQueryParams(outreq.URL.RawQuery)
+@@ -443,7 +441,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+ 				clientIP = strings.Join(prior, ", ") + ", " + clientIP
+ 			}
+ 			if !omit {
+-				outreq.Header.Set("X-Forwarded-For", clientIP)
++				outreq.Header["X-Forwarded-For"] = []string{clientIP}
+ 			}
+ 		}
+ 	}
+@@ -451,7 +449,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+ 	if _, ok := outreq.Header["User-Agent"]; !ok {
+ 		// If the outbound request doesn't have a User-Agent header set,
+ 		// don't send the default Go HTTP client User-Agent.
+-		outreq.Header.Set("User-Agent", "")
++		outreq.Header["User-Agent"] = []string{""}
+ 	}
+ 
+ 	trace := &httptrace.ClientTrace{
+@@ -468,7 +466,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+ 			return nil
+ 		},
+ 	}
+-	outreq = outreq.WithContext(httptrace.WithClientTrace(outreq.Context(), trace))
++	outreq.SetContext(httptrace.WithClientTrace(outreq.Context(), trace))
+ 
+ 	res, err := transport.RoundTrip(outreq)
+ 	if err != nil {
+@@ -501,7 +499,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+ 		for k := range res.Trailer {
+ 			trailerKeys = append(trailerKeys, k)
+ 		}
+-		rw.Header().Add("Trailer", strings.Join(trailerKeys, ", "))
++		rw.Header()["Trailer"] = append(rw.Header()["Trailer"], strings.Join(trailerKeys, ", "))
+ 	}
+ 
+ 	rw.WriteHeader(res.StatusCode)
+@@ -536,9 +534,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+ 
+ 	for k, vv := range res.Trailer {
+ 		k = http.TrailerPrefix + k
+-		for _, v := range vv {
+-			rw.Header().Add(k, v)
+-		}
++		rw.Header()[k] = append(rw.Header()[k], vv...)
+ 	}
+ }
+ 
+@@ -578,7 +574,7 @@ func removeHopByHopHeaders(h http.Header) {
+ 	// This behavior is superseded by the RFC 7230 Connection header, but
+ 	// preserve it for backwards compatibility.
+ 	for _, f := range hopHeaders {
+-		h.Del(f)
++		delete(h, f)
+ 	}
+ }
+ 
+@@ -725,7 +721,10 @@ func upgradeType(h http.Header) string {
+ 	if !httpguts.HeaderValuesContainsToken(h["Connection"], "Upgrade") {
+ 		return ""
+ 	}
+-	return h.Get("Upgrade")
++	if v := h["Upgrade"]; len(v) > 0 {
++		return v[0]
++	}
++	return ""
+ }
+ 
+ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.Request, res *http.Response) {
+@@ -783,7 +782,7 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
+ 		return
+ 	}
+ 	errc := make(chan error, 1)
+-	spc := switchProtocolCopier{user: conn, backend: backConn}
++	spc := switchProtocolCopier{user: conn, backend: backConn, bufferPool: p.BufferPool}
+ 	go spc.copyToBackend(errc)
+ 	go spc.copyFromBackend(errc)
+ 	<-errc
+@@ -793,15 +792,32 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
+ // forth have nice names in stacks.
+ type switchProtocolCopier struct {
+ 	user, backend io.ReadWriter
++	bufferPool    BufferPool
+ }
+ 
+ func (c switchProtocolCopier) copyFromBackend(errc chan<- error) {
+-	_, err := io.Copy(c.user, c.backend)
++	var buf []byte
++	if c.bufferPool != nil {
++		buf = c.bufferPool.Get()
++		defer c.bufferPool.Put(buf)
++	}
++	if len(buf) == 0 {
++		buf = make([]byte, 32*1024)
++	}
++	_, err := io.CopyBuffer(c.user, c.backend, buf)
+ 	errc <- err
+ }
+ 
+ func (c switchProtocolCopier) copyToBackend(errc chan<- error) {
+-	_, err := io.Copy(c.backend, c.user)
++	var buf []byte
++	if c.bufferPool != nil {
++		buf = c.bufferPool.Get()
++		defer c.bufferPool.Put(buf)
++	}
++	if len(buf) == 0 {
++		buf = make([]byte, 32*1024)
++	}
++	_, err := io.CopyBuffer(c.backend, c.user, buf)
+ 	errc <- err
+ }
+ 
+diff --git a/src/net/http/request.go b/src/net/http/request.go
+index a45c9e3d18..c32b335474 100644
+--- a/src/net/http/request.go
++++ b/src/net/http/request.go
+@@ -363,6 +363,10 @@ func (r *Request) WithContext(ctx context.Context) *Request {
+ 	return r2
+ }
+ 
++func (r *Request) SetContext(ctx context.Context) {
++	r.ctx = ctx
++}
++
+ // Clone returns a deep copy of r with its context changed to ctx.
+ // The provided ctx must be non-nil.
+ //
+diff --git a/src/net/http/server.go b/src/net/http/server.go
+index c3c3f91d9a..b924aa7313 100644
+--- a/src/net/http/server.go
++++ b/src/net/http/server.go
+@@ -2923,7 +2923,7 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 
+ 	if req.URL != nil && strings.Contains(req.URL.RawQuery, ";") {
+ 		var allowQuerySemicolonsInUse atomic.Bool
+-		req = req.WithContext(context.WithValue(req.Context(), silenceSemWarnContextKey, func() {
++		req.SetContext(context.WithValue(req.Context(), silenceSemWarnContextKey, func() {
+ 			allowQuerySemicolonsInUse.Store(true)
+ 		}))
+ 		defer func() {
+-- 
+2.40.1
+

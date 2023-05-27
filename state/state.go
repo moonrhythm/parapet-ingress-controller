@@ -59,7 +59,9 @@ func Middleware() parapet.Middleware {
 				putState(s)
 			}()
 
-			h.ServeHTTP(w, r.WithContext(NewContext(ctx, s)))
+			r.SetContext(NewContext(ctx, s))
+			h.ServeHTTP(w, r)
+			// h.ServeHTTP(w, r.WithContext(NewContext(ctx, s)))
 		})
 	})
 }
