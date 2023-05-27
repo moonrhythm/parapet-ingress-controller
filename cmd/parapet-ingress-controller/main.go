@@ -37,6 +37,7 @@ func main() {
 	watchNamespace := config.StringDefault("WATCH_NAMESPACE", "")
 	ingressClass := config.String("INGRESS_CLASS")
 	enableProfiler := config.Bool("PROFILER")
+	profilerName := config.String("PROFILER_NAME")
 	disableLog := config.Bool("DISABLE_LOG")
 	waitBeforeShutdown := config.DurationDefault("WAIT_BEFORE_SHUTDOWN", 30*time.Second)
 	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
@@ -59,8 +60,11 @@ func main() {
 	glog.Infoln("http_server_max_header_bytes:", httpServerMaxHeaderBytes)
 
 	if enableProfiler {
+		if profilerName == "" {
+			profilerName = "parapet-ingress-controller"
+		}
 		err := profiler.Start(profiler.Config{
-			Service:        "parapet-ingress-controller",
+			Service:        profilerName,
 			ServiceVersion: version,
 			Instance:       hostname,
 		})
