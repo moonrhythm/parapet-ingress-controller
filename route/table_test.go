@@ -1,6 +1,8 @@
 package route
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -61,4 +63,34 @@ func TestTable(t *testing.T) {
 		res = tb.Lookup("about.service.svc.cluster.local:8000")
 		assert.Equal(t, "192.168.3.2:9003", res)
 	})
+}
+
+func BenchmarkSprintf(b *testing.B) {
+	host := "192.168.100.10"
+	port := "8080"
+	var r string
+	for i := 0; i < b.N; i++ {
+		r = fmt.Sprintf("%s:%s", host, port)
+	}
+	_ = r
+}
+
+func BenchmarkStringConcat(b *testing.B) {
+	host := "192.168.100.10"
+	port := "8080"
+	var r string
+	for i := 0; i < b.N; i++ {
+		r = host + ":" + port
+	}
+	_ = r
+}
+
+func BenchmarkStringsJoin(b *testing.B) {
+	host := "192.168.100.10"
+	port := "8080"
+	var r string
+	for i := 0; i < b.N; i++ {
+		r = strings.Join([]string{host, port}, ":")
+	}
+	_ = r
 }

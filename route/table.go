@@ -1,7 +1,6 @@
 package route
 
 import (
-	"fmt"
 	"strings"
 	"sync"
 )
@@ -47,7 +46,7 @@ func (t *Table) Lookup(addr string) string {
 		// this case should not happen, if SetHostRoute is called correctly
 		return addr
 	}
-	return fmt.Sprintf("%s:%s", hostIP, targetPort)
+	return hostIP + ":" + targetPort
 }
 
 // SetHostRoutes sets route from host to RRLB (IPs)

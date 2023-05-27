@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -517,12 +516,12 @@ type backendConfig struct {
 
 func buildHost(namespace, name string) string {
 	// service.namespace.svc.cluster.local
-	return fmt.Sprintf("%s.%s.svc.cluster.local", name, namespace)
+	return name + "." + namespace + ".svc.cluster.local"
 }
 
 func buildHostPort(namespace, name string, port int) string {
 	// service.namespace.svc.cluster.local:port
-	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, port)
+	return name + "." + namespace + ".svc.cluster.local:" + strconv.Itoa(port)
 }
 
 func buildRoutes(routes map[string]http.Handler) *http.ServeMux {

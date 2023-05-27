@@ -1,8 +1,11 @@
 package controller
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -334,4 +337,56 @@ func TestEndpointToRRLB(t *testing.T) {
 			assert.EqualValues(t, []string{"192.168.0.1", "192.168.0.2", "192.168.0.3"}, lb.IPs)
 		}
 	})
+}
+
+func BenchmarkBuildHostSprintf(b *testing.B) {
+	name := "service"
+	namespace := "default"
+	var r string
+	for i := 0; i < b.N; i++ {
+		r = fmt.Sprintf("%s.%s.svc.cluster.local", name, namespace)
+	}
+	_ = r
+}
+
+func BenchmarkBuildHostStringConcat(b *testing.B) {
+	name := "service"
+	namespace := "default"
+	var r string
+	for i := 0; i < b.N; i++ {
+		r = name + "." + namespace + ".svc.cluster.local"
+	}
+	_ = r
+}
+
+func BenchmarkBuildHostStringsJoin(b *testing.B) {
+	name := "service"
+	namespace := "default"
+	var r string
+	for i := 0; i < b.N; i++ {
+		r = strings.Join([]string{name, namespace, ".svc.cluster.local"}, ".")
+	}
+	_ = r
+}
+
+func BenchmarkBuildHostPortSprintf(b *testing.B) {
+	name := "service"
+	namespace := "default"
+	port := 8080
+	var r string
+	for i := 0; i < b.N; i++ {
+		r = fmt.Sprintf("%s.%s.svc.cluster.local:%d", name, namespace, port)
+	}
+	_ = r
+}
+
+func BenchmarkBuildHostPortStringConcat(b *testing.B) {
+	name := "service"
+	namespace := "default"
+	port := 8080
+	var r string
+	for i := 0; i < b.N; i++ {
+		r = name + "." + namespace + ".svc.cluster.local" + ":" + strconv.Itoa(port)
+	}
+	_ = r
 }
