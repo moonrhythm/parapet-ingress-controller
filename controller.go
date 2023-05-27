@@ -592,17 +592,15 @@ func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, co
 		if config.Protocol != "" {
 			r.URL.Scheme = config.Protocol
 		}
+		r.RemoteAddr = ""
+		r.URL.Host = ctrl.routeTable.Lookup(target)
 
-		ctx := r.Context()
-		s := state.Get(ctx)
+		s := state.Get(r.Context())
 		s["serviceType"] = string(svc.Spec.Type)
 		s["serviceName"] = svc.Name
 		s["serviceTarget"] = r.URL.Host
 
-		nr := r.WithContext(ctx)
-		nr.RemoteAddr = ""
-		nr.URL.Host = ctrl.routeTable.Lookup(target)
-		ctrl.proxy.ServeHTTP(w, nr)
+		ctrl.proxy.ServeHTTP(w, r)
 	})
 }
 
