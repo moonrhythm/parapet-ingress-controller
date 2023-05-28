@@ -66,7 +66,7 @@ func Middleware() parapet.Middleware {
 	})
 }
 
-//go:linkname setRequestContext http.setRequestContext
+//go:linkname setRequestContext net/http.setRequestContext
 func setRequestContext(r *http.Request, ctx context.Context) {
 	nr := r.WithContext(ctx)
 	*r = *nr

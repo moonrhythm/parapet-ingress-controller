@@ -1,4 +1,4 @@
-From 654ab472e7b5d052e01acb2a21be6e7d6b538a99 Mon Sep 17 00:00:00 2001
+From 6431c0deb0c7b264c85e4ce4d686b3904a6bee19 Mon Sep 17 00:00:00 2001
 From: Thanatat Tamtan <acoshift@gmail.com>
 Date: Sun, 28 May 2023 00:03:14 +0700
 Subject: [PATCH] patch
@@ -25,7 +25,7 @@ index 1e0b83d493..c733509ae7 100644
  	rw := sc.newResponseWriter(st, req)
  	return rw, req, nil
 diff --git a/src/net/http/httputil/reverseproxy.go b/src/net/http/httputil/reverseproxy.go
-index 58064a5332..eb6879c883 100644
+index 58064a5332..d7cfb9ade8 100644
 --- a/src/net/http/httputil/reverseproxy.go
 +++ b/src/net/http/httputil/reverseproxy.go
 @@ -22,6 +22,7 @@ import (
@@ -204,10 +204,10 @@ index 58064a5332..eb6879c883 100644
  	return false
  }
 +
-+//go:linkname putRequest http.putRequest
++//go:linkname putRequest net/http.putRequest
 +func putRequest(r *http.Request)
 +
-+//go:linkname setRequestContext http.setRequestContext
++//go:linkname setRequestContext net/http.setRequestContext
 +func setRequestContext(r *http.Request, ctx context.Context)
 diff --git a/src/net/http/request.go b/src/net/http/request.go
 index a45c9e3d18..e8025baff1 100644
