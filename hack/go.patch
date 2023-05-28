@@ -1,21 +1,31 @@
-From 0aa4bbc993424762e6989255a556e417061df676 Mon Sep 17 00:00:00 2001
+From fb7749f7cdafbf3d587324a5339f66cb6ea12664 Mon Sep 17 00:00:00 2001
 From: Thanatat Tamtan <acoshift@gmail.com>
 Date: Sun, 28 May 2023 00:03:14 +0700
 Subject: [PATCH] patch
 
 ---
- src/net/http/h2_bundle.go             |  2 +-
+ src/net/http/h2_bundle.go             |  7 ++-
  src/net/http/httputil/reverseproxy.go | 68 ++++++++++++++++++---------
  src/net/http/request.go               | 30 ++++++++++--
  src/net/http/server.go                |  7 ++-
  src/net/textproto/reader.go           | 27 +++++++++++
- 5 files changed, 106 insertions(+), 28 deletions(-)
+ 5 files changed, 110 insertions(+), 29 deletions(-)
 
 diff --git a/src/net/http/h2_bundle.go b/src/net/http/h2_bundle.go
-index 1e0b83d493..c733509ae7 100644
+index 1e0b83d493..139038a606 100644
 --- a/src/net/http/h2_bundle.go
 +++ b/src/net/http/h2_bundle.go
-@@ -6003,7 +6003,7 @@ func (sc *http2serverConn) newWriterAndRequestNoBody(st *http2stream, rp http2re
+@@ -5989,7 +5989,8 @@ func (sc *http2serverConn) newWriterAndRequestNoBody(st *http2stream, rp http2re
+ 		stream:        st,
+ 		needsContinue: needsContinue,
+ 	}
+-	req := &Request{
++	req := newRequest()
++	*req = Request{
+ 		Method:     rp.method,
+ 		URL:        url_,
+ 		RemoteAddr: sc.remoteAddrStr,
+@@ -6003,7 +6004,7 @@ func (sc *http2serverConn) newWriterAndRequestNoBody(st *http2stream, rp http2re
  		Body:       body,
  		Trailer:    trailer,
  	}
@@ -24,6 +34,15 @@ index 1e0b83d493..c733509ae7 100644
 
  	rw := sc.newResponseWriter(st, req)
  	return rw, req, nil
+@@ -6696,6 +6697,8 @@ func (w *http2responseWriter) handlerDone() {
+ 	w.Flush()
+ 	w.rws = nil
+ 	if !dirty {
++		putRequest(rws.req)
++		rws.req = nil
+ 		// Only recycle the pool if all prior Write calls to
+ 		// the serverConn goroutine completed successfully. If
+ 		// they returned earlier due to resets from the peer
 diff --git a/src/net/http/httputil/reverseproxy.go b/src/net/http/httputil/reverseproxy.go
 index 58064a5332..d7cfb9ade8 100644
 --- a/src/net/http/httputil/reverseproxy.go
