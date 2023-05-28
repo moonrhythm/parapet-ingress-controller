@@ -5,6 +5,7 @@ package state
 import (
 	"context"
 	"net/http"
+	_ "unsafe"
 )
 
 //go:linkname setRequestContext net/http.setRequestContext
