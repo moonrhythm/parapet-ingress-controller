@@ -2,6 +2,7 @@ FROM golang:1.20.4-bullseye
 
 ARG VERSION
 ARG GOAMD64
+ARG BUILD_TAGS=cbrotli
 
 RUN apt-get update && \
 	apt-get -y install libbrotli-dev
@@ -18,7 +19,7 @@ RUN cd /usr/local/go && git apply /workspace/hack/go.patch
 RUN go build \
 		-o parapet-ingress-controller \
 		-ldflags "-w -s -X main.version=$VERSION" \
-		-tags=cbrotli \
+		-tags=$BUILD_TAGS \
 		./cmd/parapet-ingress-controller
 
 FROM debian:bullseye-slim
