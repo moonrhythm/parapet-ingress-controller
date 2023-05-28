@@ -1,4 +1,4 @@
-From 6431c0deb0c7b264c85e4ce4d686b3904a6bee19 Mon Sep 17 00:00:00 2001
+From 0aa4bbc993424762e6989255a556e417061df676 Mon Sep 17 00:00:00 2001
 From: Thanatat Tamtan <acoshift@gmail.com>
 Date: Sun, 28 May 2023 00:03:14 +0700
 Subject: [PATCH] patch
@@ -6,10 +6,10 @@ Subject: [PATCH] patch
 ---
  src/net/http/h2_bundle.go             |  2 +-
  src/net/http/httputil/reverseproxy.go | 68 ++++++++++++++++++---------
- src/net/http/request.go               | 27 +++++++++--
+ src/net/http/request.go               | 30 ++++++++++--
  src/net/http/server.go                |  7 ++-
  src/net/textproto/reader.go           | 27 +++++++++++
- 5 files changed, 103 insertions(+), 28 deletions(-)
+ 5 files changed, 106 insertions(+), 28 deletions(-)
 
 diff --git a/src/net/http/h2_bundle.go b/src/net/http/h2_bundle.go
 index 1e0b83d493..c733509ae7 100644
@@ -210,7 +210,7 @@ index 58064a5332..d7cfb9ade8 100644
 +//go:linkname setRequestContext net/http.setRequestContext
 +func setRequestContext(r *http.Request, ctx context.Context)
 diff --git a/src/net/http/request.go b/src/net/http/request.go
-index a45c9e3d18..e8025baff1 100644
+index a45c9e3d18..2df4974aca 100644
 --- a/src/net/http/request.go
 +++ b/src/net/http/request.go
 @@ -357,12 +357,19 @@ func (r *Request) WithContext(ctx context.Context) *Request {
@@ -243,7 +243,7 @@ index a45c9e3d18..e8025baff1 100644
  	*r2 = *r
  	r2.ctx = ctx
  	r2.URL = cloneURL(r.URL)
-@@ -1015,6 +1022,20 @@ func putTextprotoReader(r *textproto.Reader) {
+@@ -1015,6 +1022,23 @@ func putTextprotoReader(r *textproto.Reader) {
  	textprotoReaderPool.Put(r)
  }
 
@@ -257,6 +257,9 @@ index a45c9e3d18..e8025baff1 100644
 +}
 +
 +func putRequest(r *Request) {
++	if r == nil {
++		return
++	}
 +	*r = Request{}
 +	requestPool.Put(r)
 +}
@@ -264,7 +267,7 @@ index a45c9e3d18..e8025baff1 100644
  // ReadRequest reads and parses an incoming request from b.
  //
  // ReadRequest is a low-level function and should only be used for
-@@ -1035,7 +1056,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
+@@ -1035,7 +1059,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
  	tp := newTextprotoReader(b)
  	defer putTextprotoReader(tp)
 
@@ -274,18 +277,22 @@ index a45c9e3d18..e8025baff1 100644
  	// First line: GET /index.html HTTP/1.0
  	var s string
 diff --git a/src/net/http/server.go b/src/net/http/server.go
-index c3c3f91d9a..3b317daa58 100644
+index c3c3f91d9a..4843684d00 100644
 --- a/src/net/http/server.go
 +++ b/src/net/http/server.go
-@@ -1660,6 +1660,8 @@ func (w *response) finishRequest() {
- 	if w.req.MultipartForm != nil {
- 		w.req.MultipartForm.RemoveAll()
- 	}
-+	putRequest(w.req)
-+	w.req = nil
- }
+@@ -2004,10 +2004,12 @@ func (c *conn) serve(ctx context.Context) {
+ 			if w.requestBodyLimitHit || w.closedRequestBodyEarly() {
+ 				c.closeWriteAndWait()
+ 			}
++			putRequest(w.req)
+ 			return
+ 		}
+ 		c.setState(c.rwc, StateIdle, runHooks)
+ 		c.curReq.Store(nil)
++		putRequest(w.req)
 
- // shouldReuseConnection reports whether the underlying TCP connection can be reused.
+ 		if !w.conn.server.doKeepAlives() {
+ 			// We're in shutdown mode. We might've replied
 @@ -2156,7 +2158,8 @@ func StripPrefix(prefix string, h Handler) Handler {
  		p := strings.TrimPrefix(r.URL.Path, prefix)
  		rp := strings.TrimPrefix(r.URL.RawPath, prefix)
