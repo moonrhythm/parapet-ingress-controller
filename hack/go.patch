@@ -1,17 +1,18 @@
-From 3ce6f2282d09e1340cf1f19b21bb03cccb7aca9c Mon Sep 17 00:00:00 2001
+From 654ab472e7b5d052e01acb2a21be6e7d6b538a99 Mon Sep 17 00:00:00 2001
 From: Thanatat Tamtan <acoshift@gmail.com>
 Date: Sun, 28 May 2023 00:03:14 +0700
 Subject: [PATCH] patch
 
 ---
  src/net/http/h2_bundle.go             |  2 +-
- src/net/http/httputil/reverseproxy.go | 60 +++++++++++++++++----------
- src/net/http/request.go               |  4 ++
- src/net/http/server.go                |  2 +-
- 4 files changed, 44 insertions(+), 24 deletions(-)
+ src/net/http/httputil/reverseproxy.go | 68 ++++++++++++++++++---------
+ src/net/http/request.go               | 27 +++++++++--
+ src/net/http/server.go                |  7 ++-
+ src/net/textproto/reader.go           | 27 +++++++++++
+ 5 files changed, 103 insertions(+), 28 deletions(-)
 
 diff --git a/src/net/http/h2_bundle.go b/src/net/http/h2_bundle.go
-index 1e0b83d493..382faf5384 100644
+index 1e0b83d493..c733509ae7 100644
 --- a/src/net/http/h2_bundle.go
 +++ b/src/net/http/h2_bundle.go
 @@ -6003,7 +6003,7 @@ func (sc *http2serverConn) newWriterAndRequestNoBody(st *http2stream, rp http2re
@@ -19,15 +20,23 @@ index 1e0b83d493..382faf5384 100644
  		Trailer:    trailer,
  	}
 -	req = req.WithContext(st.ctx)
-+	req.SetContext(st.ctx)
++	setRequestContext(req, st.ctx)
 
  	rw := sc.newResponseWriter(st, req)
  	return rw, req, nil
 diff --git a/src/net/http/httputil/reverseproxy.go b/src/net/http/httputil/reverseproxy.go
-index 58064a5332..b288f95744 100644
+index 58064a5332..eb6879c883 100644
 --- a/src/net/http/httputil/reverseproxy.go
 +++ b/src/net/http/httputil/reverseproxy.go
-@@ -280,9 +280,7 @@ func rewriteRequestURL(req *http.Request, target *url.URL) {
+@@ -22,6 +22,7 @@ import (
+ 	"strings"
+ 	"sync"
+ 	"time"
++	_ "unsafe"
+
+ 	"golang.org/x/net/http/httpguts"
+ )
+@@ -280,9 +281,7 @@ func rewriteRequestURL(req *http.Request, target *url.URL) {
 
  func copyHeader(dst, src http.Header) {
  	for k, vv := range src {
@@ -38,7 +47,15 @@ index 58064a5332..b288f95744 100644
  	}
  }
 
-@@ -404,24 +402,24 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+@@ -362,6 +361,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+ 	}
+
+ 	outreq := req.Clone(ctx)
++	defer putRequest(outreq)
+ 	if req.ContentLength == 0 {
+ 		outreq.Body = nil // Issue 16036: nil Body for http.Transport retries
+ 	}
+@@ -404,24 +404,24 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
  	// mentioning.) Note that we look at req.Header, not outreq.Header, since
  	// the latter has passed through removeHopByHopHeaders.
  	if httpguts.HeaderValuesContainsToken(req.Header["Te"], "trailers") {
@@ -70,7 +87,7 @@ index 58064a5332..b288f95744 100644
 
  		// Remove unparsable query parameters from the outbound request.
  		outreq.URL.RawQuery = cleanQueryParams(outreq.URL.RawQuery)
-@@ -443,7 +441,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+@@ -443,7 +443,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
  				clientIP = strings.Join(prior, ", ") + ", " + clientIP
  			}
  			if !omit {
@@ -79,7 +96,7 @@ index 58064a5332..b288f95744 100644
  			}
  		}
  	}
-@@ -451,7 +449,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+@@ -451,7 +451,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
  	if _, ok := outreq.Header["User-Agent"]; !ok {
  		// If the outbound request doesn't have a User-Agent header set,
  		// don't send the default Go HTTP client User-Agent.
@@ -88,16 +105,16 @@ index 58064a5332..b288f95744 100644
  	}
 
  	trace := &httptrace.ClientTrace{
-@@ -468,7 +466,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+@@ -468,7 +468,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
  			return nil
  		},
  	}
 -	outreq = outreq.WithContext(httptrace.WithClientTrace(outreq.Context(), trace))
-+	outreq.SetContext(httptrace.WithClientTrace(outreq.Context(), trace))
++	setRequestContext(outreq, httptrace.WithClientTrace(outreq.Context(), trace))
 
  	res, err := transport.RoundTrip(outreq)
  	if err != nil {
-@@ -501,7 +499,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+@@ -501,7 +501,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
  		for k := range res.Trailer {
  			trailerKeys = append(trailerKeys, k)
  		}
@@ -106,7 +123,7 @@ index 58064a5332..b288f95744 100644
  	}
 
  	rw.WriteHeader(res.StatusCode)
-@@ -536,9 +534,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
+@@ -536,9 +536,7 @@ func (p *ReverseProxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
  	for k, vv := range res.Trailer {
  		k = http.TrailerPrefix + k
@@ -117,7 +134,7 @@ index 58064a5332..b288f95744 100644
  	}
  }
 
-@@ -578,7 +574,7 @@ func removeHopByHopHeaders(h http.Header) {
+@@ -578,7 +576,7 @@ func removeHopByHopHeaders(h http.Header) {
  	// This behavior is superseded by the RFC 7230 Connection header, but
  	// preserve it for backwards compatibility.
  	for _, f := range hopHeaders {
@@ -126,7 +143,7 @@ index 58064a5332..b288f95744 100644
  	}
  }
 
-@@ -725,7 +721,10 @@ func upgradeType(h http.Header) string {
+@@ -725,7 +723,10 @@ func upgradeType(h http.Header) string {
  	if !httpguts.HeaderValuesContainsToken(h["Connection"], "Upgrade") {
  		return ""
  	}
@@ -138,7 +155,7 @@ index 58064a5332..b288f95744 100644
  }
 
  func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.Request, res *http.Response) {
-@@ -783,7 +782,7 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
+@@ -783,7 +784,7 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
  		return
  	}
  	errc := make(chan error, 1)
@@ -147,7 +164,7 @@ index 58064a5332..b288f95744 100644
  	go spc.copyToBackend(errc)
  	go spc.copyFromBackend(errc)
  	<-errc
-@@ -793,15 +792,32 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
+@@ -793,15 +794,32 @@ func (p *ReverseProxy) handleUpgradeResponse(rw http.ResponseWriter, req *http.R
  // forth have nice names in stacks.
  type switchProtocolCopier struct {
  	user, backend io.ReadWriter
@@ -182,34 +199,150 @@ index 58064a5332..b288f95744 100644
  	errc <- err
  }
 
+@@ -837,3 +855,9 @@ func ishex(c byte) bool {
+ 	}
+ 	return false
+ }
++
++//go:linkname putRequest http.putRequest
++func putRequest(r *http.Request)
++
++//go:linkname setRequestContext http.setRequestContext
++func setRequestContext(r *http.Request, ctx context.Context)
 diff --git a/src/net/http/request.go b/src/net/http/request.go
-index a45c9e3d18..c32b335474 100644
+index a45c9e3d18..e8025baff1 100644
 --- a/src/net/http/request.go
 +++ b/src/net/http/request.go
-@@ -363,6 +363,10 @@ func (r *Request) WithContext(ctx context.Context) *Request {
+@@ -357,12 +357,19 @@ func (r *Request) WithContext(ctx context.Context) *Request {
+ 	if ctx == nil {
+ 		panic("nil context")
+ 	}
+-	r2 := new(Request)
++	r2 := newRequest()
+ 	*r2 = *r
+ 	r2.ctx = ctx
  	return r2
  }
 
-+func (r *Request) SetContext(ctx context.Context) {
++func setRequestContext(r *Request, ctx context.Context) {
++	if ctx == nil {
++		panic("nil context")
++	}
 +	r.ctx = ctx
 +}
 +
  // Clone returns a deep copy of r with its context changed to ctx.
  // The provided ctx must be non-nil.
  //
+@@ -373,7 +380,7 @@ func (r *Request) Clone(ctx context.Context) *Request {
+ 	if ctx == nil {
+ 		panic("nil context")
+ 	}
+-	r2 := new(Request)
++	r2 := newRequest()
+ 	*r2 = *r
+ 	r2.ctx = ctx
+ 	r2.URL = cloneURL(r.URL)
+@@ -1015,6 +1022,20 @@ func putTextprotoReader(r *textproto.Reader) {
+ 	textprotoReaderPool.Put(r)
+ }
+
++var requestPool sync.Pool
++
++func newRequest() *Request {
++	if v := requestPool.Get(); v != nil {
++		return v.(*Request)
++	}
++	return new(Request)
++}
++
++func putRequest(r *Request) {
++	*r = Request{}
++	requestPool.Put(r)
++}
++
+ // ReadRequest reads and parses an incoming request from b.
+ //
+ // ReadRequest is a low-level function and should only be used for
+@@ -1035,7 +1056,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
+ 	tp := newTextprotoReader(b)
+ 	defer putTextprotoReader(tp)
+
+-	req = new(Request)
++	req = newRequest()
+
+ 	// First line: GET /index.html HTTP/1.0
+ 	var s string
 diff --git a/src/net/http/server.go b/src/net/http/server.go
-index c3c3f91d9a..b924aa7313 100644
+index c3c3f91d9a..3b317daa58 100644
 --- a/src/net/http/server.go
 +++ b/src/net/http/server.go
-@@ -2923,7 +2923,7 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+@@ -1660,6 +1660,8 @@ func (w *response) finishRequest() {
+ 	if w.req.MultipartForm != nil {
+ 		w.req.MultipartForm.RemoveAll()
+ 	}
++	putRequest(w.req)
++	w.req = nil
+ }
+
+ // shouldReuseConnection reports whether the underlying TCP connection can be reused.
+@@ -2156,7 +2158,8 @@ func StripPrefix(prefix string, h Handler) Handler {
+ 		p := strings.TrimPrefix(r.URL.Path, prefix)
+ 		rp := strings.TrimPrefix(r.URL.RawPath, prefix)
+ 		if len(p) < len(r.URL.Path) && (r.URL.RawPath == "" || len(rp) < len(r.URL.RawPath)) {
+-			r2 := new(Request)
++			r2 := newRequest()
++			defer putRequest(r2)
+ 			*r2 = *r
+ 			r2.URL = new(url.URL)
+ 			*r2.URL = *r.URL
+@@ -2923,7 +2926,7 @@ func (sh serverHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 
  	if req.URL != nil && strings.Contains(req.URL.RawQuery, ";") {
  		var allowQuerySemicolonsInUse atomic.Bool
 -		req = req.WithContext(context.WithValue(req.Context(), silenceSemWarnContextKey, func() {
-+		req.SetContext(context.WithValue(req.Context(), silenceSemWarnContextKey, func() {
++		setRequestContext(req, context.WithValue(req.Context(), silenceSemWarnContextKey, func() {
  			allowQuerySemicolonsInUse.Store(true)
  		}))
  		defer func() {
+diff --git a/src/net/textproto/reader.go b/src/net/textproto/reader.go
+index fc2590b1cd..ce140f6bfc 100644
+--- a/src/net/textproto/reader.go
++++ b/src/net/textproto/reader.go
+@@ -816,6 +816,33 @@ func initCommonHeader() {
+ 		"X-Forwarded-For",
+ 		"X-Imforwards",
+ 		"X-Powered-By",
++		"Cdn-Loop",
++		"Cf-Connecting-Ip",
++		"Cf-Ipcountry",
++		"Cf-Ray",
++		"Cf-Visitor",
++		"Dnt",
++		"Priority",
++		"Sec-Ch-Ua",
++		"Sec-Ch-Ua-Mobile",
++		"Sec-Ch-Ua-Platform",
++		"Sec-Fetch-Dest",
++		"Sec-Fetch-Mode",
++		"Sec-Fetch-Site",
++		"Sec-Fetch-User",
++		"Upgrade-Insecure-Requests",
++		"X-Forwarded-Proto",
++		"X-Real-Ip",
++		"Authorization",
++		"Content-Encoding",
++		"Strict-Transport-Security",
++		"Vary",
++		"X-Content-Type-Options",
++		"X-Frame-Options",
++		"X-Xss-Protection",
++		"Link",
++		"Origin",
++		"Referer",
+ 	} {
+ 		commonHeader[v] = v
+ 	}
 --
 2.40.1
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"sync"
+	_ "unsafe"
 
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/logger"
@@ -59,9 +60,14 @@ func Middleware() parapet.Middleware {
 				putState(s)
 			}()
 
-			r.SetContext(NewContext(ctx, s))
+			setRequestContext(r, NewContext(ctx, s))
 			h.ServeHTTP(w, r)
-			// h.ServeHTTP(w, r.WithContext(NewContext(ctx, s)))
 		})
 	})
+}
+
+//go:linkname setRequestContext http.setRequestContext
+func setRequestContext(r *http.Request, ctx context.Context) {
+	nr := r.WithContext(ctx)
+	*r = *nr
 }
