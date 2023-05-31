@@ -25,6 +25,7 @@ jobs:
         platforms: linux/amd64
     - uses: docker/build-push-action@v4
       with:
+        provenance: false
         build-args: |
           VERSION=${{ github.ref_name }}
           GOAMD64=v3
@@ -32,6 +33,7 @@ jobs:
         tags: us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:${{ github.ref_name }}
     - uses: docker/build-push-action@v4
       with:
+        provenance: false
         build-args: |
           VERSION=${{ github.ref_name }}
           GOAMD64=v1
