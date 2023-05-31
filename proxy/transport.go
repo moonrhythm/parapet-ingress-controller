@@ -47,6 +47,7 @@ func newH2CTransport(dial dialContextFunc, fallback http.RoundTripper) *h2cTrans
 		Transport: &http2.Transport{
 			AllowHTTP:          true,
 			DisableCompression: true,
+			MaxReadFrameSize:   1 << 17,
 			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 				return dial(ctx, network, addr)
 			},
