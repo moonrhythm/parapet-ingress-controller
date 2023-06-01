@@ -1,15 +1,16 @@
-From fb7749f7cdafbf3d587324a5339f66cb6ea12664 Mon Sep 17 00:00:00 2001
+From a6b4de9b3c325e14dc62aa55b6a0f5873ea06b99 Mon Sep 17 00:00:00 2001
 From: Thanatat Tamtan <acoshift@gmail.com>
 Date: Sun, 28 May 2023 00:03:14 +0700
 Subject: [PATCH] patch
 
 ---
  src/net/http/h2_bundle.go             |  7 ++-
+ src/net/http/header.go                | 25 +++++++++-
  src/net/http/httputil/reverseproxy.go | 68 ++++++++++++++++++---------
- src/net/http/request.go               | 30 ++++++++++--
+ src/net/http/request.go               | 31 ++++++++++--
  src/net/http/server.go                |  7 ++-
- src/net/textproto/reader.go           | 27 +++++++++++
- 5 files changed, 110 insertions(+), 29 deletions(-)
+ src/net/textproto/reader.go           | 33 ++++++++++++-
+ 6 files changed, 140 insertions(+), 31 deletions(-)
 
 diff --git a/src/net/http/h2_bundle.go b/src/net/http/h2_bundle.go
 index 1e0b83d493..139038a606 100644
@@ -43,6 +44,46 @@ index 1e0b83d493..139038a606 100644
  		// Only recycle the pool if all prior Write calls to
  		// the serverConn goroutine completed successfully. If
  		// they returned earlier due to resets from the peer
+diff --git a/src/net/http/header.go b/src/net/http/header.go
+index e0b342c63c..44dba75b79 100644
+--- a/src/net/http/header.go
++++ b/src/net/http/header.go
+@@ -102,7 +102,7 @@ func (h Header) Clone() Header {
+ 		nv += len(vv)
+ 	}
+ 	sv := make([]string, nv) // shared backing array for headers' values
+-	h2 := make(Header, len(h))
++	var h2 Header = newHeader(len(h))
+ 	for k, vv := range h {
+ 		if vv == nil {
+ 			// Preserve nil values. ReverseProxy distinguishes
+@@ -278,3 +278,26 @@ func hasToken(v, token string) bool {
+ func isTokenBoundary(b byte) bool {
+ 	return b == ' ' || b == ',' || b == '\t'
+ }
++
++var headerPool sync.Pool
++
++func newHeader(hint int) map[string][]string {
++	if hint <= maxHeaderCapReuse {
++		if v := headerPool.Get(); v != nil {
++			return v.(map[string][]string)
++		}
++	}
++	return make(map[string][]string, hint)
++}
++
++const maxHeaderCapReuse = 50
++
++func putHeader(h map[string][]string) {
++	if h == nil || len(h) > maxHeaderCapReuse { // should be cap ?
++		return
++	}
++	for k := range h {
++		delete(h, k)
++	}
++	headerPool.Put(h)
++}
 diff --git a/src/net/http/httputil/reverseproxy.go b/src/net/http/httputil/reverseproxy.go
 index 58064a5332..d7cfb9ade8 100644
 --- a/src/net/http/httputil/reverseproxy.go
@@ -229,7 +270,7 @@ index 58064a5332..d7cfb9ade8 100644
 +//go:linkname setRequestContext net/http.setRequestContext
 +func setRequestContext(r *http.Request, ctx context.Context)
 diff --git a/src/net/http/request.go b/src/net/http/request.go
-index a45c9e3d18..2df4974aca 100644
+index a45c9e3d18..f25879993b 100644
 --- a/src/net/http/request.go
 +++ b/src/net/http/request.go
 @@ -357,12 +357,19 @@ func (r *Request) WithContext(ctx context.Context) *Request {
@@ -262,7 +303,7 @@ index a45c9e3d18..2df4974aca 100644
  	*r2 = *r
  	r2.ctx = ctx
  	r2.URL = cloneURL(r.URL)
-@@ -1015,6 +1022,23 @@ func putTextprotoReader(r *textproto.Reader) {
+@@ -1015,6 +1022,24 @@ func putTextprotoReader(r *textproto.Reader) {
  	textprotoReaderPool.Put(r)
  }
 
@@ -279,6 +320,7 @@ index a45c9e3d18..2df4974aca 100644
 +	if r == nil {
 +		return
 +	}
++	putHeader(r.Header)
 +	*r = Request{}
 +	requestPool.Put(r)
 +}
@@ -286,7 +328,7 @@ index a45c9e3d18..2df4974aca 100644
  // ReadRequest reads and parses an incoming request from b.
  //
  // ReadRequest is a low-level function and should only be used for
-@@ -1035,7 +1059,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
+@@ -1035,7 +1060,7 @@ func readRequest(b *bufio.Reader) (req *Request, err error) {
  	tp := newTextprotoReader(b)
  	defer putTextprotoReader(tp)
 
@@ -332,10 +374,37 @@ index c3c3f91d9a..4843684d00 100644
  		}))
  		defer func() {
 diff --git a/src/net/textproto/reader.go b/src/net/textproto/reader.go
-index fc2590b1cd..ce140f6bfc 100644
+index fc2590b1cd..6deafeec33 100644
 --- a/src/net/textproto/reader.go
 +++ b/src/net/textproto/reader.go
-@@ -816,6 +816,33 @@ func initCommonHeader() {
+@@ -14,6 +14,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 	"sync"
++	_ "unsafe"
+ )
+
+ // A Reader implements convenience methods for reading requests
+@@ -482,6 +483,9 @@ func (r *Reader) ReadMIMEHeader() (MIMEHeader, error) {
+ 	return readMIMEHeader(r, math.MaxInt64, math.MaxInt64)
+ }
+
++//go:linkname newHeader net/http.newHeader
++func newHeader(hint int) map[string][]string
++
+ // readMIMEHeader is a version of ReadMIMEHeader which takes a limit on the header size.
+ // It is called by the mime/multipart package.
+ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error) {
+@@ -497,7 +501,7 @@ func readMIMEHeader(r *Reader, maxMemory, maxHeaders int64) (MIMEHeader, error)
+ 		strs = make([]string, hint)
+ 	}
+
+-	m := make(MIMEHeader, hint)
++	var m MIMEHeader = newHeader(hint)
+
+ 	// Account for 400 bytes of overhead for the MIMEHeader, plus 200 bytes per entry.
+ 	// Benchmarking map creation as of go1.20, a one-entry MIMEHeader is 416 bytes and large
+@@ -816,6 +820,33 @@ func initCommonHeader() {
  		"X-Forwarded-For",
  		"X-Imforwards",
  		"X-Powered-By",
