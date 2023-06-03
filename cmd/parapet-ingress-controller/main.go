@@ -13,6 +13,7 @@ import (
 	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
+	"github.com/moonrhythm/parapet/pkg/header"
 	"github.com/moonrhythm/parapet/pkg/host"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
@@ -107,7 +108,8 @@ func main() {
 	m.Use(host.StripPort())
 	m.Use(host.ToLower())
 	m.Use(metric.HostActiveTracker())
-	m.Use(hostRatelimit())
+	m.Use(hostCountryRateLimit())
+	m.Use(hostRateLimit())
 
 	if !disableLog {
 		m.Use(logger.Stdout())
@@ -225,44 +227,99 @@ func configTransport(tr *http.Transport) {
 		"TR_MAX_IDLE_CONNS_PER_HOST", tr.MaxIdleConnsPerHost)
 }
 
-// hostRatelimit protects from unresponsive upstreams by limit concurrent requests to the same host.
-func hostRatelimit() parapet.Middleware {
-	hostConcurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY") // concurrent requests
-	hostConcurrentSize := config.Int("HOST_CONCURRENT_SIZE")         // queue size
+// hostRateLimit protects from unresponsive upstreams by limit concurrent requests to the same host.
+func hostRateLimit() parapet.Middleware {
+	concurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY") // concurrent requests
+	concurrentSize := config.Int("HOST_CONCURRENT_SIZE")         // queue size
 
-	hostFromRequest := func(r *http.Request) string {
+	if concurrentCapacity <= 0 {
+		return nil
+	}
+
+	keyFromRequest := func(r *http.Request) string {
 		return r.Host
 	}
 
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		metric.HostRatelimitRequest(r.Host)
+		metric.HostRatelimitRequest(keyFromRequest(r))
 	}
 
-	if hostConcurrentCapacity > 0 && hostConcurrentSize > 0 {
-		glog.Infof("host_ratelimit: strategy=ConcurrentQueue, capacity=%d, size=%d", hostConcurrentCapacity, hostConcurrentSize)
+	if concurrentSize > 0 {
+		glog.Infof("host_ratelimit: strategy=ConcurrentQueue, capacity=%d, size=%d", concurrentCapacity, concurrentSize)
 		return ratelimit.RateLimiter{
 			Strategy: &ratelimit.ConcurrentQueueStrategy{
-				Capacity: hostConcurrentCapacity,
-				Size:     hostConcurrentSize,
+				Capacity: concurrentCapacity,
+				Size:     concurrentSize,
 			},
-			Key:                  hostFromRequest,
-			ExceededHandler:      exceededHandler,
-			ReleaseOnWriteHeader: true,
-			ReleaseOnHijacked:    true,
-		}
-	} else if hostConcurrentCapacity > 0 {
-		glog.Infof("host_ratelimit: strategy=Concurrent, capacity=%d", hostConcurrentCapacity)
-		return ratelimit.RateLimiter{
-			Strategy: &ratelimit.ConcurrentStrategy{
-				Capacity: hostConcurrentCapacity,
-			},
-			Key:                  hostFromRequest,
+			Key:                  keyFromRequest,
 			ExceededHandler:      exceededHandler,
 			ReleaseOnWriteHeader: true,
 			ReleaseOnHijacked:    true,
 		}
 	}
 
-	return nil
+	glog.Infof("host_ratelimit: strategy=Concurrent, capacity=%d", concurrentCapacity)
+	return ratelimit.RateLimiter{
+		Strategy: &ratelimit.ConcurrentStrategy{
+			Capacity: concurrentCapacity,
+		},
+		Key:                  keyFromRequest,
+		ExceededHandler:      exceededHandler,
+		ReleaseOnWriteHeader: true,
+		ReleaseOnHijacked:    true,
+	}
+}
+
+// hostCountryRateLimit protects from unresponsive upstreams by limit concurrent requests to the same host and country.
+func hostCountryRateLimit() parapet.Middleware {
+	concurrentCapacity := config.Int("HOST_COUNTRY_CONCURRENT_CAPACITY") // concurrent requests
+	concurrentSize := config.Int("HOST_COUNTRY_CONCURRENT_SIZE")         // queue size
+	countryHeader := strings.TrimSpace(config.String("HOST_COUNTRY_HEADER"))
+
+	if concurrentCapacity <= 0 {
+		return nil
+	}
+	if countryHeader == "" {
+		return nil
+	}
+	countryHeader = http.CanonicalHeaderKey(countryHeader)
+
+	keyFromRequest := func(r *http.Request) string {
+		country := header.Get(r.Header, countryHeader)
+		if country == "" {
+			country = "XX"
+		}
+		return r.Host + "|" + country
+	}
+
+	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		metric.HostRatelimitRequest(keyFromRequest(r))
+	}
+
+	if concurrentSize > 0 {
+		glog.Infof("host_country_ratelimit: strategy=ConcurrentQueue, capacity=%d, size=%d", concurrentCapacity, concurrentSize)
+		return ratelimit.RateLimiter{
+			Strategy: &ratelimit.ConcurrentQueueStrategy{
+				Capacity: concurrentCapacity,
+				Size:     concurrentSize,
+			},
+			Key:                  keyFromRequest,
+			ExceededHandler:      exceededHandler,
+			ReleaseOnWriteHeader: true,
+			ReleaseOnHijacked:    true,
+		}
+	}
+
+	glog.Infof("host_country_ratelimit: strategy=Concurrent, capacity=%d", concurrentCapacity)
+	return ratelimit.RateLimiter{
+		Strategy: &ratelimit.ConcurrentStrategy{
+			Capacity: concurrentCapacity,
+		},
+		Key:                  keyFromRequest,
+		ExceededHandler:      exceededHandler,
+		ReleaseOnWriteHeader: true,
+		ReleaseOnHijacked:    true,
+	}
 }
