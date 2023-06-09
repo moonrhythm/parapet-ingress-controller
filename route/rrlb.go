@@ -10,7 +10,7 @@ type RRLB struct {
 	current uint32
 }
 
-func nextIP(lb *RRLB, badAddr *badAddrTable) (ip string) {
+func (lb *RRLB) Get(badAddr *badAddrTable) (ip string) {
 	l := len(lb.IPs)
 	if l == 0 {
 		return ""

@@ -18,13 +18,13 @@ func (t *Table) runBackgroundJob() {
 }
 
 // Lookup returns target pod's addr to connect to.
-// If target pod's addr is not found in table, it will return addr as is.
+// If target pod's addr is not found in table, it will return empty string
 func (t *Table) Lookup(addr string) string {
 	// addr only in dns name service.namespace.svc.cluster.local:port
 	i := strings.LastIndex(addr, ":")
 	if i < 0 {
 		// invalid format
-		return addr
+		return ""
 	}
 	host := addr[:i]
 
@@ -34,17 +34,14 @@ func (t *Table) Lookup(addr string) string {
 	t.mu.RUnlock()
 
 	if !okHost || !okPort {
-		// host or port not found in table, lets proxy try to resolve it from dialer
-		return addr
+		// host or port not found in table
+		return ""
 	}
 
-	// found host and port, proxy will connect to pod directly
-
-	hostIP := nextIP(targetHost, &t.badAddr)
+	hostIP := targetHost.Get(&t.badAddr)
 	if hostIP == "" {
-		// not found any pod, lets proxy try to resolve it from dialer
-		// this case should not happen, if SetHostRoute is called correctly
-		return addr
+		// not found any pod
+		return ""
 	}
 	return hostIP + ":" + targetPort
 }

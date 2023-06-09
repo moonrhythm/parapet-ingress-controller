@@ -575,6 +575,7 @@ func getBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (conf
 	config.PortNumber = int(backend.Service.Port.Number)
 
 	// find port name
+	// since port name is required in kubernetes, we can assume that port name is always available
 	for _, p := range svc.Spec.Ports {
 		if p.Port == backend.Service.Port.Number {
 			config.PortName = p.Name
@@ -589,16 +590,23 @@ func getBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (conf
 
 func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, config backendConfig, target string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if config.Protocol != "" {
-			r.URL.Scheme = config.Protocol
-		}
-		r.RemoteAddr = ""
-		r.URL.Host = ctrl.routeTable.Lookup(target)
-
 		s := state.Get(r.Context())
 		s["serviceType"] = string(svc.Spec.Type)
 		s["serviceName"] = svc.Name
-		s["serviceTarget"] = r.URL.Host
+
+		target := ctrl.routeTable.Lookup(target)
+		if target == "" { // fail fast
+			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		if config.Protocol != "" {
+			r.URL.Scheme = config.Protocol
+		}
+		r.RemoteAddr = "" // prevent httputil.ReverseProxy append remote addr to XFF
+		r.URL.Host = target
+
+		s["serviceTarget"] = target
 
 		ctrl.proxy.ServeHTTP(w, r)
 	})

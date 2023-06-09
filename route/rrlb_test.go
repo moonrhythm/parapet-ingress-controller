@@ -11,9 +11,9 @@ func TestRRLB(t *testing.T) {
 
 	t.Run("Empty", func(t *testing.T) {
 		lb := &RRLB{}
-		assert.Equal(t, "", nextIP(lb, nil))
-		assert.Equal(t, "", nextIP(lb, nil))
-		assert.Equal(t, "", nextIP(lb, nil))
+		assert.Equal(t, "", lb.Get(nil))
+		assert.Equal(t, "", lb.Get(nil))
+		assert.Equal(t, "", lb.Get(nil))
 	})
 
 	t.Run("Single", func(t *testing.T) {
@@ -22,9 +22,9 @@ func TestRRLB(t *testing.T) {
 				"192.168.1.1",
 			},
 		}
-		assert.Equal(t, "192.168.1.1", nextIP(lb, nil))
-		assert.Equal(t, "192.168.1.1", nextIP(lb, nil))
-		assert.Equal(t, "192.168.1.1", nextIP(lb, nil))
+		assert.Equal(t, "192.168.1.1", lb.Get(nil))
+		assert.Equal(t, "192.168.1.1", lb.Get(nil))
+		assert.Equal(t, "192.168.1.1", lb.Get(nil))
 	})
 
 	t.Run("All Healthy", func(t *testing.T) {
@@ -35,10 +35,10 @@ func TestRRLB(t *testing.T) {
 				"192.168.1.3",
 			},
 		}
-		assert.Equal(t, "192.168.1.2", nextIP(lb, nil))
-		assert.Equal(t, "192.168.1.3", nextIP(lb, nil))
-		assert.Equal(t, "192.168.1.1", nextIP(lb, nil))
-		assert.Equal(t, "192.168.1.2", nextIP(lb, nil))
+		assert.Equal(t, "192.168.1.2", lb.Get(nil))
+		assert.Equal(t, "192.168.1.3", lb.Get(nil))
+		assert.Equal(t, "192.168.1.1", lb.Get(nil))
+		assert.Equal(t, "192.168.1.2", lb.Get(nil))
 	})
 
 	t.Run("One Bad", func(t *testing.T) {
@@ -51,10 +51,10 @@ func TestRRLB(t *testing.T) {
 		}
 		badAddr := badAddrTable{}
 		badAddr.MarkBad("192.168.1.3")
-		assert.Equal(t, "192.168.1.2", nextIP(lb, &badAddr))
-		assert.Equal(t, "192.168.1.1", nextIP(lb, &badAddr)) // 3 is bad so 1 is returned
-		assert.Equal(t, "192.168.1.1", nextIP(lb, &badAddr)) // next of 3 is 1
-		assert.Equal(t, "192.168.1.2", nextIP(lb, &badAddr))
+		assert.Equal(t, "192.168.1.2", lb.Get(&badAddr))
+		assert.Equal(t, "192.168.1.1", lb.Get(&badAddr)) // 3 is bad so 1 is returned
+		assert.Equal(t, "192.168.1.1", lb.Get(&badAddr)) // next of 3 is 1
+		assert.Equal(t, "192.168.1.2", lb.Get(&badAddr))
 	})
 
 	t.Run("All Bad", func(t *testing.T) {
@@ -69,9 +69,9 @@ func TestRRLB(t *testing.T) {
 		badAddr.MarkBad("192.168.1.1")
 		badAddr.MarkBad("192.168.1.2")
 		badAddr.MarkBad("192.168.1.3")
-		assert.Equal(t, "192.168.1.2", nextIP(lb, &badAddr))
-		assert.Equal(t, "192.168.1.3", nextIP(lb, &badAddr))
-		assert.Equal(t, "192.168.1.1", nextIP(lb, &badAddr))
-		assert.Equal(t, "192.168.1.2", nextIP(lb, &badAddr))
+		assert.Equal(t, "192.168.1.2", lb.Get(&badAddr))
+		assert.Equal(t, "192.168.1.3", lb.Get(&badAddr))
+		assert.Equal(t, "192.168.1.1", lb.Get(&badAddr))
+		assert.Equal(t, "192.168.1.2", lb.Get(&badAddr))
 	})
 }

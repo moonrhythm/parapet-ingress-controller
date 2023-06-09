@@ -27,12 +27,12 @@ func TestTable(t *testing.T) {
 
 	t.Run("Not Found", func(t *testing.T) {
 		res := tb.Lookup("frontend.default.svc.cluster.local:8080")
-		assert.Equal(t, "frontend.default.svc.cluster.local:8080", res)
+		assert.Empty(t, res)
 	})
 
 	t.Run("Invalid Format", func(t *testing.T) {
 		res := tb.Lookup("api.default.svc.cluster.local")
-		assert.Equal(t, "api.default.svc.cluster.local", res)
+		assert.Empty(t, res)
 	})
 
 	t.Run("Found Host and Port", func(t *testing.T) {
@@ -41,8 +41,9 @@ func TestTable(t *testing.T) {
 	})
 
 	t.Run("Found Only Host", func(t *testing.T) {
+		// this should never happen, since kubernetes service port name is required
 		res := tb.Lookup("backoffice.default.svc.cluster.local:8080")
-		assert.Equal(t, "backoffice.default.svc.cluster.local:8080", res)
+		assert.Empty(t, res)
 	})
 
 	t.Run("Some Bad", func(t *testing.T) {
