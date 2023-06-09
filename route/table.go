@@ -40,7 +40,7 @@ func (t *Table) Lookup(addr string) string {
 
 	// found host and port, proxy will connect to pod directly
 
-	hostIP := nextIP(targetHost, &t.badAddr)
+	hostIP := targetHost.Get(&t.badAddr)
 	if hostIP == "" {
 		// not found any pod, lets proxy try to resolve it from dialer
 		// this case should not happen, if SetHostRoute is called correctly
