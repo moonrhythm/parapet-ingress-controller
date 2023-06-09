@@ -1,0 +1,12 @@
+name: Test
+on:
+  push:
+  pull_request:
+jobs:
+  runner-job:
+    runs-on: ubuntu-latest
+    name: Qodana Scan
+    steps:
+    - uses: JetBrains/qodana-action@v2023.1.0
+      env:
+        QODANA_TOKEN: ${{ secrets.QODANA_TOKEN }}
