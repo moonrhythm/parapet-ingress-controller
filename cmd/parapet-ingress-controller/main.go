@@ -117,7 +117,7 @@ func main() {
 	m.Use(state.Middleware())
 	m.Use(metric.Requests())
 	m.Use(compress.Gzip())
-	m.Use(compress.Br())
+	m.Use(compress.BrWithQuality(5))
 	m.Use(ctrl)
 
 	var trustProxy parapet.Conditional
