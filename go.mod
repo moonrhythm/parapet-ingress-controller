@@ -1,6 +1,8 @@
 module github.com/moonrhythm/parapet-ingress-controller
 
-go 1.20
+go 1.21
+
+toolchain go1.21.0
 
 replace github.com/prometheus/client_golang => github.com/moonrhythm/prometheus-client_golang v1.15.1-patch.2
 
