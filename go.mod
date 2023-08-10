@@ -4,8 +4,6 @@ go 1.21
 
 toolchain go1.21.0
 
-replace github.com/prometheus/client_golang => github.com/moonrhythm/prometheus-client_golang v1.15.1-patch.2
-
 require (
 	cloud.google.com/go v0.110.7 // indirect
 	cloud.google.com/go/profiler v0.3.1
