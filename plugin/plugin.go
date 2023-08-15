@@ -1,13 +1,13 @@
 package plugin
 
 import (
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
-	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/block"
 	"github.com/moonrhythm/parapet/pkg/body"
@@ -108,7 +108,7 @@ func RedirectRules(ctx Context) {
 			ctx.Routes[srcHost] = ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Redirect(w, r, target, status)
 			}))
-			glog.V(1).Infof("registered: %s ==> %d,%s", srcHost, status, target)
+			slog.Debug("plugin/RedirectRules: registered", "src", srcHost, "target", target, "status", status)
 		}
 	}
 }
@@ -154,7 +154,7 @@ func UpstreamProtocol(ctx Context) {
 	case "https":
 		scheme = "https"
 	default:
-		glog.Warning("unknown protocol", proto)
+		slog.Warn("plugin/UpstreamProtocol: unknown protocol", "protocol", proto)
 	}
 
 	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
@@ -188,7 +188,7 @@ func UpstreamPath(ctx Context) {
 
 	targetPath, err := url.ParseRequestURI(prefix)
 	if err != nil {
-		glog.Warning("can not parse path", prefix)
+		slog.Warn("plugin/UpstreamPath: can not parse path", "path", prefix, "error", err)
 		return
 	}
 

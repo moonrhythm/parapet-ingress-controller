@@ -9,7 +9,6 @@ require (
 	cloud.google.com/go/profiler v0.3.1
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.18.0
 	github.com/acoshift/configfile v1.9.0
-	github.com/golang/glog v1.1.2
 	github.com/moonrhythm/parapet v0.13.0
 	github.com/prometheus/client_golang v1.16.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.42.0

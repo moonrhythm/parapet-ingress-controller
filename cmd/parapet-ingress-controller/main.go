@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -10,7 +11,6 @@ import (
 	"time"
 
 	"cloud.google.com/go/profiler"
-	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
 	"github.com/moonrhythm/parapet/pkg/header"
@@ -49,16 +49,17 @@ func main() {
 		controller.IngressClass = ingressClass
 	}
 
-	glog.Infoln("parapet-ingress-controller")
-	glog.Infoln("version:", version)
-	glog.Infoln("hostname:", hostname)
-	glog.Infoln("http_port:", httpPort)
-	glog.Infoln("https_port:", httpsPort)
-	glog.Infoln("ingress_class:", controller.IngressClass)
-	glog.Infoln("pod_namespace:", podNamespace)
-	glog.Infoln("watch_namespace:", watchNamespace)
-	glog.Infoln("profiler:", enableProfiler)
-	glog.Infoln("http_server_max_header_bytes:", httpServerMaxHeaderBytes)
+	slog.Info("parapet-ingress-controller",
+		"version", version,
+		"hostname", hostname,
+		"http_port", httpPort,
+		"https_port", httpsPort,
+		"ingress_class", controller.IngressClass,
+		"pod_namespace", podNamespace,
+		"watch_namespace", watchNamespace,
+		"profiler", enableProfiler,
+		"http_server_max_header_bytes", httpServerMaxHeaderBytes,
+	)
 
 	if enableProfiler {
 		if profilerName == "" {
@@ -70,13 +71,13 @@ func main() {
 			Instance:       hostname,
 		})
 		if err != nil {
-			glog.Errorf("can not start profiler: %v", err)
+			slog.Error("can not start profiler", "error", err)
 		}
 	}
 
 	err := k8s.Init()
 	if err != nil {
-		glog.Fatal(err)
+		slog.Error("can not init k8s", "error", err)
 		os.Exit(1)
 	}
 
@@ -170,7 +171,7 @@ func main() {
 			defer wg.Done()
 			err := s.ListenAndServe()
 			if err != nil {
-				glog.Fatal(err)
+				slog.Error("can not start http server", "error", err)
 				os.Exit(1)
 			}
 		}()
@@ -182,7 +183,7 @@ func main() {
 			CommonName: "parapet-ingress-controller",
 		})
 		if err != nil {
-			glog.Fatal(err)
+			slog.Error("can not generate self sign certificate", "error", err)
 			os.Exit(1)
 		}
 
@@ -211,7 +212,7 @@ func main() {
 			defer wg.Done()
 			err = s.ListenAndServe()
 			if err != nil {
-				glog.Fatal(err)
+				slog.Error("can not start https server", "error", err)
 				os.Exit(1)
 			}
 		}()
@@ -246,7 +247,7 @@ func hostRateLimit() parapet.Middleware {
 	}
 
 	if concurrentSize > 0 {
-		glog.Infof("host_ratelimit: strategy=ConcurrentQueue, capacity=%d, size=%d", concurrentCapacity, concurrentSize)
+		slog.Info("setting up host rate limit", "strategy", "ConcurrentQueue", "capacity", concurrentCapacity, "size", concurrentSize)
 		return ratelimit.RateLimiter{
 			Strategy: &ratelimit.ConcurrentQueueStrategy{
 				Capacity: concurrentCapacity,
@@ -259,7 +260,7 @@ func hostRateLimit() parapet.Middleware {
 		}
 	}
 
-	glog.Infof("host_ratelimit: strategy=Concurrent, capacity=%d", concurrentCapacity)
+	slog.Info("setting up host rate limit", "strategy", "Concurrent", "capacity", concurrentCapacity)
 	return ratelimit.RateLimiter{
 		Strategy: &ratelimit.ConcurrentStrategy{
 			Capacity: concurrentCapacity,
@@ -299,7 +300,7 @@ func hostCountryRateLimit() parapet.Middleware {
 	}
 
 	if concurrentSize > 0 {
-		glog.Infof("host_country_ratelimit: strategy=ConcurrentQueue, capacity=%d, size=%d", concurrentCapacity, concurrentSize)
+		slog.Info("setting up host country rate limit", "strategy", "ConcurrentQueue", "capacity", concurrentCapacity, "size", concurrentSize)
 		return ratelimit.RateLimiter{
 			Strategy: &ratelimit.ConcurrentQueueStrategy{
 				Capacity: concurrentCapacity,
@@ -312,7 +313,7 @@ func hostCountryRateLimit() parapet.Middleware {
 		}
 	}
 
-	glog.Infof("host_country_ratelimit: strategy=Concurrent, capacity=%d", concurrentCapacity)
+	slog.Info("setting up host country rate limit", "strategy", "Concurrent", "capacity", concurrentCapacity)
 	return ratelimit.RateLimiter{
 		Strategy: &ratelimit.ConcurrentStrategy{
 			Capacity: concurrentCapacity,

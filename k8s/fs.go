@@ -7,11 +7,11 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 
-	"github.com/golang/glog"
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -97,7 +97,7 @@ func (c *fsClient) addObject(raw []byte) {
 	ok := false
 	defer func() {
 		if !ok {
-			glog.Warningf("can not add object %s", raw)
+			slog.Warn("can not add object", "data", string(raw))
 		}
 	}()
 
@@ -118,7 +118,7 @@ func (c *fsClient) addObject(raw []byte) {
 
 	switch meta {
 	default:
-		glog.Warningf("unsupport object %s.%s", meta.APIVersion, meta.Kind)
+		slog.Warn("unsupported object", "apiVersion", meta.APIVersion, "kind", meta.Kind)
 		return
 	case runtime.TypeMeta{
 		APIVersion: "v1",

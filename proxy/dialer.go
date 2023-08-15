@@ -3,10 +3,9 @@ package proxy
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"time"
-
-	"github.com/golang/glog"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 )
@@ -32,7 +31,7 @@ func (d *dialer) DialContext(ctx context.Context, network, addr string) (conn ne
 			if d.onError != nil {
 				d.onError(addr)
 			}
-			glog.Errorf("proxy: can not connect; addr=%s, err=%v", addr, err)
+			slog.Error("proxy: can not connect", "addr", addr, "error", err)
 		}
 		return
 	}
