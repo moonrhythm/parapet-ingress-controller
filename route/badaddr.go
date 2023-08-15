@@ -1,11 +1,10 @@
 package route
 
 import (
+	"log/slog"
 	"net"
 	"sync"
 	"time"
-
-	"github.com/golang/glog"
 )
 
 type badAddrTable struct {
@@ -19,7 +18,7 @@ func (t *badAddrTable) MarkBad(addr string) {
 	if host == "" {
 		host = addr
 	}
-	glog.Warningf("badAddrTable: mark bad %s", host)
+	slog.Warn("badAddrTable: mark bad", "host", host)
 	t.addrs.Store(host, time.Now())
 }
 
@@ -36,22 +35,22 @@ func (t *badAddrTable) IsBad(host string) bool {
 
 func (t *badAddrTable) Clear() {
 	start := time.Now()
-	var clear int
+	var total int
 	t.addrs.Range(func(key, value any) bool {
 		k, v := key.(string), value.(time.Time)
 		if time.Since(v) > badDuration {
 			t.addrs.Delete(k)
-			clear++
+			total++
 		}
 		return true
 	})
-	if clear > 0 {
-		glog.Infof("badAddrTable: cleared table in %s, removed %d records", time.Since(start), clear)
+	if total > 0 {
+		slog.Info("badAddrTable: cleared table", "total", total, "duration", time.Since(start))
 	}
 }
 
 func (t *badAddrTable) clearLoop() {
-	glog.Info("badAddrTable: clear loop started")
+	slog.Info("badAddrTable: clear loop started")
 
 	const clearDuration = 10 * time.Minute
 

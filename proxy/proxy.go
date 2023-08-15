@@ -3,10 +3,9 @@ package proxy
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
-
-	"github.com/golang/glog"
 )
 
 var (
@@ -53,7 +52,7 @@ func New() *Proxy {
 				return
 			}
 
-			glog.Warningf("proxy: upstream error; host=%s, err=%v", r.Host, err)
+			slog.Warn("proxy: upstream error", "host", r.Host, "error", err)
 
 			if IsRetryable(err) {
 				// lets handler retry

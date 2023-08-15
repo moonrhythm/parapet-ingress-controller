@@ -3,13 +3,13 @@ package controller
 import (
 	"context"
 	"crypto/tls"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/golang/glog"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/healthz"
 	v1 "k8s.io/api/core/v1"
@@ -142,7 +142,7 @@ func (ctrl *Controller) watchIngresses(ctx context.Context) {
 	for {
 		w, err := k8s.WatchIngresses(ctx, ctrl.watchNamespace)
 		if err != nil {
-			glog.Errorf("can not watch ingresses; %v", err)
+			slog.Error("can not watch ingresses", "error", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -166,7 +166,7 @@ func (ctrl *Controller) watchIngresses(ctx context.Context) {
 		}
 
 		w.Stop()
-		glog.Infof("restart ingresses watcher")
+		slog.Info("restart ingresses watcher")
 	}
 }
 
@@ -174,7 +174,7 @@ func (ctrl *Controller) watchServices(ctx context.Context) {
 	for {
 		w, err := k8s.WatchServices(ctx, ctrl.watchNamespace)
 		if err != nil {
-			glog.Errorf("can not watch services; %v", err)
+			slog.Error("can not watch services", "error", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -199,7 +199,7 @@ func (ctrl *Controller) watchServices(ctx context.Context) {
 		}
 
 		w.Stop()
-		glog.Infof("restart services watcher")
+		slog.Info("restart services watcher")
 	}
 }
 
@@ -207,7 +207,7 @@ func (ctrl *Controller) watchSecrets(ctx context.Context) {
 	for {
 		w, err := k8s.WatchSecrets(ctx, ctrl.watchNamespace)
 		if err != nil {
-			glog.Errorf("can not watch secrets; %v", err)
+			slog.Error("can not watch secrets", "error", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -231,7 +231,7 @@ func (ctrl *Controller) watchSecrets(ctx context.Context) {
 		}
 
 		w.Stop()
-		glog.Infof("restart secrets watcher")
+		slog.Info("restart secrets watcher")
 	}
 }
 
@@ -239,7 +239,7 @@ func (ctrl *Controller) watchEndpoints(ctx context.Context) {
 	for {
 		w, err := k8s.WatchEndpoints(ctx, ctrl.watchNamespace)
 		if err != nil {
-			glog.Errorf("can not watch endpoints; %v", err)
+			slog.Error("can not watch endpoints", "error", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
@@ -265,7 +265,7 @@ func (ctrl *Controller) watchEndpoints(ctx context.Context) {
 		}
 
 		w.Stop()
-		glog.Infof("restart endpoints watcher")
+		slog.Info("restart endpoints watcher")
 	}
 }
 
@@ -274,11 +274,11 @@ func (ctrl *Controller) reloadIngress() {
 }
 
 func (ctrl *Controller) reloadIngressDebounced() {
-	glog.Info("reload ingresses")
+	slog.Info("reload ingresses")
 
 	defer func() {
 		if err := recover(); err != nil {
-			glog.Error(err)
+			slog.Error("reload ingresses failed", "error", err)
 			metric.Reload(false)
 			return
 		}
@@ -291,11 +291,11 @@ func (ctrl *Controller) reloadIngressDebounced() {
 		ing := value.(*networking.Ingress)
 
 		if getIngressClass(ing) != IngressClass {
-			glog.Infof("skip: %s/%s", ing.Namespace, ing.Name)
+			slog.Info("skip ingress", "namespace", ing.Namespace, "name", ing.Name)
 			return true
 		}
 
-		glog.Infof("load: %s/%s", ing.Namespace, ing.Name)
+		slog.Info("load ingress", "namespace", ing.Namespace, "name", ing.Name)
 
 		var h parapet.Middlewares
 		for _, m := range ctrl.plugins {
@@ -308,7 +308,7 @@ func (ctrl *Controller) reloadIngressDebounced() {
 		h.Use(parapet.MiddlewareFunc(retryMiddleware))
 
 		if ing.Spec.DefaultBackend != nil {
-			glog.Warning("ingress spec.defaultBackend not support")
+			slog.Warn("ingress spec.defaultBackend not support", "namespace", ing.Namespace, "name", ing.Name)
 		}
 
 		for _, rule := range ing.Spec.Rules {
@@ -319,7 +319,7 @@ func (ctrl *Controller) reloadIngressDebounced() {
 			for _, httpPath := range rule.HTTP.Paths {
 				backend := httpPath.Backend
 				if backend.Service == nil {
-					glog.Warningf("ingress %s/%s: backend service empty", ing.Namespace, ing.Name)
+					slog.Warn("ingress backend service empty", "namespace", ing.Namespace, "name", ing.Name)
 					continue
 				}
 
@@ -340,7 +340,7 @@ func (ctrl *Controller) reloadIngressDebounced() {
 
 				v, ok := ctrl.watchedServices.Load(svcKey)
 				if !ok {
-					glog.Errorf("service %s not found", svcKey)
+					slog.Error("service not found", "namespace", ing.Namespace, "name", backend.Service.Name)
 					continue
 				}
 				svc := v.(*v1.Service)
@@ -348,7 +348,7 @@ func (ctrl *Controller) reloadIngressDebounced() {
 				// find port
 				config, ok := getBackendConfig(&backend, svc)
 				if !ok {
-					glog.Errorf("port %s on service %s not found", backend.Service.Port.Name, svcKey)
+					slog.Error("port not found", "namespace", ing.Namespace, "name", backend.Service.Name, "port", backend.Service.Port.Name)
 					continue
 				}
 				if config.PortNumber <= 0 { // missing port
@@ -365,20 +365,21 @@ func (ctrl *Controller) reloadIngressDebounced() {
 					if path != "/" {
 						routes[src] = h.ServeHandler(handler)
 					}
-					routes[src+"/"] = h.ServeHandler(handler)
-					glog.V(1).Infof("registered: [prefix] %s => %s", src+"/", target)
+					src += "/"
+					routes[src] = h.ServeHandler(handler)
+					slog.Debug("registered path", "type", "prefix", "path", src, "target", target)
 				case networking.PathTypeExact:
 					src := host + strings.TrimSuffix(path, "/")
 					if path == "/" {
-						glog.Warningf("register: %s => %s; path type exact at root path is not supported, switch to prefix", src, target)
+						slog.Warn("register path type exact at root path is not supported, switch to prefix", "path", src, "target", target)
 						src = host + path
 					}
 					routes[src] = h.ServeHandler(handler)
-					glog.V(1).Infof("registered: [exact] %s => %s", src, target)
+					slog.Debug("registered path", "type", "exact", "path", src, "target", target)
 				case networking.PathTypeImplementationSpecific:
 					src := host + path
 					routes[src] = h.ServeHandler(handler)
-					glog.V(1).Infof("registered: [specific] %s => %s", src, target)
+					slog.Debug("registered path", "type", "specific", "path", src, "target", target)
 				}
 			}
 		}
@@ -398,11 +399,11 @@ func (ctrl *Controller) reloadService() {
 }
 
 func (ctrl *Controller) reloadServiceDebounced() {
-	glog.Info("reload services")
+	slog.Info("reload services")
 
 	defer func() {
 		if err := recover(); err != nil {
-			glog.Error(err)
+			slog.Error("reload services failed", "error", err)
 		}
 	}()
 
@@ -429,11 +430,11 @@ func (ctrl *Controller) reloadSecret() {
 }
 
 func (ctrl *Controller) reloadSecretDebounced() {
-	glog.Info("reload secrets")
+	slog.Info("reload secrets")
 
 	defer func() {
 		if err := recover(); err != nil {
-			glog.Error(err)
+			slog.Error("reload secrets failed", "error", err)
 		}
 	}()
 
@@ -453,13 +454,13 @@ func (ctrl *Controller) reloadSecretDebounced() {
 	for key := range secretToBuild {
 		v, ok := ctrl.watchedSecrets.Load(key)
 		if !ok {
-			glog.Errorf("secret %s not found", key)
+			slog.Error("secret not found", "key", key)
 			continue
 		}
 		s := v.(*v1.Secret)
 		crt, err := tls.X509KeyPair(s.Data["tls.crt"], s.Data["tls.key"])
 		if err != nil {
-			glog.Errorf("can not load x509 certificate %s/%s; %v", s.Namespace, s.Name, err)
+			slog.Error("can not load x509 certificate", "namespace", s.Namespace, "name", s.Name, "error", err)
 			continue
 		}
 		certs = append(certs, &crt)
@@ -473,11 +474,11 @@ func (ctrl *Controller) reloadEndpoint() {
 }
 
 func (ctrl *Controller) reloadEndpointDebounced() {
-	glog.Info("reload endpoints")
+	slog.Info("reload endpoints")
 
 	defer func() {
 		if err := recover(); err != nil {
-			glog.Error(err)
+			slog.Error("reload endpoints failed", "error", err)
 		}
 	}()
 
@@ -494,7 +495,7 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 }
 
 func (ctrl *Controller) reloadSingleEndpoint(ep *v1.Endpoints) {
-	glog.Infof("reload endpoint: %s/%s", ep.Namespace, ep.Name)
+	slog.Info("reload single endpoint", "namespace", ep.Namespace, "name", ep.Name)
 
 	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), endpointToRRLB(ep))
 }
@@ -531,7 +532,7 @@ func buildRoutes(routes map[string]http.Handler) *http.ServeMux {
 			defer func() {
 				err := recover()
 				if err != nil {
-					glog.Errorf("register handler at %s; %v", r, err)
+					slog.Error("register handler failed", "path", r, "error", err)
 				}
 			}()
 			mux.Handle(r, h)
