@@ -25,9 +25,7 @@ var pool = sync.Pool{
 }
 
 func putState(s State) {
-	for k := range s {
-		delete(s, k)
-	}
+	clear(s)
 	pool.Put(s)
 }
 
