@@ -1,0 +1,92 @@
+From 8e54e4a26e9a3f0ef6be2e53454ca9dac5958565 Mon Sep 17 00:00:00 2001
+From: Thanatat Tamtan <acoshift@gmail.com>
+Date: Wed, 6 Sep 2023 20:30:39 +0700
+Subject: [PATCH] patch
+
+---
+ src/net/http/httputil/reverseproxy.go | 52 +--------------------------
+ 1 file changed, 1 insertion(+), 51 deletions(-)
+
+diff --git a/src/net/http/httputil/reverseproxy.go b/src/net/http/httputil/reverseproxy.go
+index 2a76b0b8dc..d4d024ba4d 100644
+--- a/src/net/http/httputil/reverseproxy.go
++++ b/src/net/http/httputil/reverseproxy.go
+@@ -175,11 +175,6 @@ type ReverseProxy struct {
+ 	// If nil, logging is done via the log package's standard logger.
+ 	ErrorLog *log.Logger
+ 
+-	// BufferPool optionally specifies a buffer pool to
+-	// get byte slices for use by io.CopyBuffer when
+-	// copying HTTP response bodies.
+-	BufferPool BufferPool
+-
+ 	// ModifyResponse is an optional function that modifies the
+ 	// Response from the backend. It is called if the backend
+ 	// returns a response at all, with any HTTP status code.
+@@ -199,13 +194,6 @@ type ReverseProxy struct {
+ 	ErrorHandler func(http.ResponseWriter, *http.Request, error)
+ }
+ 
+-// A BufferPool is an interface for getting and returning temporary
+-// byte slices for use by io.CopyBuffer.
+-type BufferPool interface {
+-	Get() []byte
+-	Put([]byte)
+-}
+-
+ func singleJoiningSlash(a, b string) string {
+ 	aslash := strings.HasSuffix(a, "/")
+ 	bslash := strings.HasPrefix(b, "/")
+@@ -617,48 +605,10 @@ func (p *ReverseProxy) copyResponse(dst http.ResponseWriter, src io.Reader, flus
+ 		w = mlw
+ 	}
+ 
+-	var buf []byte
+-	if p.BufferPool != nil {
+-		buf = p.BufferPool.Get()
+-		defer p.BufferPool.Put(buf)
+-	}
+-	_, err := p.copyBuffer(w, src, buf)
++	_, err := io.Copy(w, src)
+ 	return err
+ }
+ 
+-// copyBuffer returns any write errors or non-EOF read errors, and the amount
+-// of bytes written.
+-func (p *ReverseProxy) copyBuffer(dst io.Writer, src io.Reader, buf []byte) (int64, error) {
+-	if len(buf) == 0 {
+-		buf = make([]byte, 32*1024)
+-	}
+-	var written int64
+-	for {
+-		nr, rerr := src.Read(buf)
+-		if rerr != nil && rerr != io.EOF && rerr != context.Canceled {
+-			p.logf("httputil: ReverseProxy read error during body copy: %v", rerr)
+-		}
+-		if nr > 0 {
+-			nw, werr := dst.Write(buf[:nr])
+-			if nw > 0 {
+-				written += int64(nw)
+-			}
+-			if werr != nil {
+-				return written, werr
+-			}
+-			if nr != nw {
+-				return written, io.ErrShortWrite
+-			}
+-		}
+-		if rerr != nil {
+-			if rerr == io.EOF {
+-				rerr = nil
+-			}
+-			return written, rerr
+-		}
+-	}
+-}
+-
+ func (p *ReverseProxy) logf(format string, args ...any) {
+ 	if p.ErrorLog != nil {
+ 		p.ErrorLog.Printf(format, args...)
+-- 
+2.42.0
+

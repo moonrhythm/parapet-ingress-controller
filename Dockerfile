@@ -14,6 +14,7 @@ ADD go.mod go.sum ./
 RUN go mod download
 
 ADD . .
+RUN cd /usr/local/go && git apply /workspace/hack/go.patch
 RUN go build \
 		-o parapet-ingress-controller \
 		-ldflags "-w -s -X main.version=$VERSION" \
