@@ -1,3 +1,5 @@
+COMMIT_SHA=$(shell git rev-parse HEAD)
+
 run-local:
 	KUBERNETES_LOCAL=true \
  	HTTP_PORT=8080 \
