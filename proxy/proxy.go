@@ -29,8 +29,7 @@ func New() *Proxy {
 	p.httpTransport = newHTTPTransport(d.DialContext)
 	p.h2cTransport = newH2CTransport(d.DialContext, p.httpTransport)
 	p.reverseProxy = httputil.ReverseProxy{
-		Director:   func(_ *http.Request) {},
-		BufferPool: newBufferPool(),
+		Director: func(_ *http.Request) {},
 		Transport: &gateway{
 			Default: p.httpTransport,
 			H2C:     p.h2cTransport,
