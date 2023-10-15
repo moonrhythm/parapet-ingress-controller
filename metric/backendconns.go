@@ -1,6 +1,7 @@
 package metric
 
 import (
+	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -121,4 +122,15 @@ func (conn *trackBackendConn) trackClose() {
 func (conn *trackBackendConn) Close() error {
 	conn.trackClose()
 	return conn.Conn.Close()
+}
+
+func (conn *trackBackendConn) ReadFrom(r io.Reader) (n int64, err error) {
+	n, err = conn.Conn.(io.ReaderFrom).ReadFrom(r)
+	if n > 0 {
+		conn.m.reads.Add(float64(n))
+	}
+	if err != nil {
+		conn.trackClose()
+	}
+	return
 }
