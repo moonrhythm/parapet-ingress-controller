@@ -58,15 +58,13 @@ spec:
       serviceAccountName: parapet-ingress-controller
       containers:
       - name: parapet-ingress-controller
-        image: gcr.io/moonrhythm-containers/parapet-ingress-controller:v0.12.0
+        image: registry.moonrhythm.io/parapet-ingress-controller:v0.13.4
         imagePullPolicy: IfNotPresent
         env:
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        args:
-        - -logtostderr
         ports:
         - name: http
           containerPort: 80

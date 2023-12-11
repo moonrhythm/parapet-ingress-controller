@@ -37,7 +37,9 @@ jobs:
         push: true
         tags: |
           us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:${{ github.ref_name }}
+          us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:latest
           registry.moonrhythm.io/parapet-ingress-controller:${{ github.ref_name }}
+          registry.moonrhythm.io/parapet-ingress-controller:latest
     - uses: docker/build-push-action@v4
       with:
         provenance: false
@@ -47,4 +49,6 @@ jobs:
         push: true
         tags: |
           us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:${{ github.ref_name }}-amd64v1
+          us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:latest-amd64v1
           registry.moonrhythm.io/parapet-ingress-controller:${{ github.ref_name }}-amd64v1
+          registry.moonrhythm.io/parapet-ingress-controller:latest-amd64v1
