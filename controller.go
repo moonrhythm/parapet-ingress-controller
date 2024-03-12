@@ -105,25 +105,21 @@ func (ctrl *Controller) Watch() {
 func (ctrl *Controller) preloadResources(ctx context.Context) {
 	ingresses, _ := k8s.GetIngresses(ctx, ctrl.watchNamespace)
 	for _, i := range ingresses {
-		i := i
 		ctrl.watchedIngresses.Store(i.Namespace+"/"+i.Name, &i)
 	}
 
 	services, _ := k8s.GetServices(ctx, ctrl.watchNamespace)
 	for _, s := range services {
-		s := s
 		ctrl.watchedServices.Store(s.Namespace+"/"+s.Name, &s)
 	}
 
 	secrets, _ := k8s.GetSecrets(ctx, ctrl.watchNamespace)
 	for _, s := range secrets {
-		s := s
 		ctrl.watchedSecrets.Store(s.Namespace+"/"+s.Name, &s)
 	}
 
 	endpoints, _ := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
 	for _, e := range endpoints {
-		e := e
 		ctrl.watchedEndpoints.Store(e.Namespace+"/"+e.Name, &e)
 	}
 }
