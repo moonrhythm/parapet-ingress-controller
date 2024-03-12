@@ -61,7 +61,7 @@ func findSupportCert(certs []*tls.Certificate, clientHello *tls.ClientHelloInfo)
 }
 
 func buildNameToCertificate(certs []*tls.Certificate) map[string][]*tls.Certificate {
-	m := make(map[string][]*tls.Certificate)
+	m := make(map[string][]*tls.Certificate, len(certs))
 	for _, cert := range certs {
 		var err error
 		x509Cert := cert.Leaf

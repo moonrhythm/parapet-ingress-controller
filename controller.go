@@ -29,6 +29,12 @@ import (
 // IngressClass to load ingresses
 var IngressClass = "parapet"
 
+const (
+	routeSizeHint    = 500
+	endpointSizeHint = 500
+	secretSizeHint   = 50
+)
+
 // Controller is the parapet ingress controller
 type Controller struct {
 	// mu is the mutex for mux
@@ -281,7 +287,7 @@ func (ctrl *Controller) reloadIngressDebounced() {
 		metric.Reload(true)
 	}()
 
-	routes := make(map[string]http.Handler)
+	routes := make(map[string]http.Handler, routeSizeHint)
 
 	ctrl.watchedIngresses.Range(func(_, value any) bool {
 		ing := value.(*networking.Ingress)
@@ -403,7 +409,7 @@ func (ctrl *Controller) reloadServiceDebounced() {
 		}
 	}()
 
-	addrToPort := map[string]string{}
+	addrToPort := make(map[string]string, endpointSizeHint)
 
 	ctrl.watchedServices.Range(func(_, value any) bool {
 		s := value.(*v1.Service)
@@ -434,7 +440,7 @@ func (ctrl *Controller) reloadSecretDebounced() {
 		}
 	}()
 
-	secretToBuild := map[string]struct{}{}
+	secretToBuild := make(map[string]struct{}, secretSizeHint)
 
 	ctrl.watchedIngresses.Range(func(_, value any) bool {
 		ing := value.(*networking.Ingress)
@@ -478,7 +484,7 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		}
 	}()
 
-	routes := make(map[string]*route.RRLB)
+	routes := make(map[string]*route.RRLB, endpointSizeHint)
 	ctrl.watchedEndpoints.Range(func(_, value any) bool {
 		ep := value.(*v1.Endpoints)
 		if lb := endpointToRRLB(ep); lb != nil {
