@@ -1,4 +1,4 @@
-FROM golang:1.22.2-bullseye
+FROM golang:1.22.3-bullseye
 
 ARG VERSION
 ARG GOAMD64
