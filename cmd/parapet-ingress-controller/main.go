@@ -98,7 +98,6 @@ func main() {
 	ctrl.Use(plugin.UpstreamHost)
 	ctrl.Use(plugin.UpstreamPath)
 	ctrl.Use(plugin.OperationsTrace)
-	ctrl.Use(plugin.JaegerTrace)
 	ctrl.Use(plugin.BasicAuth)
 	ctrl.Use(plugin.ForwardAuth)
 	ctrl.Use(plugin.StripPrefix)

@@ -9,53 +9,8 @@ import (
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/header"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-	"go.opentelemetry.io/otel/exporters/jaeger"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
-
-// JaegerTrace traces to jaeger
-func JaegerTrace(ctx Context) {
-	enable := ctx.Ingress.Annotations[namespace+"/jaeger-trace"]
-	if enable != "true" {
-		return
-	}
-
-	collectorEndpoint := ctx.Ingress.Annotations[namespace+"/jaeger-trace-collector-endpoint"]
-	if collectorEndpoint == "" {
-		return
-	}
-
-	collectorUsername := ctx.Ingress.Annotations[namespace+"/jaeger-trace-collector-username"]
-	collectorPassword := ctx.Ingress.Annotations[namespace+"/jaeger-trace-collector-password"]
-
-	var sampler float64 = 1
-	if s := ctx.Ingress.Annotations[namespace+"/jaeger-trace-sampler"]; s != "" {
-		sampler, _ = strconv.ParseFloat(s, 64)
-		if sampler <= 0 {
-			return
-		}
-	}
-
-	collectorOptions := []jaeger.CollectorEndpointOption{
-		jaeger.WithEndpoint(collectorEndpoint),
-	}
-	if collectorUsername != "" {
-		collectorOptions = append(collectorOptions, jaeger.WithUsername(collectorUsername))
-	}
-	if collectorPassword != "" {
-		collectorOptions = append(collectorOptions, jaeger.WithPassword(collectorPassword))
-	}
-
-	exporter, err := jaeger.New(
-		jaeger.WithCollectorEndpoint(collectorOptions...),
-	)
-	if err != nil {
-		slog.Error("plugin/JaegerTrace: NewExporter error", "error", err)
-		return
-	}
-
-	generalTrace(ctx, exporter, sampler)
-}
 
 // OperationsTrace traces to google cloud operation
 func OperationsTrace(ctx Context) {
