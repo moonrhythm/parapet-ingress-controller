@@ -51,6 +51,9 @@ func newH2CTransport(dial dialContextFunc, fallback http.RoundTripper) *h2cTrans
 			DialTLSContext: func(ctx context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
 				return dial(ctx, network, addr)
 			},
+			IdleConnTimeout: 30 * time.Second,
+			ReadIdleTimeout: 15 * time.Second,
+			PingTimeout:     10 * time.Second,
 		},
 		fallback: fallback,
 	}
