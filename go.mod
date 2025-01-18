@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/profiler v0.4.2
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.25.0
 	github.com/acoshift/configfile v1.9.0
-	github.com/moonrhythm/parapet v0.13.5
+	github.com/moonrhythm/parapet v0.13.6
 	github.com/prometheus/client_golang v1.20.5
 	github.com/stretchr/testify v1.10.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.59.0
@@ -41,7 +41,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/google/brotli/go/cbrotli v0.0.0-20250117113955-28b118371570 // indirect
+	github.com/google/brotli/go/cbrotli v0.0.0-20240919160234-350100a5bb9d // indirect
 	github.com/google/gnostic-models v0.6.8 // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/gofuzz v1.2.0 // indirect
