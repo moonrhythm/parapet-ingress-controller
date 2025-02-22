@@ -20,7 +20,7 @@ RUN go build \
 		-tags=cbrotli \
 		./cmd/parapet-ingress-controller
 
-FROM debian:bullseye-slim
+FROM debian:bookworm-slim
 
 RUN apt-get update && \
 	apt-get -y install libbrotli1 ca-certificates && \
