@@ -1,4 +1,4 @@
-FROM golang:1.24.2-bookworm
+FROM golang:1.24.4-bookworm
 
 ARG VERSION
 ARG GOAMD64
