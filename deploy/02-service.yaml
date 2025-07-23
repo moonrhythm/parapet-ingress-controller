@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: parapet-ingress-controller
+  namespace: parapet-ingress-controller
+  labels:
+    app: parapet-ingress-controller
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: parapet-ingress-controller
+  ports:
+  - name: http
+    port: 80
+  - name: https
+    port: 443

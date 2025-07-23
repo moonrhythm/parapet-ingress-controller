@@ -1,12 +1,12 @@
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
-  name: parapet-ingress-controller
-  namespace: parapet-ingress-controller
   labels:
     app: parapet-ingress-controller
+  name: parapet-ingress-controller
+  namespace: parapet-ingress-controller
 spec:
-  replicas: 1
+  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app: parapet-ingress-controller
@@ -15,29 +15,25 @@ spec:
       annotations:
         prometheus.io/port: "9187"
         prometheus.io/scrape: "true"
-      name: parapet-ingress-controller
       labels:
         app: parapet-ingress-controller
     spec:
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-          - labelSelector:
-              matchExpressions:
-              - key: app
-                operator: In
-                values:
-                - parapet-ingress-controller
-            topologyKey: kubernetes.io/hostname
-      serviceAccountName: parapet-ingress-controller
       containers:
       - name: parapet-ingress-controller
         image: registry.moonrhythm.io/parapet-ingress-controller:v0.13.12
         imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+          name: http
+          protocol: TCP
+        - containerPort: 443
+          name: https
+          protocol: TCP
         env:
         - name: POD_NAMESPACE
           valueFrom:
             fieldRef:
+              apiVersion: v1
               fieldPath: metadata.namespace
         - name: TRUST_PROXY
           value: cloudflare
@@ -51,13 +47,8 @@ spec:
           value: "4000"
         - name: PROFILER
           value: "false"
-        ports:
-        - name: http
-          containerPort: 80
-        - name: https
-          containerPort: 443
         livenessProbe:
-          failureThreshold: 3
+          failureThreshold: 5
           httpGet:
             path: /healthz
             port: http
@@ -65,7 +56,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
           successThreshold: 1
-          timeoutSeconds: 3
+          timeoutSeconds: 5
         readinessProbe:
           failureThreshold: 3
           httpGet:
@@ -76,8 +67,12 @@ spec:
           periodSeconds: 5
           successThreshold: 1
           timeoutSeconds: 3
-        resources:
-          requests:
-            cpu: 100m
-            memory: 128Mi
-      terminationGracePeriodSeconds: 60
+        resources: {}
+      serviceAccount: parapet-ingress-controller
+      serviceAccountName: parapet-ingress-controller
+      terminationGracePeriodSeconds: 300
+  updateStrategy:
+    rollingUpdate:
+      maxSurge: 100%
+      maxUnavailable: 0
+    type: RollingUpdate
