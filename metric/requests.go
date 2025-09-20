@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/prom"
@@ -25,10 +26,12 @@ func Requests() parapet.Middleware {
 var _promRequests promRequests
 
 type promRequests struct {
-	vec *prometheus.CounterVec
+	vec       *prometheus.CounterVec
+	durations *prometheus.HistogramVec
 
 	mu sync.RWMutex
 	m  map[string]prometheus.Counter // host/namespace/ingress/service/type/method/status
+	d  map[string]prometheus.Observer
 }
 
 func init() {
@@ -36,12 +39,19 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "requests",
 	}, []string{"host", "status", "method", "ingress_name", "ingress_namespace", "service_type", "service_name"})
+	_promRequests.durations = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: prom.Namespace,
+		Name:      "service_durations",
+	}, []string{"service_type", "service_name"})
 	_promRequests.m = make(map[string]prometheus.Counter, requestSizeHint)
+	_promRequests.d = make(map[string]prometheus.Observer, requestSizeHint)
 
-	prom.Registry().MustRegister(_promRequests.vec)
+	prom.Registry().MustRegister(_promRequests.vec, _promRequests.durations)
 }
 
-func (p *promRequests) Inc(r *http.Request, status int) {
+func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
+	duration := time.Since(start)
+
 	ctx := r.Context()
 	s := state.Get(ctx)
 
@@ -57,6 +67,7 @@ func (p *promRequests) Inc(r *http.Request, status int) {
 
 	p.mu.RLock()
 	m := p.m[key]
+	d := p.d[key]
 	p.mu.RUnlock()
 
 	if m == nil {
@@ -73,18 +84,29 @@ func (p *promRequests) Inc(r *http.Request, status int) {
 			})
 		}
 		m = p.m[key]
+
+		if p.d[key] == nil {
+			p.d[key] = p.durations.With(prometheus.Labels{
+				"service_type": s["serviceType"],
+				"service_name": s["serviceName"],
+			})
+		}
+		d = p.d[key]
+
 		p.mu.Unlock()
 	}
 
 	m.Inc()
+	d.Observe(float64(duration.Milliseconds()))
 }
 
 func (p *promRequests) ServeHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
 		nw := requestTrackRW{
 			ResponseWriter: w,
 		}
-		defer func() { p.Inc(r, nw.status) }()
+		defer func() { p.Inc(r, nw.status, start) }()
 
 		h.ServeHTTP(&nw, r)
 	})
