@@ -41,7 +41,7 @@ func init() {
 	}, []string{"host", "status", "method", "ingress_name", "ingress_namespace", "service_type", "service_name"})
 	_promRequests.durations = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: prom.Namespace,
-		Name:      "service_durations",
+		Name:      "service_duration_seconds",
 	}, []string{"service_type", "service_name"})
 	_promRequests.m = make(map[string]prometheus.Counter, requestSizeHint)
 	_promRequests.d = make(map[string]prometheus.Observer, requestSizeHint)
@@ -97,7 +97,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 	}
 
 	m.Inc()
-	d.Observe(float64(duration.Milliseconds()))
+	d.Observe(duration.Seconds())
 }
 
 func (p *promRequests) ServeHandler(h http.Handler) http.Handler {
