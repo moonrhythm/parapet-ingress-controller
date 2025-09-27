@@ -87,8 +87,9 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 
 		if p.d[key] == nil {
 			p.d[key] = p.durations.With(prometheus.Labels{
-				"service_type": s["serviceType"],
-				"service_name": s["serviceName"],
+				"service_type":      s["serviceType"],
+				"service_name":      s["serviceName"],
+				"service_namespace": s["namespace"],
 			})
 		}
 		d = p.d[key]
