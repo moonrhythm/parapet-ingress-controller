@@ -42,7 +42,7 @@ func init() {
 	_promRequests.durations = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: prom.Namespace,
 		Name:      "service_duration_seconds",
-	}, []string{"service_type", "service_name"})
+	}, []string{"service_type", "service_namespace", "service_name"})
 	_promRequests.m = make(map[string]prometheus.Counter, requestSizeHint)
 	_promRequests.d = make(map[string]prometheus.Observer, requestSizeHint)
 
