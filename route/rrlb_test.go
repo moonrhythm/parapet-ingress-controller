@@ -69,9 +69,9 @@ func TestRRLB(t *testing.T) {
 		badAddr.MarkBad("192.168.1.1")
 		badAddr.MarkBad("192.168.1.2")
 		badAddr.MarkBad("192.168.1.3")
-		assert.Equal(t, "192.168.1.2", lb.Get(&badAddr))
-		assert.Equal(t, "192.168.1.3", lb.Get(&badAddr))
-		assert.Equal(t, "192.168.1.1", lb.Get(&badAddr))
-		assert.Equal(t, "192.168.1.2", lb.Get(&badAddr))
+		assert.Equal(t, "", lb.Get(&badAddr))
+		assert.Equal(t, "", lb.Get(&badAddr))
+		assert.Equal(t, "", lb.Get(&badAddr))
+		assert.Equal(t, "", lb.Get(&badAddr))
 	})
 }
