@@ -27,5 +27,5 @@ func (lb *RRLB) Get(badAddr *badAddrTable) (ip string) {
 			return
 		}
 	}
-	return lb.IPs[p] // all bad, return first
+	return "" // all bad, return empty, prevent requests from stuck up in the queue
 }

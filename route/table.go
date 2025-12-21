@@ -17,8 +17,8 @@ func (t *Table) runBackgroundJob() {
 	go t.badAddr.clearLoop()
 }
 
-// Lookup returns target pod's addr to connect to.
-// If target pod's addr is not found in table, it will return empty string
+// Lookup returns the target pod's addr to connect to.
+// If the target pod's addr is not found in the table, it will return an empty string
 func (t *Table) Lookup(addr string) string {
 	// addr only in dns name service.namespace.svc.cluster.local:port
 	i := strings.LastIndex(addr, ":")
