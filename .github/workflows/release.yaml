@@ -21,9 +21,9 @@ jobs:
         password: ${{ steps.auth.outputs.access_token }}
     - uses: docker/login-action@v2
       with:
-        registry: registry.moonrhythm.io
-        username: ${{ secrets.REGISTRY_USER }}
-        password: ${{ secrets.REGISTRY_PASSWORD }}
+        registry: asia-southeast3-docker.pkg.dev
+        username: oauth2accesstoken
+        password: ${{ steps.auth.outputs.access_token }}
     - uses: docker/setup-buildx-action@v2
       with:
         version: latest
@@ -38,8 +38,8 @@ jobs:
         tags: |
           us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:${{ github.ref_name }}
           us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:latest
-          registry.moonrhythm.io/parapet-ingress-controller:${{ github.ref_name }}
-          registry.moonrhythm.io/parapet-ingress-controller:latest
+          asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:${{ github.ref_name }}
+          asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:latest
     - uses: docker/build-push-action@v4
       with:
         provenance: false
@@ -50,5 +50,5 @@ jobs:
         tags: |
           us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:${{ github.ref_name }}-amd64v1
           us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:latest-amd64v1
-          registry.moonrhythm.io/parapet-ingress-controller:${{ github.ref_name }}-amd64v1
-          registry.moonrhythm.io/parapet-ingress-controller:latest-amd64v1
+          asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:${{ github.ref_name }}-amd64v1
+          asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:latest-amd64v1
