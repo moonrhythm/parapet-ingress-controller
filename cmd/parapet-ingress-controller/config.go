@@ -55,4 +55,12 @@ var predefinedCIDRs = map[string][]string{
 		"2a06:98c0::/29",
 		"2c0f:f248::/32",
 	},
+	"google": {
+		// Google Front End / Google Cloud Load Balancer source ranges
+		// https://cloud.google.com/load-balancing/docs/https#source_ip_addresses_for_client_traffic
+		"35.191.0.0/16",
+		"130.211.0.0/22",
+		"2600:2d00:1:1::/64",
+		"2600:2d00:1:b029::/64",
+	},
 }
