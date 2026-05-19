@@ -275,18 +275,33 @@ func hostRateLimit() parapet.Middleware {
 func hostCountryRateLimit() parapet.Middleware {
 	concurrentCapacity := config.Int("HOST_COUNTRY_CONCURRENT_CAPACITY") // concurrent requests
 	concurrentSize := config.Int("HOST_COUNTRY_CONCURRENT_SIZE")         // queue size
-	countryHeader := strings.TrimSpace(config.String("HOST_COUNTRY_HEADER"))
+	countryHeaderRaw := strings.TrimSpace(config.String("HOST_COUNTRY_HEADER"))
 
 	if concurrentCapacity <= 0 {
 		return nil
 	}
-	if countryHeader == "" {
+	if countryHeaderRaw == "" {
 		return nil
 	}
-	countryHeader = http.CanonicalHeaderKey(countryHeader)
+
+	var countryHeaders []string
+	for _, h := range strings.Split(countryHeaderRaw, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			countryHeaders = append(countryHeaders, http.CanonicalHeaderKey(h))
+		}
+	}
+	if len(countryHeaders) == 0 {
+		return nil
+	}
 
 	keyFromRequest := func(r *http.Request) string {
-		country := header.Get(r.Header, countryHeader)
+		country := ""
+		for _, h := range countryHeaders {
+			if v := header.Get(r.Header, h); v != "" {
+				country = v
+				break
+			}
+		}
 		if country == "" {
 			country = "XX"
 		}
