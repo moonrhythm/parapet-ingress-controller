@@ -1,4 +1,4 @@
-FROM golang:1.26.3-bookworm
+FROM golang:1.26.3-trixie
 
 ARG VERSION
 ARG GOAMD64
@@ -20,7 +20,7 @@ RUN go build \
 		-tags=cbrotli \
 		./cmd/parapet-ingress-controller
 
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && \
 	apt-get -y install libbrotli1 ca-certificates && \
