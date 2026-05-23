@@ -42,6 +42,7 @@ func main() {
 	disableLog := config.Bool("DISABLE_LOG")
 	waitBeforeShutdown := config.DurationDefault("WAIT_BEFORE_SHUTDOWN", 30*time.Second)
 	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
+	loadAllCerts := config.Bool("LOAD_ALL_CERTS")
 
 	hostname, _ := os.Hostname()
 
@@ -59,6 +60,7 @@ func main() {
 		"watch_namespace", watchNamespace,
 		"profiler", enableProfiler,
 		"http_server_max_header_bytes", httpServerMaxHeaderBytes,
+		"load_all_certs", loadAllCerts,
 	)
 
 	if enableProfiler {
@@ -87,6 +89,7 @@ func main() {
 	proxy.ConfigTransport(configTransport)
 
 	ctrl := controller.New(watchNamespace, proxy)
+	ctrl.LoadAllCerts = loadAllCerts
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)
 	ctrl.Use(plugin.RedirectHTTPS)

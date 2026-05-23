@@ -44,6 +44,14 @@ type Controller struct {
 	// namespace to watch, or empty to watch all
 	watchNamespace string
 
+	// LoadAllCerts, when true, builds the cert table from every TLS-typed
+	// secret in the watch namespace instead of only those referenced by an
+	// Ingress's spec.tls.secretName. The cert table already does SNI lookup
+	// with wildcard climbing, so enabling this lets a wildcard cert serve any
+	// matching subdomain without the user (or operator) having to wire the
+	// matching secret into each ingress. Off by default to preserve behavior.
+	LoadAllCerts bool
+
 	// holds current k8s state
 	watchedIngresses sync.Map
 	watchedServices  sync.Map
@@ -440,6 +448,30 @@ func (ctrl *Controller) reloadSecretDebounced() {
 		}
 	}()
 
+	var certs []*tls.Certificate
+
+	if ctrl.LoadAllCerts {
+		// Load every TLS-typed secret in the watch namespace. The cert table
+		// indexes by SAN and does SNI lookup with wildcard climbing, so this
+		// is enough for a wildcard cert in tls-example-com to serve SNI for
+		// foo.example.com without any ingress wiring.
+		ctrl.watchedSecrets.Range(func(_, value any) bool {
+			s := value.(*v1.Secret)
+			if s.Type != v1.SecretTypeTLS {
+				return true
+			}
+			crt, err := tls.X509KeyPair(s.Data["tls.crt"], s.Data["tls.key"])
+			if err != nil {
+				slog.Error("can not load x509 certificate", "namespace", s.Namespace, "name", s.Name, "error", err)
+				return true
+			}
+			certs = append(certs, &crt)
+			return true
+		})
+		ctrl.certTable.Set(certs)
+		return
+	}
+
 	secretToBuild := make(map[string]struct{}, secretSizeHint)
 
 	ctrl.watchedIngresses.Range(func(_, value any) bool {
@@ -452,7 +484,6 @@ func (ctrl *Controller) reloadSecretDebounced() {
 	})
 
 	// build certs
-	var certs []*tls.Certificate
 	for key := range secretToBuild {
 		v, ok := ctrl.watchedSecrets.Load(key)
 		if !ok {
