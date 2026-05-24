@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,8 +29,27 @@ type promRequests struct {
 	durations *prometheus.HistogramVec
 
 	mu sync.RWMutex
-	m  map[string]prometheus.Counter // host/namespace/ingress/service/type/method/status
-	d  map[string]prometheus.Observer
+	m  map[requestKey]*requestMetric
+}
+
+// requestKey is the cache key for the per-label-set metric handles. Using a
+// comparable struct instead of a joined string avoids allocating a key on
+// every request and removes any separator-collision risk.
+type requestKey struct {
+	host        string
+	namespace   string
+	ingress     string
+	serviceName string
+	serviceType string
+	method      string
+	status      int
+}
+
+// requestMetric bundles the counter and duration observer for one label set so
+// the hot path resolves both with a single map lookup.
+type requestMetric struct {
+	counter  prometheus.Counter
+	observer prometheus.Observer
 }
 
 func init() {
@@ -43,8 +61,7 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "service_duration_seconds",
 	}, []string{"service_type", "service_namespace", "service_name"})
-	_promRequests.m = make(map[string]prometheus.Counter, requestSizeHint)
-	_promRequests.d = make(map[string]prometheus.Observer, requestSizeHint)
+	_promRequests.m = make(map[requestKey]*requestMetric, requestSizeHint)
 
 	prom.Registry().MustRegister(_promRequests.vec, _promRequests.durations)
 }
@@ -55,50 +72,47 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 	ctx := r.Context()
 	s := state.Get(ctx)
 
-	key := strings.Join([]string{
-		r.Host,
-		s["namespace"],
-		s["ingress"],
-		s["serviceName"],
-		s["serviceType"],
-		r.Method,
-		strconv.Itoa(status),
-	}, "/")
+	key := requestKey{
+		host:        r.Host,
+		namespace:   s["namespace"],
+		ingress:     s["ingress"],
+		serviceName: s["serviceName"],
+		serviceType: s["serviceType"],
+		method:      r.Method,
+		status:      status,
+	}
 
 	p.mu.RLock()
-	m := p.m[key]
-	d := p.d[key]
+	rm := p.m[key]
 	p.mu.RUnlock()
 
-	if m == nil {
+	if rm == nil {
 		p.mu.Lock()
-		if p.m[key] == nil {
-			p.m[key] = p.vec.With(prometheus.Labels{
-				"host":              r.Host,
-				"method":            r.Method,
-				"ingress_name":      s["ingress"],
-				"ingress_namespace": s["namespace"],
-				"service_type":      s["serviceType"],
-				"service_name":      s["serviceName"],
-				"status":            strconv.Itoa(status),
-			})
+		rm = p.m[key]
+		if rm == nil {
+			rm = &requestMetric{
+				counter: p.vec.With(prometheus.Labels{
+					"host":              r.Host,
+					"method":            r.Method,
+					"ingress_name":      s["ingress"],
+					"ingress_namespace": s["namespace"],
+					"service_type":      s["serviceType"],
+					"service_name":      s["serviceName"],
+					"status":            strconv.Itoa(status),
+				}),
+				observer: p.durations.With(prometheus.Labels{
+					"service_type":      s["serviceType"],
+					"service_name":      s["serviceName"],
+					"service_namespace": s["namespace"],
+				}),
+			}
+			p.m[key] = rm
 		}
-		m = p.m[key]
-
-		if p.d[key] == nil {
-			p.d[key] = p.durations.With(prometheus.Labels{
-				"service_type":      s["serviceType"],
-				"service_name":      s["serviceName"],
-				"service_namespace": s["namespace"],
-			})
-		}
-		d = p.d[key]
-
 		p.mu.Unlock()
 	}
 
-	m.Inc()
-	d.Observe(duration.Seconds())
+	rm.counter.Inc()
+	rm.observer.Observe(duration.Seconds())
 }
 
 func (p *promRequests) ServeHandler(h http.Handler) http.Handler {

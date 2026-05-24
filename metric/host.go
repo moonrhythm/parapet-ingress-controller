@@ -25,7 +25,7 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "host_active_requests",
 	}, []string{"host", "upgrade"})
-	_host.m = make(map[string]prometheus.Gauge, hostSizeHint)
+	_host.m = make(map[hostKey]prometheus.Gauge, hostSizeHint)
 	prom.Registry().MustRegister(_host.vec)
 }
 
@@ -35,14 +35,18 @@ type host struct {
 	vec *prometheus.GaugeVec
 
 	mu sync.RWMutex
-	m  map[string]prometheus.Gauge // host/upgrade
+	m  map[hostKey]prometheus.Gauge
+}
+
+// hostKey is the cache key for the per-(host,upgrade) gauge handle. A
+// comparable struct avoids allocating a joined string key per request.
+type hostKey struct {
+	host    string
+	upgrade string
 }
 
 func (p *host) getM(host, upgrade string) prometheus.Gauge {
-	key := strings.Join([]string{
-		host,
-		upgrade,
-	}, "/")
+	key := hostKey{host: host, upgrade: upgrade}
 
 	p.mu.RLock()
 	m := p.m[key]
