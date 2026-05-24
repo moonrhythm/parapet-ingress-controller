@@ -14,6 +14,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/healthz"
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/moonrhythm/parapet-ingress-controller/cert"
@@ -148,135 +149,92 @@ func (ctrl *Controller) firstReload() {
 	ctrl.health.SetReady(true)
 }
 
-func (ctrl *Controller) watchIngresses(ctx context.Context) {
+// watchResource runs a resilient watch loop for a single Kubernetes resource
+// type: it (re)starts the watch on error, mirrors Added/Modified/Deleted events
+// into store, and invokes onUpsert / onDelete so the caller triggers the right
+// reload. PT is the pointer type of T (e.g. *networking.Ingress); the
+// metav1.Object constraint gives access to the object's namespace and name.
+func watchResource[T any, PT interface {
+	*T
+	metav1.Object
+}](
+	ctx context.Context,
+	namespace, name string,
+	watchFn func(ctx context.Context, namespace string) (watch.Interface, error),
+	store *sync.Map,
+	onUpsert func(obj PT),
+	onDelete func(),
+) {
 	for {
-		w, err := k8s.WatchIngresses(ctx, ctrl.watchNamespace)
+		w, err := watchFn(ctx, namespace)
 		if err != nil {
-			slog.Error("can not watch ingresses", "error", err)
+			slog.Error("can not watch "+name, "error", err)
 			time.Sleep(5 * time.Second)
 			continue
 		}
 
 		for event := range w.ResultChan() {
-			obj, ok := event.Object.(*networking.Ingress)
+			obj, ok := event.Object.(PT)
 			if !ok {
 				continue
 			}
-			key := obj.Namespace + "/" + obj.Name
+			key := obj.GetNamespace() + "/" + obj.GetName()
 
 			switch event.Type {
 			case watch.Added, watch.Modified:
-				ctrl.watchedIngresses.Store(key, obj)
+				store.Store(key, obj)
+				onUpsert(obj)
 			case watch.Deleted:
-				ctrl.watchedIngresses.Delete(key)
+				store.Delete(key)
+				onDelete()
 			default:
 				continue
 			}
-			ctrl.reloadIngress()
 		}
 
 		w.Stop()
-		slog.Info("restart ingresses watcher")
+		slog.Info("restart " + name + " watcher")
 	}
+}
+
+func (ctrl *Controller) watchIngresses(ctx context.Context) {
+	watchResource(ctx, ctrl.watchNamespace, "ingresses", k8s.WatchIngresses,
+		&ctrl.watchedIngresses,
+		func(_ *networking.Ingress) { ctrl.reloadIngress() },
+		ctrl.reloadIngress,
+	)
 }
 
 func (ctrl *Controller) watchServices(ctx context.Context) {
-	for {
-		w, err := k8s.WatchServices(ctx, ctrl.watchNamespace)
-		if err != nil {
-			slog.Error("can not watch services", "error", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		for event := range w.ResultChan() {
-			obj, ok := event.Object.(*v1.Service)
-			if !ok {
-				continue
-			}
-			key := obj.Namespace + "/" + obj.Name
-
-			switch event.Type {
-			case watch.Added, watch.Modified:
-				ctrl.watchedServices.Store(key, obj)
-			case watch.Deleted:
-				ctrl.watchedServices.Delete(key)
-			default:
-				continue
-			}
-			ctrl.reloadService()
-			ctrl.reloadIngress()
-		}
-
-		w.Stop()
-		slog.Info("restart services watcher")
+	// a service change can change both port routing and which ingress backends
+	// resolve, so refresh both tables.
+	reload := func() {
+		ctrl.reloadService()
+		ctrl.reloadIngress()
 	}
+	watchResource(ctx, ctrl.watchNamespace, "services", k8s.WatchServices,
+		&ctrl.watchedServices,
+		func(_ *v1.Service) { reload() },
+		reload,
+	)
 }
 
 func (ctrl *Controller) watchSecrets(ctx context.Context) {
-	for {
-		w, err := k8s.WatchSecrets(ctx, ctrl.watchNamespace)
-		if err != nil {
-			slog.Error("can not watch secrets", "error", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		for event := range w.ResultChan() {
-			obj, ok := event.Object.(*v1.Secret)
-			if !ok {
-				continue
-			}
-			key := obj.Namespace + "/" + obj.Name
-
-			switch event.Type {
-			case watch.Added, watch.Modified:
-				ctrl.watchedSecrets.Store(key, obj)
-			case watch.Deleted:
-				ctrl.watchedSecrets.Delete(key)
-			default:
-				continue
-			}
-			ctrl.reloadSecret()
-		}
-
-		w.Stop()
-		slog.Info("restart secrets watcher")
-	}
+	watchResource(ctx, ctrl.watchNamespace, "secrets", k8s.WatchSecrets,
+		&ctrl.watchedSecrets,
+		func(_ *v1.Secret) { ctrl.reloadSecret() },
+		ctrl.reloadSecret,
+	)
 }
 
 func (ctrl *Controller) watchEndpoints(ctx context.Context) {
-	for {
-		w, err := k8s.WatchEndpoints(ctx, ctrl.watchNamespace)
-		if err != nil {
-			slog.Error("can not watch endpoints", "error", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		for event := range w.ResultChan() {
-			obj, ok := event.Object.(*v1.Endpoints)
-			if !ok {
-				continue
-			}
-			key := obj.Namespace + "/" + obj.Name
-
-			switch event.Type {
-			case watch.Added, watch.Modified:
-				ctrl.watchedEndpoints.Store(key, obj)
-				ctrl.reloadSingleEndpoint(obj)
-				continue
-			case watch.Deleted:
-				ctrl.watchedEndpoints.Delete(key)
-			default:
-				continue
-			}
-			ctrl.reloadEndpoint()
-		}
-
-		w.Stop()
-		slog.Info("restart endpoints watcher")
-	}
+	// upserts only touch a single endpoint's backends, so reload just that one;
+	// a delete needs a full endpoint-table rebuild.
+	watchResource(ctx, ctrl.watchNamespace, "endpoints", k8s.WatchEndpoints,
+		&ctrl.watchedEndpoints,
+		ctrl.reloadSingleEndpoint,
+		ctrl.reloadEndpoint,
+	)
 }
 
 func (ctrl *Controller) reloadIngress() {
