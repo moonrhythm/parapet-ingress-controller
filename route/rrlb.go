@@ -19,7 +19,9 @@ func (lb *RRLB) Get(badAddr *badAddrTable) (ip string) {
 		return lb.IPs[0]
 	}
 
-	p := int(atomic.AddUint32(&lb.current, 1)) % l
+	// take the modulo in uint32 space: int(uint32) can be negative on 32-bit
+	// platforms once current exceeds MaxInt32, which would yield a negative index.
+	p := int(atomic.AddUint32(&lb.current, 1) % uint32(l))
 	for k := 0; k < l; k++ { // try gets not bad address
 		i := (p + k) % l
 		ip = lb.IPs[i]
