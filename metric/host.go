@@ -3,7 +3,6 @@ package metric
 import (
 	"net/http"
 	"strings"
-	"sync"
 
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/header"
@@ -18,24 +17,22 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "host_ratelimit_requests",
 	}, []string{"host"})
-	_hostRatelimit.m = make(map[string]prometheus.Counter, hostSizeHint)
+	_hostRatelimit.cache = newCache[string, prometheus.Counter](hostSizeHint)
 	prom.Registry().MustRegister(_hostRatelimit.vec)
 
 	_host.vec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: prom.Namespace,
 		Name:      "host_active_requests",
 	}, []string{"host", "upgrade"})
-	_host.m = make(map[hostKey]prometheus.Gauge, hostSizeHint)
+	_host.cache = newCache[hostKey, prometheus.Gauge](hostSizeHint)
 	prom.Registry().MustRegister(_host.vec)
 }
 
 var _host host
 
 type host struct {
-	vec *prometheus.GaugeVec
-
-	mu sync.RWMutex
-	m  map[hostKey]prometheus.Gauge
+	vec   *prometheus.GaugeVec
+	cache *cache[hostKey, prometheus.Gauge]
 }
 
 // hostKey is the cache key for the per-(host,upgrade) gauge handle. A
@@ -46,25 +43,12 @@ type hostKey struct {
 }
 
 func (p *host) getM(host, upgrade string) prometheus.Gauge {
-	key := hostKey{host: host, upgrade: upgrade}
-
-	p.mu.RLock()
-	m := p.m[key]
-	p.mu.RUnlock()
-
-	if m == nil {
-		p.mu.Lock()
-		if p.m[key] == nil {
-			p.m[key] = p.vec.With(prometheus.Labels{
-				"host":    host,
-				"upgrade": upgrade,
-			})
-		}
-		m = p.m[key]
-		p.mu.Unlock()
-	}
-
-	return m
+	return p.cache.getOrCreate(hostKey{host: host, upgrade: upgrade}, func() prometheus.Gauge {
+		return p.vec.With(prometheus.Labels{
+			"host":    host,
+			"upgrade": upgrade,
+		})
+	})
 }
 
 type promHostTracker struct{}
@@ -88,29 +72,16 @@ func HostActiveTracker() parapet.Middleware {
 var _hostRatelimit promHostRatelimit
 
 type promHostRatelimit struct {
-	vec *prometheus.CounterVec
-
-	mu sync.RWMutex
-	m  map[string]prometheus.Counter // host
+	vec   *prometheus.CounterVec
+	cache *cache[string, prometheus.Counter]
 }
 
 func (p *promHostRatelimit) Inc(host string) {
-	p.mu.RLock()
-	m := p.m[host]
-	p.mu.RUnlock()
-
-	if m == nil {
-		p.mu.Lock()
-		if p.m[host] == nil {
-			p.m[host] = p.vec.With(prometheus.Labels{
-				"host": host,
-			})
-		}
-		m = p.m[host]
-		p.mu.Unlock()
-	}
-
-	m.Inc()
+	p.cache.getOrCreate(host, func() prometheus.Counter {
+		return p.vec.With(prometheus.Labels{
+			"host": host,
+		})
+	}).Inc()
 }
 
 // HostRatelimitRequest increments the host ratelimit counter

@@ -5,7 +5,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/moonrhythm/parapet"
@@ -28,8 +27,7 @@ type promRequests struct {
 	vec       *prometheus.CounterVec
 	durations *prometheus.HistogramVec
 
-	mu sync.RWMutex
-	m  map[requestKey]*requestMetric
+	cache *cache[requestKey, *requestMetric]
 }
 
 // requestKey is the cache key for the per-label-set metric handles. Using a
@@ -61,7 +59,7 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "service_duration_seconds",
 	}, []string{"service_type", "service_namespace", "service_name"})
-	_promRequests.m = make(map[requestKey]*requestMetric, requestSizeHint)
+	_promRequests.cache = newCache[requestKey, *requestMetric](requestSizeHint)
 
 	prom.Registry().MustRegister(_promRequests.vec, _promRequests.durations)
 }
@@ -82,34 +80,24 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 		status:      status,
 	}
 
-	p.mu.RLock()
-	rm := p.m[key]
-	p.mu.RUnlock()
-
-	if rm == nil {
-		p.mu.Lock()
-		rm = p.m[key]
-		if rm == nil {
-			rm = &requestMetric{
-				counter: p.vec.With(prometheus.Labels{
-					"host":              r.Host,
-					"method":            r.Method,
-					"ingress_name":      s["ingress"],
-					"ingress_namespace": s["namespace"],
-					"service_type":      s["serviceType"],
-					"service_name":      s["serviceName"],
-					"status":            strconv.Itoa(status),
-				}),
-				observer: p.durations.With(prometheus.Labels{
-					"service_type":      s["serviceType"],
-					"service_name":      s["serviceName"],
-					"service_namespace": s["namespace"],
-				}),
-			}
-			p.m[key] = rm
+	rm := p.cache.getOrCreate(key, func() *requestMetric {
+		return &requestMetric{
+			counter: p.vec.With(prometheus.Labels{
+				"host":              r.Host,
+				"method":            r.Method,
+				"ingress_name":      s["ingress"],
+				"ingress_namespace": s["namespace"],
+				"service_type":      s["serviceType"],
+				"service_name":      s["serviceName"],
+				"status":            strconv.Itoa(status),
+			}),
+			observer: p.durations.With(prometheus.Labels{
+				"service_type":      s["serviceType"],
+				"service_name":      s["serviceName"],
+				"service_namespace": s["namespace"],
+			}),
 		}
-		p.mu.Unlock()
-	}
+	})
 
 	rm.counter.Inc()
 	rm.observer.Observe(duration.Seconds())
