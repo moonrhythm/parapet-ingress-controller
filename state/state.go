@@ -29,11 +29,17 @@ func putState(s State) {
 	pool.Put(s)
 }
 
-// Get gets state from context
+// Get returns the State stored in ctx by Middleware.
+//
+// If ctx carries no State — i.e. Get is called outside the Middleware chain —
+// it returns an empty throwaway State so callers can read and write without a
+// nil check. That fallback map is not pooled and never reaches the access log,
+// so writes to it are silently dropped; in normal operation every request
+// passes through Middleware and this path is not taken.
 func Get(ctx context.Context) State {
 	s, _ := ctx.Value(ctxKey{}).(State)
 	if s == nil {
-		s = make(State) // this line is not used, since we inject middleware
+		s = make(State, sizeHint)
 	}
 	return s
 }

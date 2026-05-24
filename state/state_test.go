@@ -68,3 +68,29 @@ func TestMiddleware(t *testing.T) {
 	h.ServeHTTP(w, r)
 	assert.True(t, called)
 }
+
+// Middleware recycles State maps through a sync.Pool; if a map isn't cleared
+// before reuse, one request's state (service name, auth context, ...) leaks
+// into the next request's logs. This drives two sequential requests through the
+// middleware on the same goroutine — so the pool returns the recycled map — and
+// asserts the second request sees a clean slate.
+func TestMiddlewareDoesNotLeakStateBetweenRequests(t *testing.T) {
+	var m parapet.Middlewares
+	m.Use(Middleware())
+
+	first := true
+	h := m.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s := Get(r.Context())
+		if first {
+			s["leak"] = "from-first-request"
+			first = false
+			return
+		}
+		_, ok := s["leak"]
+		assert.False(t, ok, "state must not carry over from a prior request via the pool")
+	}))
+
+	for i := 0; i < 2; i++ {
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	}
+}
