@@ -18,8 +18,21 @@ func (t *badAddrTable) MarkBad(addr string) {
 	if host == "" {
 		host = addr
 	}
-	slog.Warn("badAddrTable: mark bad", "host", host)
+	// Log only on the transition into a bad state. A sustained outage re-marks
+	// the same host on every failed dial; logging each one would flood the log
+	// exactly when it's busiest. A host that recovered (its entry expired) and
+	// fails again logs once more, so distinct outage episodes are still visible.
+	if t.mark(host) {
+		slog.Warn("badAddrTable: mark bad", "host", host)
+	}
+}
+
+// mark records host as bad and reports whether it transitioned from a not-bad
+// state (absent or expired) — used to log once per outage episode.
+func (t *badAddrTable) mark(host string) (transitioned bool) {
+	transitioned = !t.IsBad(host)
 	t.addrs.Store(host, time.Now())
+	return
 }
 
 func (t *badAddrTable) IsBad(host string) bool {
