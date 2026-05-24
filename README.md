@@ -65,6 +65,19 @@ Plugins use annotation in ingress to config.
 See supported annotations in [plugin](https://github.com/moonrhythm/parapet-ingress-controller/tree/master/plugin)
 directory.
 
+## Configuration
+
+The controller is configured through environment variables (see the
+[deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/master/deploy)
+manifests for the full set). Notable options:
+
+- `INGRESS_CLASS` (default `parapet`) — the `ingressClassName` to handle.
+- `WATCH_NAMESPACE` (default all) — restrict the controller to one namespace.
+- `TRUST_PROXY` — `true`, `false`, or comma-separated CIDRs (supports the `cloudflare` shorthand).
+- `LOAD_ALL_CERTS` (default `false`) — load every TLS-typed secret in the watch
+  namespace, not just those referenced by an Ingress's `spec.tls`. Lets a
+  wildcard certificate serve SNI without wiring its secret into each ingress.
+
 ## Metrics
 
 Parapet ingress controller support prometheus metrics by add prometheus annotations to pod template.
@@ -80,6 +93,7 @@ annotations:
 #### Ingress Metrics
 
 - parapet_requests{host, status, method, ingress_name, ingress_namespace, service_type, service_name}
+- parapet_service_duration_seconds{service_type, service_namespace, service_name}
 - parapet_backend_connections{addr}
 - parapet_backend_network_read_bytes{addr}
 - parapet_backend_network_write_bytes{addr}

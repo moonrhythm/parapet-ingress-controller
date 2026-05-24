@@ -6,7 +6,8 @@ A Kubernetes ingress controller built on the [parapet](https://github.com/moonrh
 
 ```
 cmd/parapet-ingress-controller/   # binary entry-point (main.go, config.go)
-controller.go                     # Controller struct — watch/reload logic
+controller.go                     # Controller struct — watch/reload logic (generic watchResource)
+retry.go                          # retryMiddleware — retries idempotent requests on upstream failure
 plugin/                           # annotation-driven middleware plugins
   plugin.go                       # core plugin type + built-in plugins
   auth.go                         # BasicAuth, ForwardAuth
@@ -16,16 +17,19 @@ proxy/                            # reverse-proxy implementation
   gateway.go, dialer.go           # TCP dialing / gateway support
   buffer.go                       # buffer pool
 route/                            # routing tables
-  badaddr.go                      # RRLB (round-robin load balancer), bad-address tracking
+  table.go                        # route Table — host→IP / addr→port lookup
+  rrlb.go                         # RRLB (round-robin load balancer)
+  badaddr.go                      # bad-address tracking (skip failing pods)
 cert/                             # TLS certificate table (SNI lookup)
 k8s/                              # Kubernetes client helpers
   k8s.go, cluster.go, fs.go      # in-cluster / local kubeconfig init + list/watch helpers
 metric/                           # Prometheus metrics
   requests.go, backendconns.go, host.go, reload.go
+  cache.go                        # generic lock+map cache for per-label-set metric handles
 state/                            # per-request state map (passed via context)
 debounce/                         # debounce helper used for reload coalescing
 deploy/                           # raw Kubernetes YAML manifests
-.github/workflows/                # CI (build.yaml) and release (release.yaml) pipelines
+.github/workflows/                # test.yaml (CI), build.yaml (push), release.yaml (tag)
 ```
 
 ## Key concepts
@@ -50,10 +54,12 @@ Routes are keyed as `host + path` strings (e.g. `"www.example.com/api/"`). PathT
 Endpoint lookup is round-robin (`route.RRLB`). Bad addresses (dial errors) are marked and skipped temporarily.
 
 ### TLS
-TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.Table` provides `GetCertificate` for SNI-based lookup, plugged directly into `tls.Config`.
+TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.Table` provides `GetCertificate` for SNI-based lookup (exact match, then a single-label wildcard climb), plugged directly into `tls.Config`. By default only secrets referenced by an Ingress's `spec.tls.secretName` are loaded; set `LOAD_ALL_CERTS=true` to index every TLS-typed secret in the watch namespace (lets a wildcard cert serve SNI without per-ingress wiring).
 
 ### Proxy
 `proxy.Proxy` wraps `httputil.ReverseProxy`. The upstream URL is resolved at request time via `route.Table.Lookup`. Protocol is controlled by the `parapet.moonrhythm.io/upstream-protocol` annotation (default: `http`).
+
+On an upstream failure (dial error, upstream 502/503), the proxy's `ErrorHandler` panics; `retryMiddleware` (`retry.go`) recovers it and retries the request (up to 5 times with backoff) — but only when the body hasn't been read, so non-idempotent requests aren't replayed. `proxy.IsRetryable` decides which errors qualify.
 
 ## Annotation reference
 
@@ -81,6 +87,7 @@ TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.
 | `HTTP_PORT` | `80` | HTTP listener port |
 | `HTTPS_PORT` | `443` | HTTPS listener port |
 | `INGRESS_CLASS` | `parapet` | IngressClassName to handle |
+| `LOAD_ALL_CERTS` | `false` | Load every TLS-typed secret in the namespace, not just those referenced by an Ingress's `spec.tls` |
 | `WATCH_NAMESPACE` | `""` (all) | Restrict namespace watch |
 | `POD_NAMESPACE` | | Current pod's namespace |
 | `TRUST_PROXY` | | `true`, `false`, or comma-sep CIDRs (supports `cloudflare` shorthand) |
@@ -94,6 +101,7 @@ TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.
 | `TR_MAX_CONNS_PER_HOST` | stdlib default | Transport max conns per host |
 | `TR_MAX_IDLE_CONNS_PER_HOST` | stdlib default | Transport max idle conns per host |
 | `PROFILER` | `false` | Enable Cloud Profiler |
+| `PROFILER_NAME` | | Cloud Profiler service name |
 | `DISABLE_LOG` | `false` | Suppress access log |
 
 ## Build & run
@@ -122,6 +130,7 @@ go build -o parapet-ingress-controller \
 
 ## CI / Release
 
+- **Every push & PR** → `test.yaml`: runs `go vet` and `go test -race` with coverage, uploads to Codecov
 - **Push to `master`** → `build.yaml`: builds and pushes two images tagged with `$GITHUB_SHA`
   - `...:$sha` (GOAMD64=v3)
   - `...:$sha-amd64v1` (GOAMD64=v1)
