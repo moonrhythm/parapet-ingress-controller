@@ -3,7 +3,6 @@ package metric
 import (
 	"io"
 	"net"
-	"sync"
 	"sync/atomic"
 
 	"github.com/moonrhythm/parapet/pkg/prom"
@@ -23,8 +22,7 @@ type backendConnections struct {
 	reads       *prometheus.CounterVec
 	writes      *prometheus.CounterVec
 
-	mu sync.RWMutex
-	m  map[string]*backendMetrics // addr
+	cache *cache[string, *backendMetrics] // keyed by addr
 }
 
 var _backendConnections backendConnections
@@ -42,7 +40,7 @@ func init() {
 		Namespace: prom.Namespace,
 		Name:      "backend_network_write_bytes",
 	}, []string{"addr"})
-	_backendConnections.m = make(map[string]*backendMetrics, addrSizeHint)
+	_backendConnections.cache = newCache[string, *backendMetrics](addrSizeHint)
 
 	prom.Registry().MustRegister(_backendConnections.connections)
 	prom.Registry().MustRegister(_backendConnections.reads)
@@ -50,27 +48,16 @@ func init() {
 }
 
 func (p *backendConnections) getM(addr string) *backendMetrics {
-	p.mu.RLock()
-	m := p.m[addr]
-	p.mu.RUnlock()
-
-	if m == nil {
-		p.mu.Lock()
-		if p.m[addr] == nil {
-			l := prometheus.Labels{
-				"addr": addr,
-			}
-			p.m[addr] = &backendMetrics{
-				connections: p.connections.With(l),
-				reads:       p.reads.With(l),
-				writes:      p.writes.With(l),
-			}
+	return p.cache.getOrCreate(addr, func() *backendMetrics {
+		l := prometheus.Labels{
+			"addr": addr,
 		}
-		m = p.m[addr]
-		p.mu.Unlock()
-	}
-
-	return m
+		return &backendMetrics{
+			connections: p.connections.With(l),
+			reads:       p.reads.With(l),
+			writes:      p.writes.With(l),
+		}
+	})
 }
 
 // BackendConnections collects backend connection metrics

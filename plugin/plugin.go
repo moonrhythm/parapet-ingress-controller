@@ -33,6 +33,11 @@ type Context struct {
 	Ingress *networking.Ingress
 }
 
+// ingressID returns the namespace/name identifier of the ingress, for logs.
+func (ctx Context) ingressID() string {
+	return ctx.Ingress.Namespace + "/" + ctx.Ingress.Name
+}
+
 // InjectStateIngress injects ingress name and namespace to state
 func InjectStateIngress(ctx Context) {
 	namespace := ctx.Ingress.Namespace
@@ -91,7 +96,11 @@ func InjectHSTS(ctx Context) {
 func RedirectRules(ctx Context) {
 	if a := ctx.Ingress.Annotations[namespace+"/redirect"]; a != "" {
 		var obj map[string]string
-		yaml.Unmarshal([]byte(a), &obj)
+		if err := yaml.Unmarshal([]byte(a), &obj); err != nil {
+			slog.Error("plugin/RedirectRules: invalid redirect annotation, ignoring",
+				"ingress", ctx.ingressID(), "error", err)
+			return
+		}
 		for srcHost, targetURL := range obj {
 			if srcHost == "" || targetURL == "" || strings.HasPrefix(srcHost, "/") {
 				continue
@@ -120,30 +129,40 @@ func RedirectRules(ctx Context) {
 
 // RateLimit injects rate limit middleware
 func RateLimit(ctx Context) {
-	if a := ctx.Ingress.Annotations[namespace+"/ratelimit-s"]; a != "" {
-		rate, _ := strconv.Atoi(a)
-		if rate > 0 {
-			ctx.Use(ratelimit.FixedWindowPerSecond(rate))
+	rate := func(suffix string) int {
+		a := ctx.Ingress.Annotations[namespace+suffix]
+		if a == "" {
+			return 0
 		}
+		n, err := strconv.Atoi(a)
+		if err != nil {
+			slog.Error("plugin/RateLimit: invalid rate, ignoring",
+				"ingress", ctx.ingressID(), "annotation", namespace+suffix, "value", a, "error", err)
+			return 0
+		}
+		return n
 	}
-	if a := ctx.Ingress.Annotations[namespace+"/ratelimit-m"]; a != "" {
-		rate, _ := strconv.Atoi(a)
-		if rate > 0 {
-			ctx.Use(ratelimit.FixedWindowPerMinute(rate))
-		}
+
+	if n := rate("/ratelimit-s"); n > 0 {
+		ctx.Use(ratelimit.FixedWindowPerSecond(n))
 	}
-	if a := ctx.Ingress.Annotations[namespace+"/ratelimit-h"]; a != "" {
-		rate, _ := strconv.Atoi(a)
-		if rate > 0 {
-			ctx.Use(ratelimit.FixedWindowPerHour(rate))
-		}
+	if n := rate("/ratelimit-m"); n > 0 {
+		ctx.Use(ratelimit.FixedWindowPerMinute(n))
+	}
+	if n := rate("/ratelimit-h"); n > 0 {
+		ctx.Use(ratelimit.FixedWindowPerHour(n))
 	}
 }
 
 // BodyLimit injects body limit middleware
 func BodyLimit(ctx Context) {
 	if a := ctx.Ingress.Annotations[namespace+"/body-limitrequest"]; a != "" {
-		size, _ := strconv.ParseInt(a, 10, 64)
+		size, err := strconv.ParseInt(a, 10, 64)
+		if err != nil {
+			slog.Error("plugin/BodyLimit: invalid body-limitrequest, ignoring",
+				"ingress", ctx.ingressID(), "value", a, "error", err)
+			return
+		}
 		if size > 0 {
 			ctx.Use(body.LimitRequest(size))
 		}

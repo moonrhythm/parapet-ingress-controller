@@ -249,6 +249,33 @@ func TestBodyLimit(t *testing.T) {
 	})
 }
 
+func TestBodyLimitInvalidValue(t *testing.T) {
+	t.Parallel()
+
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/body-limitrequest": "not-a-number",
+				},
+			},
+		},
+	}
+	BodyLimit(ctx) // must not panic on a malformed value
+
+	// an invalid annotation must be ignored, not silently enforced as a limit
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	w := httptest.NewRecorder()
+	r.ContentLength = 1 << 30
+	var called bool
+	ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})).ServeHTTP(w, r)
+	assert.True(t, called)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
 func TestUpstreamProtocol(t *testing.T) {
 	t.Parallel()
 

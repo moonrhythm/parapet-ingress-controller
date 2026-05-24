@@ -50,11 +50,11 @@ func TestPromRequestsIncCachesAndCounts(t *testing.T) {
 	// the two 200 calls share one cache entry; a 404 adds a second
 	_promRequests.Inc(r, 404, start)
 
-	_promRequests.mu.RLock()
-	rm200 := _promRequests.m[key]
+	_promRequests.cache.mu.RLock()
+	rm200 := _promRequests.cache.m[key]
 	key.status = 404
-	rm404 := _promRequests.m[key]
-	_promRequests.mu.RUnlock()
+	rm404 := _promRequests.cache.m[key]
+	_promRequests.cache.mu.RUnlock()
 
 	// both 200 calls resolved to one cached entry; 404 is a distinct one
 	assert.NotNil(t, rm200)
