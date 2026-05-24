@@ -74,11 +74,16 @@ func RedirectHTTPS(ctx Context) {
 // InjectHSTS injects hsts header
 func InjectHSTS(ctx Context) {
 	if a := ctx.Ingress.Annotations[namespace+"/hsts"]; a != "" {
+		var h *hsts.HSTS
 		if a == "preload" {
-			ctx.Use(hsts.Preload())
+			h = hsts.Preload()
 		} else {
-			ctx.Use(hsts.Default())
+			h = hsts.Default()
 		}
+		// Value is fixed at construction and nothing mutates it downstream,
+		// so share a single slice instead of allocating one per response.
+		h.ShareValueSlice = true
+		ctx.Use(h)
 	}
 }
 

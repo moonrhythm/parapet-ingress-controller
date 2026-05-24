@@ -162,6 +162,7 @@ func main() {
 			WaitBeforeShutdown: waitBeforeShutdown,
 			Handler:            http.NotFoundHandler(),
 			H2C:                true,
+			ShareProtoSlice:    true,
 		}
 		prom.Connections(s)
 		prom.Networks(s)
@@ -198,6 +199,7 @@ func main() {
 			GraceTimeout:       1 * time.Minute,
 			WaitBeforeShutdown: waitBeforeShutdown,
 			Handler:            http.NotFoundHandler(),
+			ShareProtoSlice:    true,
 			TLSConfig: &tls.Config{
 				MinVersion:     tls.VersionTLS12,
 				Certificates:   []tls.Certificate{cert},
