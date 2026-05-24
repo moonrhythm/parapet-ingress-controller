@@ -178,6 +178,37 @@ api.example.com: 308,https://www.example.com/api`
 	})
 }
 
+func TestRedirectRulesSkipsInvalidEntries(t *testing.T) {
+	t.Parallel()
+
+	// A mix of valid rules with one invalid (empty target) entry. The invalid
+	// entry must be skipped without dropping the valid rules — regardless of
+	// Go's randomized map iteration order.
+	config := `
+a.example.com: https://target-a.example.com
+b.example.com: https://target-b.example.com
+c.example.com: https://target-c.example.com
+d.example.com: https://target-d.example.com
+bad.example.com: ""`
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/redirect": config,
+				},
+			},
+		},
+		Routes: map[string]http.Handler{},
+	}
+	RedirectRules(ctx)
+
+	for _, h := range []string{"a.example.com/", "b.example.com/", "c.example.com/", "d.example.com/"} {
+		assert.Contains(t, ctx.Routes, h, "valid rule must be registered even when another entry is invalid")
+	}
+	assert.NotContains(t, ctx.Routes, "bad.example.com/")
+}
+
 func TestBodyLimit(t *testing.T) {
 	t.Parallel()
 

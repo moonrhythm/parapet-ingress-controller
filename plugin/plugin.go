@@ -94,7 +94,7 @@ func RedirectRules(ctx Context) {
 		yaml.Unmarshal([]byte(a), &obj)
 		for srcHost, targetURL := range obj {
 			if srcHost == "" || targetURL == "" || strings.HasPrefix(srcHost, "/") {
-				return
+				continue
 			}
 			if !strings.HasSuffix(srcHost, "/") {
 				srcHost += "/"
