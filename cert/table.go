@@ -37,11 +37,11 @@ func (t *Table) Get(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) 
 		}
 	}
 
-	// wildcard name
-	if len(name) > 0 {
-		labels := strings.Split(name, ".")
-		labels[0] = "*"
-		wildcardName := strings.Join(labels, ".")
+	// wildcard name: replace the leftmost label with "*", e.g.
+	// www.example.com -> *.example.com. TLS wildcards match exactly one label,
+	// so only the first label is replaced.
+	if i := strings.IndexByte(name, '.'); i >= 0 {
+		wildcardName := "*" + name[i:]
 		if cert, ok := certs[wildcardName]; ok {
 			return findSupportCert(cert, clientHello), nil
 		}
@@ -70,6 +70,9 @@ func buildNameToCertificate(certs []*tls.Certificate) map[string][]*tls.Certific
 			if err != nil {
 				continue
 			}
+			// cache the parsed leaf so SupportsCertificate (called per TLS
+			// handshake in findSupportCert) doesn't re-parse the DER each time
+			cert.Leaf = x509Cert
 		}
 		// use only SAN, CN already deprecated
 		for _, san := range x509Cert.DNSNames {
