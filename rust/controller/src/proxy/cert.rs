@@ -2,7 +2,9 @@
 //! hot-swappable cert table in `Shared` (PEM, indexed by SAN) and installs the
 //! matching leaf on the in-flight handshake, falling back to a generated
 //! self-signed cert for unknown SNI. Mirrors the Phase-0 spike, wired to live
-//! state. (Parsing PEM per handshake is a known Phase-5 optimization target.)
+//! state. The matched chain + key are parsed once and cached on the `LoadedCert`
+//! (see `LoadedCert::parsed`), so a TLS handshake flood doesn't re-parse PEM per
+//! connection.
 
 use std::sync::Arc;
 
@@ -49,25 +51,22 @@ impl TlsAccept for SniResolver {
         let reason = if sni.is_empty() {
             "no_sni"
         } else if let Some(loaded) = self.shared.certs.load().get(&sni) {
-            // tls.crt is a full chain (leaf first, then intermediates). Install the
-            // leaf AND every intermediate: `X509::from_pem` reads only the first
-            // block, so sending leaf-only leaves clients that don't fetch missing
-            // intermediates (notably Go's crypto/tls — no AIA chasing) unable to
-            // build the chain to a trusted root, i.e. "x509: certificate signed by
-            // unknown authority". Browsers cache/fetch intermediates and so mask it.
-            match (
-                X509::stack_from_pem(&loaded.cert_pem),
-                PKey::private_key_from_pem(&loaded.key_pem),
-            ) {
-                (Ok(chain), Ok(key)) if !chain.is_empty() => {
-                    let _ = ext::ssl_use_certificate(ssl, &chain[0]);
-                    for intermediate in &chain[1..] {
+            // Parsed once and cached (LoadedCert::parsed). Install the leaf AND
+            // every intermediate: sending leaf-only leaves clients that don't fetch
+            // missing intermediates (notably Go's crypto/tls — no AIA chasing)
+            // unable to build the chain to a trusted root, i.e. "x509: certificate
+            // signed by unknown authority". Browsers cache/fetch intermediates and
+            // so mask it.
+            match loaded.parsed() {
+                Some(p) => {
+                    let _ = ext::ssl_use_certificate(ssl, &p.chain[0]);
+                    for intermediate in &p.chain[1..] {
                         let _ = ext::ssl_add_chain_cert(ssl, intermediate);
                     }
-                    let _ = ext::ssl_use_private_key(ssl, &key);
+                    let _ = ext::ssl_use_private_key(ssl, &p.key);
                     return;
                 }
-                _ => "parse_error",
+                None => "parse_error",
             }
         } else {
             "no_match"
