@@ -8,7 +8,7 @@ use std::sync::Arc;
 use controller::k8s;
 use controller::proxy::limit::HostConcurrency;
 use controller::proxy::server::{run, ServeConfig};
-use controller::proxy::{Limits, TrustProxy};
+use controller::proxy::{Limits, TrustProxy, UpstreamTimeouts};
 use controller::shared::Shared;
 
 fn env_or(key: &str, default: &str) -> String {
@@ -111,13 +111,29 @@ fn main() {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0);
+    // Upstream connect-phase timeouts. Defaults are same-zone-tight (see
+    // UpstreamTimeouts::default); loosen for cross-zone/region with these env vars
+    // (Go-duration syntax, e.g. "1500ms", "3s").
+    let default_timeouts = UpstreamTimeouts::default();
+    let upstream_timeouts = UpstreamTimeouts {
+        connect: std::env::var("UPSTREAM_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|s| parse_duration(&s))
+            .unwrap_or(default_timeouts.connect),
+        total_connect: std::env::var("UPSTREAM_TOTAL_CONNECT_TIMEOUT")
+            .ok()
+            .and_then(|s| parse_duration(&s))
+            .unwrap_or(default_timeouts.total_connect),
+    };
     // POD_NAMESPACE is informational (parity with the Go controller's startup log).
     let pod_namespace = env_or("POD_NAMESPACE", "");
     eprintln!(
         "[config] ingress_class={ingress_class} watch_namespace={} pod_namespace={pod_namespace} \
          load_all_certs={load_all_certs} http_port={http_port} https_port={https_port} \
-         log={log_enabled} backend={backend}",
-        watch_namespace.as_deref().unwrap_or("(all)")
+         log={log_enabled} backend={backend} upstream_connect_timeout={:?} upstream_total_connect_timeout={:?}",
+        watch_namespace.as_deref().unwrap_or("(all)"),
+        upstream_timeouts.connect,
+        upstream_timeouts.total_connect,
     );
 
     let shared = Shared::new(ingress_class, load_all_certs);
@@ -167,6 +183,7 @@ fn main() {
             metrics_addr: "0.0.0.0:9187".to_string(),
             trust,
             limits,
+            upstream_timeouts,
             log_enabled,
             debug,
             wait_before_shutdown,

@@ -37,10 +37,14 @@ use crate::shared::Shared;
 
 const MAX_RETRY: usize = 5;
 const ACME_PREFIX: &str = "/.well-known/acme-challenge";
-/// TCP connect timeout to an upstream pod (connect phase only).
-const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Connect + TLS-handshake timeout to an upstream pod (connect phase only).
-const UPSTREAM_TOTAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Default TCP connect timeout to an upstream pod (connect phase only).
+/// Sized for same-zone, intra-cluster pods (single-digit-ms connects), bounding
+/// worst-case `MAX_RETRY × timeout` pileup under load. Override per deployment
+/// with `UPSTREAM_CONNECT_TIMEOUT`.
+const DEFAULT_UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Default connect + TLS-handshake timeout (connect phase only). Override with
+/// `UPSTREAM_TOTAL_CONNECT_TIMEOUT`.
+const DEFAULT_UPSTREAM_TOTAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Metric label substituted for a Host the router doesn't serve, so a flood of
 /// random `Host` headers can't create unbounded Prometheus series (OOM vector).
 const UNKNOWN_HOST_LABEL: &str = "other";
@@ -92,11 +96,29 @@ pub struct Limits {
     pub country_headers: Vec<String>,
 }
 
+/// Upstream connect-phase timeouts (see the `DEFAULT_UPSTREAM_*` consts). Applied
+/// to every `HttpPeer`; cover connect + TLS handshake only, never data transfer.
+#[derive(Clone, Copy)]
+pub struct UpstreamTimeouts {
+    pub connect: Duration,
+    pub total_connect: Duration,
+}
+
+impl Default for UpstreamTimeouts {
+    fn default() -> Self {
+        Self {
+            connect: DEFAULT_UPSTREAM_CONNECT_TIMEOUT,
+            total_connect: DEFAULT_UPSTREAM_TOTAL_CONNECT_TIMEOUT,
+        }
+    }
+}
+
 pub struct Proxy {
     shared: Arc<Shared>,
     is_tls: bool,
     trust: Arc<TrustProxy>,
     limits: Arc<Limits>,
+    timeouts: UpstreamTimeouts,
     log_enabled: bool,
     /// When set (DEBUG_ENDPOINTS=true), serves GET /debug/routes.
     debug: bool,
@@ -108,6 +130,7 @@ impl Proxy {
         is_tls: bool,
         trust: Arc<TrustProxy>,
         limits: Arc<Limits>,
+        timeouts: UpstreamTimeouts,
         log_enabled: bool,
         debug: bool,
     ) -> Self {
@@ -116,6 +139,7 @@ impl Proxy {
             is_tls,
             trust,
             limits,
+            timeouts,
             log_enabled,
             debug,
         }
@@ -362,8 +386,8 @@ impl ProxyHttp for Proxy {
         // fails fast into fail_to_connect -> mark_bad -> round-robin to a healthy
         // pod. These cover only the connect/TLS handshake, NOT data transfer, so
         // long-lived streams (SSE / websockets / long-poll) are unaffected.
-        peer.options.connection_timeout = Some(UPSTREAM_CONNECT_TIMEOUT);
-        peer.options.total_connection_timeout = Some(UPSTREAM_TOTAL_CONNECT_TIMEOUT);
+        peer.options.connection_timeout = Some(self.timeouts.connect);
+        peer.options.total_connection_timeout = Some(self.timeouts.total_connect);
         Ok(Box::new(peer))
     }
 

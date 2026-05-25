@@ -15,7 +15,7 @@ use pingora::services::listening::Service;
 use tokio::signal::unix::{signal, SignalKind};
 
 use super::cert::SniResolver;
-use super::{Limits, Proxy, TrustProxy};
+use super::{Limits, Proxy, TrustProxy, UpstreamTimeouts};
 use crate::shared::Shared;
 
 /// Max requests served per downstream keepalive connection before it is closed,
@@ -28,6 +28,7 @@ pub struct ServeConfig {
     pub metrics_addr: String,
     pub trust: Arc<TrustProxy>,
     pub limits: Arc<Limits>,
+    pub upstream_timeouts: UpstreamTimeouts,
     pub log_enabled: bool,
     pub debug: bool,
     /// On SIGTERM, mark not-ready then keep serving this long before draining,
@@ -110,6 +111,7 @@ pub fn run(shared: Arc<Shared>, cfg: ServeConfig) {
             false,
             cfg.trust.clone(),
             cfg.limits.clone(),
+            cfg.upstream_timeouts,
             cfg.log_enabled,
             cfg.debug,
         ),
@@ -134,6 +136,7 @@ pub fn run(shared: Arc<Shared>, cfg: ServeConfig) {
                 true,
                 cfg.trust.clone(),
                 cfg.limits.clone(),
+                cfg.upstream_timeouts,
                 cfg.log_enabled,
                 cfg.debug,
             ),
