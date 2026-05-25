@@ -24,15 +24,15 @@ impl Rrlb {
         &self.ips
     }
 
-    /// Returns the next non-bad IP, or `""` if the set is empty or all bad.
+    /// Returns the next non-bad IP, or `None` if the set is empty or all bad.
     /// `bad` may be `None` (treated as "nothing is bad").
-    pub fn get(&self, bad: Option<&BadAddrs>) -> String {
+    pub fn get(&self, bad: Option<&BadAddrs>) -> Option<String> {
         let l = self.ips.len();
         if l == 0 {
-            return String::new();
+            return None;
         }
         if l == 1 {
-            return self.ips[0].clone();
+            return Some(self.ips[0].clone());
         }
 
         // pre-increment then modulo, matching Go's atomic.AddUint32 semantics
@@ -42,11 +42,11 @@ impl Rrlb {
             let i = (p + k) % l;
             let ip = &self.ips[i];
             if !BadAddrs::is_bad_opt(bad, ip) {
-                return ip.clone();
+                return Some(ip.clone());
             }
         }
-        // all bad: return empty so requests fail fast instead of queueing
-        String::new()
+        // all bad: report none so requests fail fast instead of queueing
+        None
     }
 }
 
@@ -57,17 +57,17 @@ mod tests {
     #[test]
     fn empty() {
         let lb = Rrlb::new(vec![]);
-        assert_eq!(lb.get(None), "");
-        assert_eq!(lb.get(None), "");
-        assert_eq!(lb.get(None), "");
+        assert_eq!(lb.get(None), None);
+        assert_eq!(lb.get(None), None);
+        assert_eq!(lb.get(None), None);
     }
 
     #[test]
     fn single() {
         let lb = Rrlb::new(vec!["192.168.1.1".into()]);
-        assert_eq!(lb.get(None), "192.168.1.1");
-        assert_eq!(lb.get(None), "192.168.1.1");
-        assert_eq!(lb.get(None), "192.168.1.1");
+        assert_eq!(lb.get(None).as_deref(), Some("192.168.1.1"));
+        assert_eq!(lb.get(None).as_deref(), Some("192.168.1.1"));
+        assert_eq!(lb.get(None).as_deref(), Some("192.168.1.1"));
     }
 
     #[test]
@@ -77,10 +77,10 @@ mod tests {
             "192.168.1.2".into(),
             "192.168.1.3".into(),
         ]);
-        assert_eq!(lb.get(None), "192.168.1.2");
-        assert_eq!(lb.get(None), "192.168.1.3");
-        assert_eq!(lb.get(None), "192.168.1.1");
-        assert_eq!(lb.get(None), "192.168.1.2");
+        assert_eq!(lb.get(None).as_deref(), Some("192.168.1.2"));
+        assert_eq!(lb.get(None).as_deref(), Some("192.168.1.3"));
+        assert_eq!(lb.get(None).as_deref(), Some("192.168.1.1"));
+        assert_eq!(lb.get(None).as_deref(), Some("192.168.1.2"));
     }
 
     #[test]
@@ -92,10 +92,10 @@ mod tests {
         ]);
         let bad = BadAddrs::new();
         bad.mark_bad("192.168.1.3");
-        assert_eq!(lb.get(Some(&bad)), "192.168.1.2");
-        assert_eq!(lb.get(Some(&bad)), "192.168.1.1"); // 3 is bad so 1 is returned
-        assert_eq!(lb.get(Some(&bad)), "192.168.1.1"); // next of 3 is 1
-        assert_eq!(lb.get(Some(&bad)), "192.168.1.2");
+        assert_eq!(lb.get(Some(&bad)).as_deref(), Some("192.168.1.2"));
+        assert_eq!(lb.get(Some(&bad)).as_deref(), Some("192.168.1.1")); // 3 is bad so 1 is returned
+        assert_eq!(lb.get(Some(&bad)).as_deref(), Some("192.168.1.1")); // next of 3 is 1
+        assert_eq!(lb.get(Some(&bad)).as_deref(), Some("192.168.1.2"));
     }
 
     #[test]
@@ -109,9 +109,9 @@ mod tests {
         bad.mark_bad("192.168.1.1");
         bad.mark_bad("192.168.1.2");
         bad.mark_bad("192.168.1.3");
-        assert_eq!(lb.get(Some(&bad)), "");
-        assert_eq!(lb.get(Some(&bad)), "");
-        assert_eq!(lb.get(Some(&bad)), "");
-        assert_eq!(lb.get(Some(&bad)), "");
+        assert_eq!(lb.get(Some(&bad)), None);
+        assert_eq!(lb.get(Some(&bad)), None);
+        assert_eq!(lb.get(Some(&bad)), None);
+        assert_eq!(lb.get(Some(&bad)), None);
     }
 }
