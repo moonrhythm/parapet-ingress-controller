@@ -1,0 +1,12 @@
+# build output (huge; rebuilt in the image)
+target
+**/target
+
+# macOS-specific OPENSSL_DIR override — would break the Linux build; the
+# container resolves OpenSSL via pkg-config (libssl-dev) instead.
+.cargo/config.toml
+
+# docs / git
+*.md
+.git
+.gitignore

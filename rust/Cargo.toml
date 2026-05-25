@@ -1,0 +1,16 @@
+[workspace]
+resolver = "2"
+members = ["spike", "controller"]
+
+# Release profile tuned for the production container image: a smaller binary
+# (~24M unstripped -> ~13M) and better runtime perf, which feeds the Phase 5
+# perf-parity gate.
+#   strip          : drop symbols + debuginfo from the shipped binary
+#   lto = "fat"    : whole-program optimization across all crates
+#   codegen-units  : 1 = best optimization / least duplicated code (slower link)
+# panic stays the default "unwind" ON PURPOSE: a panicking per-request task must
+# unwind so Pingora isolates that request instead of aborting the whole proxy.
+[profile.release]
+strip = true
+lto = "fat"
+codegen-units = 1

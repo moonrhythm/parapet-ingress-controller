@@ -1,0 +1,59 @@
+name: Rust Test
+on:
+  push:
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-test.yaml'
+  pull_request:
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-test.yaml'
+
+defaults:
+  run:
+    working-directory: rust
+
+jobs:
+  # Fast gate: format, lint, and test the pure routing/reconcile core (default
+  # features — no pingora/kube, so no native deps and no OpenSSL needed).
+  lint-test:
+    name: fmt + clippy + test (default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo fmt --all --check
+      - run: cargo clippy -p parapet-ingress-controller --all-targets -- -D warnings
+      - run: cargo test -p parapet-ingress-controller
+
+  # Full gate: clippy/test/build the binary with the pingora (proxy) + kube
+  # (cluster) features, which pull native deps and OpenSSL.
+  proxy:
+    name: clippy + test + build (proxy,cluster)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake clang pkg-config libssl-dev
+      - name: Drop macOS-only OPENSSL_DIR override (use pkg-config/libssl-dev here)
+        run: rm -f .cargo/config.toml
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - run: cargo clippy -p parapet-ingress-controller --all-targets --features proxy,cluster -- -D warnings
+      - run: cargo test -p parapet-ingress-controller --features proxy,cluster
+      # Debug build — verifies the binary links with all features. The optimized
+      # release artifact (fat LTO, slow) is built and pushed by rust-build.yaml.
+      - run: cargo build -p parapet-ingress-controller --features proxy,cluster --bin parapet-ingress-controller

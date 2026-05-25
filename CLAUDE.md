@@ -2,6 +2,40 @@
 
 A Kubernetes ingress controller built on the [parapet](https://github.com/moonrhythm/parapet) middleware framework. It watches Kubernetes Ingress, Service, Secret, and Endpoints resources and hot-reloads an `http.ServeMux` router without restarting the process.
 
+## Rust port (`rust/`, in progress)
+
+A from-scratch rewrite on the [Pingora](https://github.com/cloudflare/pingora) framework lives in `rust/`, intended to replace the Go controller once it clears a load-test perf-parity gate. **The Go controller remains the production binary until that cutover.** GCP Cloud Profiler and Cloud Trace are dropped from the port by design (no Rust SDK).
+
+```
+rust/
+  controller/         # the real crate (lib `controller`, bin `parapet-ingress-controller`)
+    src/proxy/        # Pingora ProxyHttp impl: routing, upstream (http/https/h2c),
+                      #   retry + bad-addr, middleware, metrics, SNI, server wiring
+    src/{router,route,cert,config,reconcile,shared,k8s}.rs  # routing/reconcile core
+                      #   (no pingora/kube deps → builds + tests in ~1s)
+  spike/              # throwaway Phase-0 de-risk proof (see PHASE0_FINDINGS.md)
+  bench/              # Phase-5 perf harness: k6 load.js + run.sh (see PHASE5.md)
+  Dockerfile          # multi-stage; distroless/cc-debian13 runtime (~41 MB)
+  PHASE{0,3,5}.md     # de-risk findings / cluster-validation handoff / perf-parity gate
+```
+
+Build, test, run:
+
+```bash
+cd rust
+cargo test -p parapet-ingress-controller                       # fast core (default features)
+cargo test -p parapet-ingress-controller --features proxy,cluster
+# run locally against static manifests (no cluster):
+KUBERNETES_BACKEND=fs KUBERNETES_FS=<dir> HTTP_PORT=8080 HTTPS_PORT=8443 \
+  cargo run -p parapet-ingress-controller --features proxy,cluster
+```
+
+Cargo features: `cluster` (kube-rs watch) and `proxy` (Pingora server); the binary needs both. The macOS-only `rust/.cargo/config.toml` (Homebrew OpenSSL) is gitignored — CI/Docker resolve TLS via `pkg-config`/`libssl-dev`.
+
+CI: `.github/workflows/rust-test.yaml` (fmt + clippy + test on push/PR) and `rust-build.yaml` (build + push `rust-`-prefixed images on master), both path-filtered to `rust/**` so they never fire on Go-only changes.
+
+**Parity status:** the full request data path is ported — routing (all PathTypes), TLS/SNI, h2c, retry, all 12 annotations, host/country concurrency, rate limits, forward/basic auth, trust-proxy (+ cloudflare/google/bunny shorthands), `WAIT_BEFORE_SHUTDOWN` drain, JSON access log, and compression (SSE responses are exempted from compression so they stream). Plus `process_*` metrics (Linux). **Known gaps:** connection/network-byte metrics (`parapet_connections`, `parapet_network_*`, `parapet_backend_connections`) and `go_*` runtime metrics — mostly un-matchable given Pingora's pooled-connection model — and the `TR_MAX_CONNS_PER_HOST` / `TR_MAX_IDLE_CONNS_PER_HOST` transport-pool knobs.
+
 ## Repository layout
 
 ```
