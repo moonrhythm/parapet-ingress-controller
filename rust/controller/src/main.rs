@@ -87,7 +87,13 @@ fn main() {
     let ingress_class = env_or("INGRESS_CLASS", "parapet");
     let load_all_certs = std::env::var("LOAD_ALL_CERTS").ok().as_deref() == Some("true");
     let http_port = env_or("HTTP_PORT", "80");
-    let https_port = env_or("HTTPS_PORT", "443");
+    // HTTPS_PORT: unset -> default 443; explicitly empty -> disable HTTPS (HTTP-only,
+    // e.g. the internal-ingress controller). env_or can't distinguish unset from a
+    // set-but-empty value, so match directly; an empty value yields no https_addr.
+    let https_port = match std::env::var("HTTPS_PORT") {
+        Ok(s) => s,
+        Err(_) => "443".to_string(),
+    };
     let watch_namespace = std::env::var("WATCH_NAMESPACE")
         .ok()
         .filter(|s| !s.is_empty());

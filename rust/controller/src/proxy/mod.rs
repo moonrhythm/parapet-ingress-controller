@@ -410,30 +410,14 @@ impl ProxyHttp for Proxy {
         Ok(None)
     }
 
-    async fn upstream_response_filter(
-        &self,
-        session: &mut Session,
-        upstream_response: &mut ResponseHeader,
-        ctx: &mut Ctx,
-    ) -> Result<()> {
-        // Retry idempotently on a retryable upstream status (502/503), matching
-        // the Go controller. This runs before the response is sent downstream,
-        // so failing here re-drives upstream_peer (round-robin picks the next
-        // pod). Only when the request body is fully buffered for replay; once
-        // the retry budget is spent the real upstream response passes through.
-        let status = upstream_response.status.as_u16();
-        if matches!(status, 502 | 503) && !session.as_ref().retry_buffer_truncated() {
-            // increment-then-check so total attempts == MAX_RETRY (like fail_to_connect)
-            ctx.tries += 1;
-            if ctx.tries < MAX_RETRY {
-                let mut e =
-                    Error::explain(ErrorType::HTTPStatus(status), "retryable upstream status");
-                e.set_retry(true);
-                return Err(e);
-            }
-        }
-        Ok(())
-    }
+    // NOTE: no upstream_response_filter retry. We deliberately do NOT retry based
+    // on the upstream's HTTP status (even 502/503): once the upstream *responds*
+    // it has received and processed the request, so retrying could duplicate
+    // side effects and just amplifies load on a struggling backend. Retries
+    // happen only on connection failures: `fail_to_connect` (cannot connect) and
+    // Pingora's default `error_while_proxy` (a reused/keepalive connection breaks
+    // before a response, with a replayable body). (Go's controller also retried
+    // 502/503 via IsRetryable; this is an intentional divergence.)
 
     async fn response_filter(
         &self,
