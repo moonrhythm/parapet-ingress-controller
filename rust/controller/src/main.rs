@@ -146,9 +146,6 @@ fn main() {
                     .build()
                     .expect("build tokio runtime");
                 rt.block_on(async move {
-                    // NOTE: kube's rustls-tls backend may require a default
-                    // CryptoProvider to be installed here; resolve when
-                    // validating against a live cluster.
                     if let Err(e) = k8s::cluster::run(shared, watch_namespace).await {
                         eprintln!("k8s watch error: {e}");
                     }

@@ -2,10 +2,11 @@
 //! `prometheus_http_service` (on :9187) serves them. Metric names and labels
 //! match the Go controller exactly so existing dashboards keep working.
 //!
-//! Known gap (Phase 5): the per-addr backend connection/byte counters
-//! (`parapet_backend_*`) and downstream `parapet_connections`/`network_*` are
-//! not yet wired — Pingora pools upstream connections, so those need a custom
-//! IO accounting layer.
+//! Backend/downstream byte counters (`parapet_backend_network_*`,
+//! `parapet_network_*`) and `parapet_backend_connections` are wired (the last as
+//! an in-flight-per-addr approximation, since Pingora pools upstream
+//! connections). `parapet_connections` (downstream gauge by connection state)
+//! has no Pingora `ConnState` equivalent and is not implemented.
 
 use std::sync::OnceLock;
 
