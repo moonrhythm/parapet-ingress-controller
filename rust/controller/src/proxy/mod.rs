@@ -7,6 +7,7 @@ pub mod cert;
 pub mod limit;
 pub mod metrics;
 pub mod predefined;
+pub mod procmetrics;
 pub mod ratelimit;
 pub mod server;
 
@@ -124,6 +125,9 @@ pub struct Ctx {
     config: Option<Arc<RouteConfig>>,
     tries: usize,
     last_addr: Option<String>,
+    /// Addr currently counted in the backend in-flight gauge (so retries move it
+    /// and `logging` decrements exactly once). Distinct from `last_addr`.
+    backend_conn_addr: Option<String>,
     // access log / metrics
     start: Option<Instant>,
     timestamp: String,
@@ -298,6 +302,16 @@ impl ProxyHttp for Proxy {
             ));
         }
         ctx.last_addr = Some(addr.clone());
+
+        // backend in-flight gauge: move it to the new addr on a retry; `logging`
+        // decrements the final one. Keeps inc/dec balanced across retries.
+        if ctx.backend_conn_addr.as_deref() != Some(addr.as_str()) {
+            if let Some(prev) = ctx.backend_conn_addr.take() {
+                metrics::backend_conn_dec(&prev);
+            }
+            metrics::backend_conn_inc(&addr);
+            ctx.backend_conn_addr = Some(addr.clone());
+        }
 
         let peer = match effective_protocol(ctx) {
             EffProto::H2c => {
@@ -498,9 +512,12 @@ impl ProxyHttp for Proxy {
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&Error>, ctx: &mut Ctx) {
-        // always release the host-active gauge (limit guards drop with ctx)
+        // always release the host-active + backend in-flight gauges
         if let Some((host, upgrade)) = &ctx.host_active {
             metrics::host_active_dec(host, upgrade);
+        }
+        if let Some(addr) = ctx.backend_conn_addr.take() {
+            metrics::backend_conn_dec(&addr);
         }
         // surface the upstream failure cause (otherwise only a bare 502 is visible)
         if let Some(e) = e {
@@ -528,6 +545,11 @@ impl ProxyHttp for Proxy {
             service_name: &ctx.meta.service_name,
             duration_secs: duration.as_secs_f64(),
         });
+
+        // Downstream byte totals (parapet prom.Networks parity), counted once per
+        // request from the session's app-level body byte counters.
+        metrics::network_request_add(session.body_bytes_read() as u64);
+        metrics::network_response_add(session.body_bytes_sent() as u64);
 
         if self.log_enabled {
             let body_sent = session.body_bytes_sent() as i64;

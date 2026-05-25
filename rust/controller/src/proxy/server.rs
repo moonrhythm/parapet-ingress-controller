@@ -29,6 +29,10 @@ pub struct ServeConfig {
     /// On SIGTERM, mark not-ready then keep serving this long before draining,
     /// so the LB/endpoints deregister this pod first (WAIT_BEFORE_SHUTDOWN).
     pub wait_before_shutdown: Duration,
+    /// Upstream keepalive pool size (`TR_MAX_IDLE_CONNS_PER_HOST`). NOTE: Pingora's
+    /// pool is process-global, not per-host like Go's Transport.MaxIdleConnsPerHost,
+    /// so this is a best-effort mapping. `None` keeps Pingora's default (128).
+    pub upstream_keepalive_pool_size: Option<usize>,
 }
 
 /// Custom shutdown watcher: on SIGTERM, flip readiness to not-ready and keep
@@ -78,10 +82,13 @@ pub fn run(shared: Arc<Shared>, cfg: ServeConfig) {
     // .unwrap_or(EXIT_TIMEOUT=300s))` — that would hang ~5min after draining (k8s
     // SIGKILLs it). Set 0; in-flight requests still drain via the runtime's
     // graceful_shutdown_timeout. The pre-drain delay is our WAIT_BEFORE_SHUTDOWN.
-    let conf = ServerConf {
+    let mut conf = ServerConf {
         grace_period_seconds: Some(0),
         ..Default::default()
     };
+    if let Some(n) = cfg.upstream_keepalive_pool_size {
+        conf.upstream_keepalive_pool_size = n;
+    }
     let mut server = Server::new_with_opt_and_conf(None, conf);
     server.bootstrap();
 

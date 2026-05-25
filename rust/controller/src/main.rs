@@ -78,13 +78,11 @@ fn main() {
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
     // Pingora's prometheus endpoint serves the default registry but, unlike Go's
-    // client_golang, registers no process collector. Register one so the pod
-    // exposes process_cpu_seconds_total / process_resident_memory_bytes /
-    // process_open_fds / ... like the Go controller (Linux-only; see Cargo.toml).
+    // client_golang, registers no process collector. Start our own (reads /proc,
+    // Linux-only) so the pod exposes process_cpu_seconds_total (float, ms
+    // precision) / resident+virtual memory / fds / network bytes like Go.
     #[cfg(target_os = "linux")]
-    let _ = prometheus::register(Box::new(
-        prometheus::process_collector::ProcessCollector::for_self(),
-    ));
+    controller::proxy::procmetrics::start();
 
     let ingress_class = env_or("INGRESS_CLASS", "parapet");
     let load_all_certs = std::env::var("LOAD_ALL_CERTS").ok().as_deref() == Some("true");
@@ -102,6 +100,19 @@ fn main() {
         .ok()
         .and_then(|s| parse_duration(&s))
         .unwrap_or_else(|| std::time::Duration::from_secs(30));
+    // Maps to Pingora's process-global upstream keepalive pool (see ServeConfig).
+    let upstream_keepalive_pool_size = std::env::var("TR_MAX_IDLE_CONNS_PER_HOST")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0);
+    // POD_NAMESPACE is informational (parity with the Go controller's startup log).
+    let pod_namespace = env_or("POD_NAMESPACE", "");
+    eprintln!(
+        "[config] ingress_class={ingress_class} watch_namespace={} pod_namespace={pod_namespace} \
+         load_all_certs={load_all_certs} http_port={http_port} https_port={https_port} \
+         log={log_enabled} backend={backend}",
+        watch_namespace.as_deref().unwrap_or("(all)")
+    );
 
     let shared = Shared::new(ingress_class, load_all_certs);
 
@@ -156,6 +167,7 @@ fn main() {
             log_enabled,
             debug,
             wait_before_shutdown,
+            upstream_keepalive_pool_size,
         },
     );
 }

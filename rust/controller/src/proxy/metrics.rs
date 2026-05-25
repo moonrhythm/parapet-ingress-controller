@@ -10,8 +10,8 @@
 use std::sync::OnceLock;
 
 use prometheus::{
-    register_histogram_vec, register_int_counter_vec, register_int_gauge_vec, HistogramVec,
-    IntCounterVec, IntGaugeVec,
+    register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
+    HistogramVec, IntCounter, IntCounterVec, IntGaugeVec,
 };
 
 struct Metrics {
@@ -22,6 +22,9 @@ struct Metrics {
     host_ratelimit: IntCounterVec,
     backend_read: IntCounterVec,
     backend_write: IntCounterVec,
+    backend_conn: IntGaugeVec,
+    net_request: IntCounter,
+    net_response: IntCounter,
 }
 
 fn metrics() -> &'static Metrics {
@@ -77,6 +80,29 @@ fn metrics() -> &'static Metrics {
             &["addr"]
         )
         .expect("register parapet_backend_network_write_bytes"),
+        // Approximation of Go's per-conn gauge: Pingora pools upstream connections,
+        // so this tracks IN-FLIGHT requests per backend addr (inc on upstream
+        // selection, dec when the request finishes), not live TCP connections.
+        backend_conn: register_int_gauge_vec!(
+            "parapet_backend_connections",
+            "In-flight requests per backend addr (approximates live connections)",
+            &["addr"]
+        )
+        .expect("register parapet_backend_connections"),
+        // Downstream (client-facing) byte totals, matching the parapet framework's
+        // prom.Networks counters. NOTE: application/body bytes (the granularity
+        // Pingora's Session exposes); Go's net.Conn wrapper counts wire bytes
+        // (request/response headers + TLS framing), so these read lower than Go.
+        net_request: register_int_counter!(
+            "parapet_network_request_bytes",
+            "Request body bytes read from downstream"
+        )
+        .expect("register parapet_network_request_bytes"),
+        net_response: register_int_counter!(
+            "parapet_network_response_bytes",
+            "Response body bytes written downstream"
+        )
+        .expect("register parapet_network_response_bytes"),
     })
 }
 
@@ -86,6 +112,22 @@ pub fn backend_read_add(addr: &str, n: u64) {
 
 pub fn backend_write_add(addr: &str, n: u64) {
     metrics().backend_write.with_label_values(&[addr]).inc_by(n);
+}
+
+pub fn backend_conn_inc(addr: &str) {
+    metrics().backend_conn.with_label_values(&[addr]).inc();
+}
+
+pub fn backend_conn_dec(addr: &str) {
+    metrics().backend_conn.with_label_values(&[addr]).dec();
+}
+
+pub fn network_request_add(n: u64) {
+    metrics().net_request.inc_by(n);
+}
+
+pub fn network_response_add(n: u64) {
+    metrics().net_response.inc_by(n);
 }
 
 pub fn host_active_inc(host: &str, upgrade: &str) {

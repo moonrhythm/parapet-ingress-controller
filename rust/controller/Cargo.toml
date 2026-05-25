@@ -40,13 +40,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 bytes = { version = "1", optional = true }
 # surfaces pingora's internal `log` output (h2 handshake errors, etc.)
 env_logger = { version = "0.11", optional = true }
-
-# The prometheus crate's process collector (process_cpu/memory/fds, like Go's
-# client_golang default registry) is gated behind the `process` feature, which
-# pulls in `procfs` and only compiles on Linux. Enable it only there so macOS
-# dev builds stay green; main.rs registers the collector under the same cfg.
-[target.'cfg(target_os = "linux")'.dependencies]
-prometheus = { version = "0.13", features = ["process"], optional = true }
+# sysconf(_SC_CLK_TCK / _SC_PAGESIZE) for the custom process collector
+# (proxy/procmetrics.rs). Compiles everywhere; only used on Linux.
+libc = { version = "0.2", optional = true }
 
 [features]
 cluster = ["dep:kube", "dep:tokio", "dep:futures", "dep:rustls"]
@@ -62,6 +58,7 @@ proxy = [
     "dep:reqwest",
     "dep:bytes",
     "dep:env_logger",
+    "dep:libc",
 ]
 
 [lib]
