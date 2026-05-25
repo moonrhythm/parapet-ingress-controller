@@ -92,7 +92,10 @@ impl<C: HasDnsNames> Table<C> {
     /// Resolve a server name to a certificate: exact match, then single-label
     /// wildcard. Returns `None` when nothing matches.
     pub fn get(&self, server_name: &str) -> Option<Arc<C>> {
-        let name = server_name.to_ascii_lowercase();
+        // Normalize: a fully-qualified SNI may carry a trailing dot
+        // (`host.example.com.`), and SNI is case-insensitive. Without this an
+        // FQDN client would miss every cert and get the self-signed fallback.
+        let name = server_name.trim_end_matches('.').to_ascii_lowercase();
 
         if let Some(certs) = self.name_to_cert.get(&name) {
             if let Some(c) = certs.first() {
@@ -172,5 +175,23 @@ mod tests {
     fn case_insensitive() {
         let t = Table::build(vec![cert("c", &["example.com"])]);
         assert_eq!(t.get("EXAMPLE.com").unwrap().id, "c");
+    }
+
+    #[test]
+    fn sni_normalization_and_genuine_misses() {
+        let t = Table::build(vec![cert("c", &["api.example.com"])]);
+        assert!(t.get("api.example.com").is_some(), "exact hostname matches");
+        // a trailing-dot FQDN is normalized and now matches (was a fallback miss)
+        assert!(
+            t.get("api.example.com.").is_some(),
+            "trailing-dot FQDN matches after normalization"
+        );
+        assert!(t.get("API.Example.COM.").is_some(), "case + trailing dot");
+        // genuine misses still fall back: empty SNI / IP-literal SNI
+        assert!(
+            t.get("").is_none(),
+            "empty SNI (no SNI / IP connect) misses"
+        );
+        assert!(t.get("10.0.0.5").is_none(), "IP-literal SNI misses");
     }
 }

@@ -26,6 +26,7 @@ struct Metrics {
     backend_conn: IntGaugeVec,
     net_request: IntCounter,
     net_response: IntCounter,
+    tls_no_cert: IntCounterVec,
 }
 
 fn metrics() -> &'static Metrics {
@@ -104,7 +105,20 @@ fn metrics() -> &'static Metrics {
             "Response body bytes written downstream"
         )
         .expect("register parapet_network_response_bytes"),
+        // TLS handshakes that fell back to the self-signed cert because no loaded
+        // cert matched the SNI. A nonzero rate means clients see "unknown
+        // authority". `reason`: no_sni | no_match | parse_error (bounded set).
+        tls_no_cert: register_int_counter_vec!(
+            "parapet_tls_sni_no_cert_total",
+            "TLS handshakes served the self-signed fallback (no matching cert)",
+            &["reason"]
+        )
+        .expect("register parapet_tls_sni_no_cert_total"),
     })
+}
+
+pub fn tls_no_cert_inc(reason: &str) {
+    metrics().tls_no_cert.with_label_values(&[reason]).inc();
 }
 
 pub fn backend_read_add(addr: &str, n: u64) {
