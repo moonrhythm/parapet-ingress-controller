@@ -23,6 +23,41 @@ pub struct LoadedCert {
     dns_names: Vec<String>,
     pub cert_pem: Vec<u8>,
     pub key_pem: Vec<u8>,
+    /// Full chain + key parsed once from the PEM and cached, so the TLS handshake
+    /// path doesn't re-parse per connection (a CPU cost under handshake floods).
+    /// Proxy-only — the parsed types are OpenSSL, absent from the pure core.
+    #[cfg(feature = "proxy")]
+    parsed: std::sync::OnceLock<Option<ParsedCert>>,
+}
+
+/// A [`LoadedCert`]'s chain + private key, parsed and ready to install on a
+/// handshake. `chain` is leaf-first (`chain[0]`) followed by any intermediates —
+/// all must be sent so clients can build the path to a trusted root. See
+/// [`LoadedCert::parsed`].
+#[cfg(feature = "proxy")]
+pub struct ParsedCert {
+    pub chain: Vec<pingora::tls::x509::X509>,
+    pub key: pingora::tls::pkey::PKey<pingora::tls::pkey::Private>,
+}
+
+#[cfg(feature = "proxy")]
+impl LoadedCert {
+    /// Lazily parse and cache the full chain + key. Returns `None` if the PEM has
+    /// no certificate or the key fails to parse (e.g. a missing/invalid
+    /// `tls.key`); the negative result is cached too, so a broken secret isn't
+    /// re-parsed on every handshake.
+    pub fn parsed(&self) -> Option<&ParsedCert> {
+        self.parsed
+            .get_or_init(|| {
+                let chain = pingora::tls::x509::X509::stack_from_pem(&self.cert_pem).ok()?;
+                if chain.is_empty() {
+                    return None;
+                }
+                let key = pingora::tls::pkey::PKey::private_key_from_pem(&self.key_pem).ok()?;
+                Some(ParsedCert { chain, key })
+            })
+            .as_ref()
+    }
 }
 
 impl HasDnsNames for LoadedCert {
@@ -41,6 +76,8 @@ impl LoadedCert {
             dns_names,
             cert_pem,
             key_pem,
+            #[cfg(feature = "proxy")]
+            parsed: std::sync::OnceLock::new(),
         })
     }
 }
@@ -193,5 +230,29 @@ mod tests {
             "empty SNI (no SNI / IP connect) misses"
         );
         assert!(t.get("10.0.0.5").is_none(), "IP-literal SNI misses");
+    }
+
+    #[cfg(feature = "proxy")]
+    #[test]
+    fn parsed_caches_full_chain_and_rejects_bad_key() {
+        // tls.crt is a fullchain (leaf + intermediate); both must be cached so the
+        // resolver can send the whole chain. Use a second self-signed cert as a
+        // stand-in intermediate (parsing doesn't verify the chain links).
+        let leaf = rcgen::generate_simple_self_signed(vec!["x.example.com".into()]).unwrap();
+        let intermediate = rcgen::generate_simple_self_signed(vec!["ca.example".into()]).unwrap();
+        let mut fullchain = leaf.cert.pem().into_bytes();
+        fullchain.extend_from_slice(intermediate.cert.pem().as_bytes());
+
+        let lc =
+            LoadedCert::from_pem(fullchain, leaf.key_pair.serialize_pem().into_bytes()).unwrap();
+        let p1 = lc.parsed().expect("valid chain/key parses");
+        assert_eq!(p1.chain.len(), 2, "leaf + intermediate both cached");
+        let p2 = lc.parsed().expect("cached on second call");
+        assert!(std::ptr::eq(p1, p2), "same cached ParsedCert is reused");
+
+        // cert present but key missing -> parsed() is None (and caches the miss)
+        let only = rcgen::generate_simple_self_signed(vec!["y.example.com".into()]).unwrap();
+        let no_key = LoadedCert::from_pem(only.cert.pem().into_bytes(), Vec::new()).unwrap();
+        assert!(no_key.parsed().is_none(), "missing tls.key -> None");
     }
 }
