@@ -42,7 +42,8 @@ WORKDIR /src
 COPY . .
 
 # Optional CPU baseline, mirroring the Go image's GOAMD64 v3/v1 split. CI passes
-# e.g. `--build-arg TARGET_CPU=x86-64-v3` (or `x86-64-v1` for the compat image).
+# e.g. `--build-arg TARGET_CPU=x86-64-v3` (or `x86-64` — the baseline level, Go's
+# GOAMD64=v1 equivalent — for the compat image; LLVM has no "x86-64-v1").
 # Left empty by default for a portable, generic-baseline build.
 ARG TARGET_CPU=
 ENV CARGO_TERM_COLOR=never

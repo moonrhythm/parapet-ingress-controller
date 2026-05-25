@@ -46,13 +46,14 @@ jobs:
           tags: |
             us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:rust-${{ github.sha }}
             asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:rust-${{ github.sha }}
-      # compatibility image: x86-64-v1
+      # compatibility image: x86-64 baseline (Go's GOAMD64=v1 equivalent;
+      # LLVM has no "x86-64-v1" — the baseline microarch level is just "x86-64")
       - uses: docker/build-push-action@v6
         with:
           context: rust
           provenance: false
           build-args: |
-            TARGET_CPU=x86-64-v1
+            TARGET_CPU=x86-64
           push: true
           cache-from: type=gha,scope=rust-v1
           cache-to: type=gha,mode=max,scope=rust-v1
