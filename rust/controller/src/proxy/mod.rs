@@ -325,6 +325,7 @@ impl ProxyHttp for Proxy {
 
         match decision {
             Decision::NotFound => {
+                metrics::rejected_inc("no_route");
                 respond_status(session, 404).await?;
                 Ok(true)
             }
@@ -619,6 +620,7 @@ impl Proxy {
             let allowed = client_ip(session)
                 .is_some_and(|ip| cfg.allow_remote.iter().any(|net| net.contains(&ip)));
             if !allowed {
+                metrics::rejected_inc("forbidden");
                 respond_status(session, 403).await?;
                 return Ok(true);
             }
@@ -645,12 +647,14 @@ impl Proxy {
             || over(1, cfg.ratelimit_m, Duration::from_secs(60))
             || over(2, cfg.ratelimit_h, Duration::from_secs(3600))
         {
+            metrics::rejected_inc("rate_limit");
             respond_status(session, 429).await?;
             return Ok(true);
         }
 
         if let Some(limit) = cfg.body_limit {
             if content_length(session).is_some_and(|cl| cl > limit as u64) {
+                metrics::rejected_inc("body_limit");
                 respond_status(session, 413).await?;
                 return Ok(true);
             }
@@ -658,6 +662,7 @@ impl Proxy {
 
         if let Some(ba) = &cfg.basic_auth {
             if !check_basic_auth(session, ba) {
+                metrics::rejected_inc("unauthorized");
                 let mut resp = ResponseHeader::build(401, None)?;
                 resp.insert_header("WWW-Authenticate", "Basic realm=\"Restricted\"")?;
                 session.write_response_header(Box::new(resp), true).await?;
@@ -670,6 +675,7 @@ impl Proxy {
             match forward_auth(session, fa, host).await {
                 ForwardAuthOutcome::Allow(headers) => ctx.auth_response_headers = headers,
                 ForwardAuthOutcome::Deny(code, body) => {
+                    metrics::rejected_inc("unauthorized");
                     respond_with_body(session, code, body).await?;
                     return Ok(true);
                 }
@@ -685,6 +691,7 @@ impl Proxy {
 
     async fn reject_overloaded(&self, session: &mut Session, ctx: &mut Ctx) -> Result<bool> {
         metrics::host_ratelimit_inc(&ctx.metric_host);
+        metrics::rejected_inc("host_limit");
         ctx.skip_log = true; // ratelimited responses aren't access-logged (Go order)
         respond_status(session, 503).await?;
         Ok(true)

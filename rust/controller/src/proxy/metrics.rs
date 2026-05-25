@@ -27,6 +27,7 @@ struct Metrics {
     net_request: IntCounter,
     net_response: IntCounter,
     tls_no_cert: IntCounterVec,
+    rejected: IntCounterVec,
 }
 
 fn metrics() -> &'static Metrics {
@@ -114,11 +115,28 @@ fn metrics() -> &'static Metrics {
             &["reason"]
         )
         .expect("register parapet_tls_sni_no_cert_total"),
+        // Requests rejected at the edge before reaching a backend. Labeled only by
+        // `reason` (a bounded set) and NOT by host, so an abusive flood can't grow
+        // its cardinality — unlike `parapet_requests`, this stays safe to scrape
+        // under attack.
+        rejected: register_int_counter_vec!(
+            "parapet_rejected_requests",
+            "Requests rejected at the edge, by reason",
+            &["reason"]
+        )
+        .expect("register parapet_rejected_requests"),
     })
 }
 
 pub fn tls_no_cert_inc(reason: &str) {
     metrics().tls_no_cert.with_label_values(&[reason]).inc();
+}
+
+/// Record an edge rejection. `reason` is a small bounded set (`no_route`,
+/// `host_limit`, `rate_limit`, `body_limit`, `forbidden`, `unauthorized`) — never
+/// host-derived — so this metric's cardinality can't be driven by request input.
+pub fn rejected_inc(reason: &str) {
+    metrics().rejected.with_label_values(&[reason]).inc();
 }
 
 pub fn backend_read_add(addr: &str, n: u64) {
