@@ -26,7 +26,7 @@ use pingora::modules::http::HttpModules;
 use pingora::protocols::ALPN;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
-use pingora::{Error, ErrorType, Result};
+use pingora::{Error, ErrorSource, ErrorType, Result};
 use serde_json::{Map, Value};
 
 use self::limit::{Guard, HostConcurrency};
@@ -476,12 +476,18 @@ impl ProxyHttp for Proxy {
         if let Some(addr) = ctx.backend_conn_addr.take() {
             metrics::backend_conn_dec(&addr);
         }
-        // surface the upstream failure cause (otherwise only a bare 502 is visible)
+        // Surface upstream/internal failures (otherwise only a bare 502 is
+        // visible). Skip Downstream-source errors: those are client-caused — a
+        // client disconnecting before the response body completes (e.g. a
+        // notification/SSE/long-poll client closing its stream) is expected and
+        // high-volume, not an actionable proxy error.
         if let Some(e) = e {
-            eprintln!(
-                "[proxy-error] host={} target={:?} proto={} tries={} err={}",
-                ctx.host, ctx.last_addr, ctx.protocol, ctx.tries, e
-            );
+            if should_log_proxy_error(e) {
+                eprintln!(
+                    "[proxy-error] host={} target={:?} proto={} tries={} err={}",
+                    ctx.host, ctx.last_addr, ctx.protocol, ctx.tries, e
+                );
+            }
         }
         if ctx.skip_log {
             return;
@@ -711,6 +717,15 @@ fn effective_protocol(ctx: &Ctx) -> EffProto {
         },
         _ => EffProto::Http,
     }
+}
+
+/// Whether a proxy error is worth logging as `[proxy-error]`. Downstream-source
+/// errors are client-caused — most commonly a client disconnecting before the
+/// response body completes (a notification/SSE/long-poll client closing its
+/// stream) — which is expected and high-volume, not an actionable proxy error.
+/// Only upstream/internal failures are surfaced.
+fn should_log_proxy_error(e: &Error) -> bool {
+    !matches!(e.esource, ErrorSource::Downstream)
 }
 
 /// True when the response Content-Type is `text/event-stream` (SSE), ignoring
@@ -1051,6 +1066,19 @@ mod tests {
         assert!(matches!(effective_protocol(&ctx), EffProto::Https));
         ctx.config = Some(Arc::new(RouteConfig::default())); // default Http
         assert!(matches!(effective_protocol(&ctx), EffProto::Http));
+    }
+
+    #[test]
+    fn proxy_error_logging_skips_client_disconnects() {
+        // Downstream (client-caused) errors — e.g. a client closing mid-response
+        // — must NOT be logged as [proxy-error]; upstream/internal must be.
+        let mut e = Error::explain(ErrorType::ConnectionClosed, "client closed");
+        e.esource = ErrorSource::Downstream;
+        assert!(!should_log_proxy_error(&e));
+        e.esource = ErrorSource::Upstream;
+        assert!(should_log_proxy_error(&e));
+        e.esource = ErrorSource::Internal;
+        assert!(should_log_proxy_error(&e));
     }
 
     #[test]
