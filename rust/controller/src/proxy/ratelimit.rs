@@ -64,4 +64,16 @@ mod tests {
         std::thread::sleep(Duration::from_millis(120));
         assert!(fw.allow("r", 0, 2, p)); // window elapsed -> allowed again
     }
+
+    #[test]
+    fn windows_are_independent_per_id() {
+        // the same route is counted separately for s/m/h (ids 0/1/2), so
+        // exhausting the per-second window must not affect the per-minute one.
+        let fw = FixedWindows::new();
+        let p = Duration::from_secs(60);
+        assert!(fw.allow("r", 0, 1, p));
+        assert!(!fw.allow("r", 0, 1, p)); // id 0 exhausted
+        assert!(fw.allow("r", 1, 1, p)); // id 1 independent -> still allowed
+        assert!(fw.allow("r", 2, 1, p)); // id 2 independent -> still allowed
+    }
 }

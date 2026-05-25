@@ -1,3 +1,4 @@
 /target
 # machine-specific (mac Homebrew OpenSSL path); CI/Docker resolve TLS via pkg-config
 /.cargo/config.toml
+/bench/results-*/

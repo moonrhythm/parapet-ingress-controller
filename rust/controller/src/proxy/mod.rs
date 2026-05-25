@@ -356,34 +356,7 @@ impl ProxyHttp for Proxy {
             }
         }
 
-        let mut path = upstream.uri.path().to_string();
-        let mut query = upstream.uri.query().map(str::to_string);
-
-        if let Some(up) = &cfg.upstream_path {
-            path = single_joining_slash(&up.path, &path);
-            let existing = query.clone().unwrap_or_default();
-            let merged = if up.raw_query.is_empty() || existing.is_empty() {
-                format!("{}{}", up.raw_query, existing)
-            } else {
-                format!("{}&{}", up.raw_query, existing)
-            };
-            query = if merged.is_empty() {
-                None
-            } else {
-                Some(merged)
-            };
-        }
-
-        if let Some(prefix) = &cfg.strip_prefix {
-            if let Some(rest) = path.strip_prefix(prefix.as_str()) {
-                path = if rest.is_empty() {
-                    "/".to_string()
-                } else {
-                    rest.to_string()
-                };
-            }
-        }
-
+        let (path, query) = rewrite_path_query(upstream.uri.path(), upstream.uri.query(), &cfg);
         let pq = match &query {
             Some(q) => format!("{path}?{q}"),
             None => path,
@@ -801,8 +774,13 @@ fn header_str<'a>(session: &'a Session, name: &str) -> Option<&'a str> {
 }
 
 fn check_basic_auth(session: &Session, ba: &BasicAuth) -> bool {
-    let Some(token) = header_str(session, "authorization").and_then(|h| h.strip_prefix("Basic "))
-    else {
+    basic_auth_ok(header_str(session, "authorization"), ba)
+}
+
+/// Validate an `Authorization: Basic <b64(user:pass)>` header value against the
+/// configured credentials (constant-time compare). Pure, so it's unit-testable.
+fn basic_auth_ok(authorization: Option<&str>, ba: &BasicAuth) -> bool {
+    let Some(token) = authorization.and_then(|h| h.strip_prefix("Basic ")) else {
         return false;
     };
     let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(token.trim()) else {
@@ -815,6 +793,46 @@ fn check_basic_auth(session: &Session, ba: &BasicAuth) -> bool {
         return false;
     };
     ct_eq(user.as_bytes(), ba.user.as_bytes()) & ct_eq(pass.as_bytes(), ba.pass.as_bytes())
+}
+
+/// Compute the upstream path + query from the incoming request and route config:
+/// prepend `upstream-path` (merging its query), then strip `strip-prefix`. Pure
+/// so the path-rewriting rules (a frequent source of prod 404s) are unit-tested;
+/// the caller splices the result into the URI preserving scheme + authority.
+fn rewrite_path_query(
+    path: &str,
+    query: Option<&str>,
+    cfg: &RouteConfig,
+) -> (String, Option<String>) {
+    let mut path = path.to_string();
+    let mut query = query.map(str::to_string);
+
+    if let Some(up) = &cfg.upstream_path {
+        path = single_joining_slash(&up.path, &path);
+        let existing = query.clone().unwrap_or_default();
+        let merged = if up.raw_query.is_empty() || existing.is_empty() {
+            format!("{}{}", up.raw_query, existing)
+        } else {
+            format!("{}&{}", up.raw_query, existing)
+        };
+        query = if merged.is_empty() {
+            None
+        } else {
+            Some(merged)
+        };
+    }
+
+    if let Some(prefix) = &cfg.strip_prefix {
+        if let Some(rest) = path.strip_prefix(prefix.as_str()) {
+            path = if rest.is_empty() {
+                "/".to_string()
+            } else {
+                rest.to_string()
+            };
+        }
+    }
+
+    (path, query)
 }
 
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -951,5 +969,111 @@ mod tests {
         assert!(matches!(TrustProxy::parse("false"), TrustProxy::None));
         // unknown token is ignored, not treated as a CIDR
         assert!(matches!(TrustProxy::parse("nonsense"), TrustProxy::Cidrs(v) if v.is_empty()));
+    }
+
+    use crate::config::UpstreamPath;
+
+    #[test]
+    fn rewrite_path_query_passthrough_when_no_annotations() {
+        let cfg = RouteConfig::default();
+        assert_eq!(
+            rewrite_path_query("/api/x", Some("a=1"), &cfg),
+            ("/api/x".to_string(), Some("a=1".to_string()))
+        );
+        assert_eq!(rewrite_path_query("/", None, &cfg), ("/".to_string(), None));
+    }
+
+    #[test]
+    fn rewrite_path_query_strip_prefix() {
+        let cfg = RouteConfig {
+            strip_prefix: Some("/api".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(rewrite_path_query("/api/users", None, &cfg).0, "/users");
+        assert_eq!(rewrite_path_query("/api", None, &cfg).0, "/"); // exact -> root
+        assert_eq!(rewrite_path_query("/other", None, &cfg).0, "/other"); // no match
+    }
+
+    #[test]
+    fn rewrite_path_query_upstream_path_merges_query() {
+        let cfg = RouteConfig {
+            upstream_path: Some(UpstreamPath {
+                path: "/v2".to_string(),
+                raw_query: "k=1".to_string(),
+            }),
+            ..Default::default()
+        };
+        let (p, q) = rewrite_path_query("/users", Some("a=2"), &cfg);
+        assert_eq!(p, "/v2/users");
+        assert_eq!(q.as_deref(), Some("k=1&a=2")); // upstream query first
+        assert_eq!(
+            rewrite_path_query("/users", None, &cfg).1.as_deref(),
+            Some("k=1")
+        );
+    }
+
+    #[test]
+    fn rewrite_path_query_upstream_path_then_strip_prefix() {
+        // upstream-path prepends, strip-prefix removes it again (order matters)
+        let cfg = RouteConfig {
+            upstream_path: Some(UpstreamPath {
+                path: "/backend".to_string(),
+                raw_query: String::new(),
+            }),
+            strip_prefix: Some("/backend".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(rewrite_path_query("/x", None, &cfg).0, "/x");
+    }
+
+    #[test]
+    fn basic_auth_accepts_valid_and_rejects_everything_else() {
+        let ba = BasicAuth {
+            user: "admin".to_string(),
+            pass: "s3cret".to_string(),
+        };
+        let enc = |s: &str| {
+            format!(
+                "Basic {}",
+                base64::engine::general_purpose::STANDARD.encode(s)
+            )
+        };
+        assert!(basic_auth_ok(Some(&enc("admin:s3cret")), &ba));
+        assert!(!basic_auth_ok(Some(&enc("admin:wrong")), &ba)); // wrong pass
+        assert!(!basic_auth_ok(Some(&enc("other:s3cret")), &ba)); // wrong user
+        assert!(!basic_auth_ok(Some(&enc("noseparator")), &ba)); // no ':'
+        assert!(!basic_auth_ok(None, &ba)); // missing header
+        assert!(!basic_auth_ok(Some("Bearer xyz"), &ba)); // wrong scheme
+        assert!(!basic_auth_ok(Some("Basic !!!notbase64"), &ba)); // bad base64
+    }
+
+    #[test]
+    fn effective_protocol_resolution() {
+        let mut ctx = Ctx {
+            protocol: "h2c".to_string(),
+            ..Default::default()
+        };
+        assert!(matches!(effective_protocol(&ctx), EffProto::H2c));
+        ctx.protocol = "https".to_string();
+        assert!(matches!(effective_protocol(&ctx), EffProto::Https));
+        ctx.protocol = "http".to_string();
+        assert!(matches!(effective_protocol(&ctx), EffProto::Http));
+        // empty annotation falls back to the route's upstream-protocol
+        ctx.protocol = String::new();
+        ctx.config = Some(Arc::new(RouteConfig {
+            upstream_protocol: UpstreamProtocol::Https,
+            ..Default::default()
+        }));
+        assert!(matches!(effective_protocol(&ctx), EffProto::Https));
+        ctx.config = Some(Arc::new(RouteConfig::default())); // default Http
+        assert!(matches!(effective_protocol(&ctx), EffProto::Http));
+    }
+
+    #[test]
+    fn ct_eq_is_correct() {
+        assert!(ct_eq(b"abc", b"abc"));
+        assert!(ct_eq(b"", b""));
+        assert!(!ct_eq(b"abc", b"abd"));
+        assert!(!ct_eq(b"abc", b"ab")); // different lengths
     }
 }
