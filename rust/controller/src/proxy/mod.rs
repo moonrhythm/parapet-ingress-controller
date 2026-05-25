@@ -27,13 +27,11 @@ use pingora::protocols::ALPN;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 use pingora::{Error, ErrorSource, ErrorType, Result};
-use serde_json::{Map, Value};
+use serde::Serialize;
 
 use self::limit::{Guard, HostConcurrency};
-use crate::config::{
-    single_joining_slash, BasicAuth, ForwardAuth, Hsts, RouteConfig, UpstreamProtocol,
-};
-use crate::reconcile::{RouteKind, RouteMeta};
+use crate::config::{single_joining_slash, BasicAuth, ForwardAuth, Hsts, RouteConfig};
+use crate::reconcile::{RouteKind, RouteMeta, UpstreamScheme};
 use crate::router::Match;
 use crate::shared::Shared;
 
@@ -121,7 +119,7 @@ impl Proxy {
 pub struct Ctx {
     // routing / upstream
     target: Option<String>,
-    protocol: String,
+    scheme: UpstreamScheme,
     config: Option<Arc<RouteConfig>>,
     tries: usize,
     last_addr: Option<String>,
@@ -263,9 +261,9 @@ impl ProxyHttp for Proxy {
                     RouteKind::Redirect { status, target } => {
                         Decision::Redirect(*status, target.clone())
                     }
-                    RouteKind::Service { target, protocol } => {
+                    RouteKind::Service { target, scheme } => {
                         ctx.target = Some(target.clone());
-                        ctx.protocol = protocol.clone();
+                        ctx.scheme = *scheme;
                         ctx.config = Some(entry.config.clone());
                         ctx.meta = entry.meta.clone();
                         ctx.pattern = entry.pattern.clone();
@@ -294,13 +292,12 @@ impl ProxyHttp for Proxy {
             .as_deref()
             .ok_or_else(|| Error::explain(ErrorType::HTTPStatus(404), "no route"))?;
 
-        let addr = self.shared.route_table.lookup(target);
-        if addr.is_empty() {
+        let Some(addr) = self.shared.route_table.lookup(target) else {
             return Err(Error::explain(
                 ErrorType::HTTPStatus(503),
                 "service unavailable",
             ));
-        }
+        };
         ctx.last_addr = Some(addr.clone());
 
         // backend in-flight gauge: move it to the new addr on a retry; `logging`
@@ -313,20 +310,20 @@ impl ProxyHttp for Proxy {
             ctx.backend_conn_addr = Some(addr.clone());
         }
 
-        let peer = match effective_protocol(ctx) {
-            EffProto::H2c => {
+        let peer = match ctx.scheme {
+            UpstreamScheme::H2c => {
                 let mut p = HttpPeer::new(addr.as_str(), false, String::new());
                 p.options.alpn = ALPN::H2;
                 p
             }
-            EffProto::Https => {
+            UpstreamScheme::Https => {
                 let mut p = HttpPeer::new(addr.as_str(), true, String::new());
                 p.options.alpn = ALPN::H2H1;
                 p.options.verify_cert = false;
                 p.options.verify_hostname = false;
                 p
             }
-            EffProto::Http => {
+            UpstreamScheme::Http => {
                 let mut p = HttpPeer::new(addr.as_str(), false, String::new());
                 p.options.alpn = ALPN::H1;
                 p
@@ -484,8 +481,8 @@ impl ProxyHttp for Proxy {
         if let Some(e) = e {
             if should_log_proxy_error(e) {
                 eprintln!(
-                    "[proxy-error] host={} target={:?} proto={} tries={} err={}",
-                    ctx.host, ctx.last_addr, ctx.protocol, ctx.tries, e
+                    "[proxy-error] host={} target={:?} proto={:?} tries={} err={}",
+                    ctx.host, ctx.last_addr, ctx.scheme, ctx.tries, e
                 );
             }
         }
@@ -516,33 +513,30 @@ impl ProxyHttp for Proxy {
 
         if self.log_enabled {
             let body_sent = session.body_bytes_sent() as i64;
-            let mut m = Map::new();
-            put_str(&mut m, "timestamp", &ctx.timestamp);
-            put_str(&mut m, "host", &ctx.host);
-            put_str(&mut m, "requestMethod", &ctx.method);
-            put_str(&mut m, "requestUrl", &ctx.request_url);
-            if ctx.request_body_size > 0 {
-                m.insert("requestBodySize".into(), ctx.request_body_size.into());
+            let log = AccessLog {
+                duration: duration.as_nanos() as i64,
+                duration_human: format!("{duration:?}"),
+                forwarded_for: &ctx.forwarded_for,
+                host: &ctx.host,
+                ingress: &ctx.meta.ingress_name,
+                namespace: &ctx.meta.ingress_namespace,
+                real_ip: &ctx.real_ip,
+                referer: &ctx.referer,
+                remote_ip: &ctx.remote_ip,
+                request_body_size: (ctx.request_body_size > 0).then_some(ctx.request_body_size),
+                request_method: &ctx.method,
+                request_url: &ctx.request_url,
+                response_body_size: (body_sent > 0).then_some(body_sent),
+                service_name: &ctx.meta.service_name,
+                service_target: ctx.last_addr.as_deref(),
+                service_type: &ctx.meta.service_type,
+                status,
+                timestamp: &ctx.timestamp,
+                user_agent: &ctx.user_agent,
+            };
+            if let Ok(line) = serde_json::to_string(&log) {
+                println!("{line}");
             }
-            put_str(&mut m, "referer", &ctx.referer);
-            put_str(&mut m, "userAgent", &ctx.user_agent);
-            put_str(&mut m, "remoteIp", &ctx.remote_ip);
-            put_str(&mut m, "realIp", &ctx.real_ip);
-            put_str(&mut m, "forwardedFor", &ctx.forwarded_for);
-            m.insert("duration".into(), (duration.as_nanos() as i64).into());
-            m.insert("durationHuman".into(), Value::from(format!("{duration:?}")));
-            m.insert("status".into(), status.into());
-            if body_sent > 0 {
-                m.insert("responseBodySize".into(), body_sent.into());
-            }
-            put_str(&mut m, "namespace", &ctx.meta.ingress_namespace);
-            put_str(&mut m, "ingress", &ctx.meta.ingress_name);
-            put_str(&mut m, "serviceName", &ctx.meta.service_name);
-            put_str(&mut m, "serviceType", &ctx.meta.service_type);
-            if let Some(t) = &ctx.last_addr {
-                put_str(&mut m, "serviceTarget", t);
-            }
-            println!("{}", Value::Object(m));
         }
     }
 }
@@ -701,24 +695,6 @@ impl Ctx {
     }
 }
 
-enum EffProto {
-    Http,
-    Https,
-    H2c,
-}
-
-fn effective_protocol(ctx: &Ctx) -> EffProto {
-    match ctx.protocol.as_str() {
-        "h2c" => EffProto::H2c,
-        "https" => EffProto::Https,
-        "" => match ctx.config.as_ref().map(|c| &c.upstream_protocol) {
-            Some(UpstreamProtocol::Https) => EffProto::Https,
-            _ => EffProto::Http,
-        },
-        _ => EffProto::Http,
-    }
-}
-
 /// Whether a proxy error is worth logging as `[proxy-error]`. Downstream-source
 /// errors are client-caused — most commonly a client disconnecting before the
 /// response body completes (a notification/SSE/long-poll client closing its
@@ -845,10 +821,48 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn put_str(m: &mut Map<String, Value>, key: &str, value: &str) {
-    if !value.is_empty() {
-        m.insert(key.to_string(), Value::from(value));
-    }
+/// One JSON access-log line, serialized once per request. Fields are declared
+/// in the alphabetical key order the previous `serde_json::Map` (a `BTreeMap`)
+/// emitted, so the log output stays byte-identical. Empty strings and unset
+/// sizes/targets are omitted, matching the Go controller's access log.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccessLog<'a> {
+    duration: i64,
+    duration_human: String,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    forwarded_for: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    host: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    ingress: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    namespace: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    real_ip: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    referer: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    remote_ip: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_body_size: Option<i64>,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    request_method: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    request_url: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_body_size: Option<i64>,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    service_name: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    service_target: Option<&'a str>,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    service_type: &'a str,
+    status: u16,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    timestamp: &'a str,
+    #[serde(skip_serializing_if = "str::is_empty")]
+    user_agent: &'a str,
 }
 
 enum ForwardAuthOutcome {
@@ -1047,28 +1061,6 @@ mod tests {
     }
 
     #[test]
-    fn effective_protocol_resolution() {
-        let mut ctx = Ctx {
-            protocol: "h2c".to_string(),
-            ..Default::default()
-        };
-        assert!(matches!(effective_protocol(&ctx), EffProto::H2c));
-        ctx.protocol = "https".to_string();
-        assert!(matches!(effective_protocol(&ctx), EffProto::Https));
-        ctx.protocol = "http".to_string();
-        assert!(matches!(effective_protocol(&ctx), EffProto::Http));
-        // empty annotation falls back to the route's upstream-protocol
-        ctx.protocol = String::new();
-        ctx.config = Some(Arc::new(RouteConfig {
-            upstream_protocol: UpstreamProtocol::Https,
-            ..Default::default()
-        }));
-        assert!(matches!(effective_protocol(&ctx), EffProto::Https));
-        ctx.config = Some(Arc::new(RouteConfig::default())); // default Http
-        assert!(matches!(effective_protocol(&ctx), EffProto::Http));
-    }
-
-    #[test]
     fn proxy_error_logging_skips_client_disconnects() {
         // Downstream (client-caused) errors — e.g. a client closing mid-response
         // — must NOT be logged as [proxy-error]; upstream/internal must be.
@@ -1087,5 +1079,64 @@ mod tests {
         assert!(ct_eq(b"", b""));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab")); // different lengths
+    }
+
+    #[test]
+    fn access_log_serializes_in_order_with_all_fields() {
+        let log = AccessLog {
+            duration: 1500,
+            duration_human: "1.5µs".to_string(),
+            forwarded_for: "1.2.3.4",
+            host: "example.com",
+            ingress: "ing",
+            namespace: "default",
+            real_ip: "1.2.3.4",
+            referer: "https://ref/",
+            remote_ip: "5.6.7.8",
+            request_body_size: Some(10),
+            request_method: "GET",
+            request_url: "https://example.com/",
+            response_body_size: Some(20),
+            service_name: "web",
+            service_target: Some("10.0.0.1:8080"),
+            service_type: "ClusterIP",
+            status: 200,
+            timestamp: "2026-05-25T00:00:00Z",
+            user_agent: "curl",
+        };
+        assert_eq!(
+            serde_json::to_string(&log).unwrap(),
+            r#"{"duration":1500,"durationHuman":"1.5µs","forwardedFor":"1.2.3.4","host":"example.com","ingress":"ing","namespace":"default","realIp":"1.2.3.4","referer":"https://ref/","remoteIp":"5.6.7.8","requestBodySize":10,"requestMethod":"GET","requestUrl":"https://example.com/","responseBodySize":20,"serviceName":"web","serviceTarget":"10.0.0.1:8080","serviceType":"ClusterIP","status":200,"timestamp":"2026-05-25T00:00:00Z","userAgent":"curl"}"#
+        );
+    }
+
+    #[test]
+    fn access_log_omits_empty_and_unset_fields() {
+        // empty strings, unset sizes and target are dropped; duration/status stay
+        let log = AccessLog {
+            duration: 42,
+            duration_human: "42ns".to_string(),
+            forwarded_for: "",
+            host: "",
+            ingress: "",
+            namespace: "",
+            real_ip: "",
+            referer: "",
+            remote_ip: "",
+            request_body_size: None,
+            request_method: "",
+            request_url: "",
+            response_body_size: None,
+            service_name: "",
+            service_target: None,
+            service_type: "",
+            status: 404,
+            timestamp: "",
+            user_agent: "",
+        };
+        assert_eq!(
+            serde_json::to_string(&log).unwrap(),
+            r#"{"duration":42,"durationHuman":"42ns","status":404}"#
+        );
     }
 }

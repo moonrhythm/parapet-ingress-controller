@@ -12,7 +12,7 @@ use k8s_openapi::api::networking::v1::{Ingress, IngressServiceBackend};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 
 use crate::cert::LoadedCert;
-use crate::config::RouteConfig;
+use crate::config::{RouteConfig, UpstreamProtocol};
 use crate::route::Rrlb;
 use crate::router::Router;
 
@@ -39,10 +39,42 @@ pub struct RouteEntry {
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum RouteKind {
-    /// Proxy to a service: `target` is the service DNS `host:port`.
-    Service { target: String, protocol: String },
+    /// Proxy to a service: `target` is the service DNS `host:port`, `scheme` is
+    /// the resolved upstream protocol (see [`UpstreamScheme`]).
+    Service {
+        target: String,
+        scheme: UpstreamScheme,
+    },
     /// Host-level redirect from a `redirect` annotation rule.
     Redirect { status: u16, target: String },
+}
+
+/// The wire protocol the proxy uses to reach an upstream, resolved once at
+/// reconcile time from the service port's `appProtocol` and the route's
+/// `upstream-protocol` annotation (see [`resolve_scheme`]). Replaces the Go
+/// controller's request-time string matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UpstreamScheme {
+    #[default]
+    Http,
+    Https,
+    H2c,
+}
+
+/// Resolve the effective upstream scheme. The service port's `appProtocol`
+/// (`app_protocol`) wins when it names a known scheme; an unset `appProtocol`
+/// falls back to the `upstream-protocol` annotation; anything else is plain
+/// HTTP. Mirrors the Go controller's resolution order exactly.
+pub fn resolve_scheme(app_protocol: &str, annotation: &UpstreamProtocol) -> UpstreamScheme {
+    match app_protocol {
+        "h2c" => UpstreamScheme::H2c,
+        "https" => UpstreamScheme::Https,
+        "" => match annotation {
+            UpstreamProtocol::Https => UpstreamScheme::Https,
+            UpstreamProtocol::Http => UpstreamScheme::Http,
+        },
+        _ => UpstreamScheme::Http,
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Default, Clone)]
@@ -53,18 +85,19 @@ pub struct RouteMeta {
     pub service_type: String,
 }
 
-fn ingress_class(ing: &Ingress) -> String {
-    if let Some(spec) = &ing.spec {
-        if let Some(c) = &spec.ingress_class_name {
-            return c.clone();
-        }
+fn ingress_class(ing: &Ingress) -> &str {
+    if let Some(c) = ing
+        .spec
+        .as_ref()
+        .and_then(|s| s.ingress_class_name.as_deref())
+    {
+        return c;
     }
-    if let Some(a) = &ing.metadata.annotations {
-        if let Some(c) = a.get("kubernetes.io/ingress.class") {
-            return c.clone();
-        }
-    }
-    String::new()
+    ing.metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("kubernetes.io/ingress.class"))
+        .map_or("", String::as_str)
 }
 
 /// Resolve the backend's port to `(appProtocol, portNumber)`.
@@ -110,7 +143,7 @@ fn register(
     path: &str,
     path_type: &str,
     target: &str,
-    protocol: &str,
+    scheme: UpstreamScheme,
     config: &Arc<RouteConfig>,
     meta: &RouteMeta,
 ) {
@@ -121,7 +154,7 @@ fn register(
                 pattern,
                 kind: RouteKind::Service {
                     target: target.to_string(),
-                    protocol: protocol.to_string(),
+                    scheme,
                 },
                 config: config.clone(),
                 meta: meta.clone(),
@@ -214,6 +247,7 @@ pub fn build_router(
                 }
 
                 let target = build_host_port(ns, &backend.name, port_number);
+                let scheme = resolve_scheme(&protocol, &cfg.upstream_protocol);
                 let meta = RouteMeta {
                     ingress_namespace: ns.to_string(),
                     ingress_name: ing.metadata.name.clone().unwrap_or_default(),
@@ -230,7 +264,7 @@ pub fn build_router(
                     &path,
                     &p.path_type,
                     &target,
-                    &protocol,
+                    scheme,
                     &cfg,
                     &meta,
                 );
@@ -342,6 +376,20 @@ mod tests {
     use std::collections::BTreeMap;
 
     const CLASS: &str = "parapet";
+
+    #[test]
+    fn resolve_scheme_matches_go_order() {
+        use UpstreamProtocol::{Http, Https};
+        // appProtocol names a known scheme -> wins regardless of annotation
+        assert_eq!(resolve_scheme("h2c", &Http), UpstreamScheme::H2c);
+        assert_eq!(resolve_scheme("h2c", &Https), UpstreamScheme::H2c);
+        assert_eq!(resolve_scheme("https", &Http), UpstreamScheme::Https);
+        // unset appProtocol -> falls back to the upstream-protocol annotation
+        assert_eq!(resolve_scheme("", &Http), UpstreamScheme::Http);
+        assert_eq!(resolve_scheme("", &Https), UpstreamScheme::Https);
+        // any other appProtocol -> plain HTTP, ignoring the annotation
+        assert_eq!(resolve_scheme("grpc", &Https), UpstreamScheme::Http);
+    }
 
     fn meta(ns: &str, name: &str) -> ObjectMeta {
         ObjectMeta {
@@ -524,10 +572,10 @@ mod tests {
         table.set_host_routes(build_host_routes(&eps.iter().collect::<Vec<_>>()));
 
         assert_eq!(
-            table.lookup("web.default.svc.cluster.local:80"),
-            "10.0.0.1:8080"
+            table.lookup("web.default.svc.cluster.local:80").as_deref(),
+            Some("10.0.0.1:8080")
         );
-        assert_eq!(table.lookup("missing.default.svc.cluster.local:80"), "");
+        assert_eq!(table.lookup("missing.default.svc.cluster.local:80"), None);
     }
 
     #[test]
@@ -540,7 +588,7 @@ mod tests {
         let table = crate::route::Table::new();
         table.set_port_routes(build_port_routes(&svcs.iter().collect::<Vec<_>>()));
         table.set_host_routes(build_host_routes(&[&ep]));
-        assert_eq!(table.lookup("web.default.svc.cluster.local:80"), "");
+        assert_eq!(table.lookup("web.default.svc.cluster.local:80"), None);
     }
 
     // --- TestReloadSecret ---
@@ -628,7 +676,7 @@ mod tests {
                     e.kind,
                     RouteKind::Service {
                         target: "web.default.svc.cluster.local:80".into(),
-                        protocol: String::new(),
+                        scheme: UpstreamScheme::Http,
                     }
                 );
             }
@@ -641,8 +689,8 @@ mod tests {
         table.set_host_routes(build_host_routes(&eps.iter().collect::<Vec<_>>()));
         // 2 pods, pre-increment RR -> first pick is index 1
         assert_eq!(
-            table.lookup("web.default.svc.cluster.local:80"),
-            "10.0.0.2:8080"
+            table.lookup("web.default.svc.cluster.local:80").as_deref(),
+            Some("10.0.0.2:8080")
         );
     }
 }

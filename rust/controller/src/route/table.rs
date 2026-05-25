@@ -21,31 +21,20 @@ impl Table {
         Self::default()
     }
 
-    /// Resolve a `host:port` service address to a `podIP:targetPort`, or `""`.
-    pub fn lookup(&self, addr: &str) -> String {
+    /// Resolve a `host:port` service address to a `podIP:targetPort`, or `None`.
+    pub fn lookup(&self, addr: &str) -> Option<String> {
         // addr is a DNS name of the form service.ns.svc.cluster.local:port
-        let Some(i) = addr.rfind(':') else {
-            return String::new(); // invalid format
-        };
+        let i = addr.rfind(':')?; // invalid format -> None
         let host = &addr[..i];
 
         let target_port = {
             let ports = self.port_routes.read().unwrap();
-            match ports.get(addr) {
-                Some(p) => p.clone(),
-                None => return String::new(),
-            }
+            ports.get(addr)?.clone()
         };
 
         let hosts = self.host_routes.read().unwrap();
-        let Some(lb) = hosts.get(host) else {
-            return String::new();
-        };
-        let ip = lb.get(Some(&self.bad));
-        if ip.is_empty() {
-            return String::new();
-        }
-        format!("{ip}:{target_port}")
+        let ip = hosts.get(host)?.get(Some(&self.bad))?;
+        Some(format!("{ip}:{target_port}"))
     }
 
     pub fn set_host_routes(&self, routes: HashMap<String, Rrlb>) {
@@ -114,20 +103,22 @@ mod tests {
     fn not_found() {
         assert_eq!(
             fixture().lookup("frontend.default.svc.cluster.local:8080"),
-            ""
+            None
         );
     }
 
     #[test]
     fn invalid_format() {
-        assert_eq!(fixture().lookup("api.default.svc.cluster.local"), "");
+        assert_eq!(fixture().lookup("api.default.svc.cluster.local"), None);
     }
 
     #[test]
     fn found_host_and_port() {
         assert_eq!(
-            fixture().lookup("api.default.svc.cluster.local:8080"),
-            "192.168.0.1:9000"
+            fixture()
+                .lookup("api.default.svc.cluster.local:8080")
+                .as_deref(),
+            Some("192.168.0.1:9000")
         );
     }
 
@@ -136,7 +127,7 @@ mod tests {
         // never happens in practice (k8s requires a port name) but must not match
         assert_eq!(
             fixture().lookup("backoffice.default.svc.cluster.local:8080"),
-            ""
+            None
         );
     }
 
@@ -146,8 +137,8 @@ mod tests {
         tb.mark_bad("192.168.1.1");
         for _ in 0..3 {
             assert_eq!(
-                tb.lookup("api.service.svc.cluster.local:8000"),
-                "192.168.1.2:9001"
+                tb.lookup("api.service.svc.cluster.local:8000").as_deref(),
+                Some("192.168.1.2:9001")
             );
         }
     }
@@ -160,8 +151,8 @@ mod tests {
             Some(Rrlb::new(vec!["192.168.3.1".into()])),
         );
         assert_eq!(
-            tb.lookup("about.service.svc.cluster.local:8000"),
-            "192.168.3.1:9003"
+            tb.lookup("about.service.svc.cluster.local:8000").as_deref(),
+            Some("192.168.3.1:9003")
         );
 
         tb.set_host_route(
@@ -169,8 +160,8 @@ mod tests {
             Some(Rrlb::new(vec!["192.168.3.2".into()])),
         );
         assert_eq!(
-            tb.lookup("about.service.svc.cluster.local:8000"),
-            "192.168.3.2:9003"
+            tb.lookup("about.service.svc.cluster.local:8000").as_deref(),
+            Some("192.168.3.2:9003")
         );
     }
 }

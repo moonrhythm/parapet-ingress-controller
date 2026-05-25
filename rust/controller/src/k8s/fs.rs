@@ -156,7 +156,7 @@ subsets:
                     e.kind,
                     RouteKind::Service {
                         target: "web.default.svc.cluster.local:80".into(),
-                        protocol: String::new(),
+                        scheme: crate::reconcile::UpstreamScheme::Http,
                     }
                 );
             }
@@ -167,8 +167,9 @@ subsets:
         assert_eq!(
             shared
                 .route_table
-                .lookup("web.default.svc.cluster.local:80"),
-            "10.0.0.1:8080"
+                .lookup("web.default.svc.cluster.local:80")
+                .as_deref(),
+            Some("10.0.0.1:8080")
         );
     }
 
