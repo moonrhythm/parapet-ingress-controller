@@ -1,0 +1,71 @@
+[package]
+name = "parapet-ingress-controller"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# The pure routing/reconcile core (default features) has no async/kube/pingora
+# deps so it builds and tests fast. The live Kubernetes watch is behind
+# `cluster` (kube-rs); the HTTP/proxy server is behind `proxy` (pingora). The
+# binary needs both.
+[dependencies]
+k8s-openapi = { version = "0.27", features = ["v1_35"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+ipnet = "2"
+x509-parser = "0.18"
+arc-swap = "1"
+rcgen = "0.13"
+
+kube = { version = "3", default-features = false, features = [
+    "client",
+    "config",
+    "runtime",
+    "rustls-tls",
+], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "signal"], optional = true }
+futures = { version = "0.3", optional = true }
+# only to install the process-default crypto provider for kube's rustls client
+rustls = { version = "0.23", optional = true }
+
+pingora = { version = "0.8", features = ["proxy", "openssl"], optional = true }
+async-trait = { version = "0.1", optional = true }
+http = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
+# must resolve to the same version pingora uses (shared default registry)
+prometheus = { version = "0.13", optional = true }
+serde_json = { version = "1", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+bytes = { version = "1", optional = true }
+# surfaces pingora's internal `log` output (h2 handshake errors, etc.)
+env_logger = { version = "0.11", optional = true }
+# sysconf(_SC_CLK_TCK / _SC_PAGESIZE) for the custom process collector
+# (proxy/procmetrics.rs). Compiles everywhere; only used on Linux.
+libc = { version = "0.2", optional = true }
+
+[features]
+cluster = ["dep:kube", "dep:tokio", "dep:futures", "dep:rustls"]
+proxy = [
+    "dep:pingora",
+    "dep:async-trait",
+    "dep:http",
+    "dep:base64",
+    "dep:prometheus",
+    "dep:serde_json",
+    "dep:chrono",
+    "dep:tokio",
+    "dep:reqwest",
+    "dep:bytes",
+    "dep:env_logger",
+    "dep:libc",
+]
+
+[lib]
+name = "controller"
+path = "src/lib.rs"
+
+[[bin]]
+name = "parapet-ingress-controller"
+path = "src/main.rs"
+required-features = ["proxy", "cluster"]

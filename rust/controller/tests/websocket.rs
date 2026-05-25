@@ -1,0 +1,166 @@
+//! Integration test: a WebSocket (HTTP Upgrade) connection tunnels through the
+//! proxy. WebSocket support is entirely Pingora's bidirectional-Upgrade
+//! passthrough — the controller adds no WS-specific logic — so this exercises
+//! the real binary end-to-end rather than a unit. It runs the built controller
+//! as a subprocess in `fs` mode (HTTP-only) routed to a tiny std-only echo
+//! "upstream" that completes the Upgrade and echoes bytes.
+//!
+//! Only built with `proxy,cluster` (the binary's required-features); a no-op
+//! otherwise.
+#![cfg(all(feature = "proxy", feature = "cluster"))]
+
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::process::{Child, Command};
+use std::thread;
+use std::time::{Duration, Instant};
+
+/// Kill the child controller on drop so a failed assertion never leaks it.
+struct Controller(Child);
+impl Drop for Controller {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Reserve a free localhost port, then release it for the caller to bind.
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Minimal WebSocket-ish upstream: complete the Upgrade with `101`, then echo.
+fn spawn_echo_upstream() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            thread::spawn(move || {
+                let mut s = stream;
+                let mut buf = [0u8; 4096];
+                // read request head (until CRLFCRLF)
+                let mut head = Vec::new();
+                loop {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => head.extend_from_slice(&buf[..n]),
+                    }
+                    if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                if s.write_all(
+                    b"HTTP/1.1 101 Switching Protocols\r\n\
+                      Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+                )
+                .is_err()
+                {
+                    return;
+                }
+                let _ = s.flush();
+                // echo upgraded bytes
+                loop {
+                    match s.read(&mut buf) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            if s.write_all(&buf[..n]).is_err() {
+                                return;
+                            }
+                            let _ = s.flush();
+                        }
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+fn write_manifests(dir: &std::path::Path, upstream_port: u16) {
+    let yaml = format!(
+        "apiVersion: networking.k8s.io/v1\n\
+         kind: Ingress\n\
+         metadata: {{name: ws, namespace: default}}\n\
+         spec:\n  ingressClassName: parapet\n  rules:\n  - host: ws.test\n    http:\n      paths:\n      - path: /\n        pathType: Prefix\n        backend: {{service: {{name: ws, port: {{number: {p}}}}}}}\n\
+         ---\n\
+         apiVersion: v1\nkind: Service\nmetadata: {{name: ws, namespace: default}}\nspec: {{type: ClusterIP, ports: [{{port: {p}, targetPort: {p}}}]}}\n\
+         ---\n\
+         apiVersion: v1\nkind: Endpoints\nmetadata: {{name: ws, namespace: default}}\nsubsets: [{{addresses: [{{ip: 127.0.0.1}}], ports: [{{port: {p}}}]}}]\n",
+        p = upstream_port
+    );
+    std::fs::write(dir.join("ws.yaml"), yaml).unwrap();
+}
+
+/// Poll `GET /healthz` until the proxy answers 200 (server bound + fs loaded).
+fn wait_ready(port: u16) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if let Ok(mut c) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = c.set_read_timeout(Some(Duration::from_millis(500)));
+            if c.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .is_ok()
+            {
+                let mut resp = Vec::new();
+                let _ = c.read_to_end(&mut resp);
+                if String::from_utf8_lossy(&resp).contains("200") {
+                    return;
+                }
+            }
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    panic!("controller did not become ready on :{port}");
+}
+
+#[test]
+fn websocket_upgrade_tunnels_through_proxy() {
+    let upstream_port = spawn_echo_upstream();
+    let http_port = free_port();
+
+    let dir = std::env::temp_dir().join(format!("parapet-ws-test-{http_port}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    write_manifests(&dir, upstream_port);
+
+    let child = Command::new(env!("CARGO_BIN_EXE_parapet-ingress-controller"))
+        .env("KUBERNETES_BACKEND", "fs")
+        .env("KUBERNETES_FS", &dir)
+        .env("HTTP_PORT", http_port.to_string())
+        .env("HTTPS_PORT", "") // HTTP-only (empty disables HTTPS)
+        .env("DISABLE_LOG", "true")
+        .spawn()
+        .expect("spawn controller binary");
+    let _ctrl = Controller(child);
+
+    wait_ready(http_port);
+
+    // open a WebSocket upgrade through the proxy
+    let mut c = TcpStream::connect(("127.0.0.1", http_port)).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    c.write_all(
+        b"GET /chat HTTP/1.1\r\nHost: ws.test\r\nConnection: Upgrade\r\n\
+          Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+          Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+    )
+    .unwrap();
+
+    // expect 101 Switching Protocols (the upgrade was proxied)
+    let mut resp = [0u8; 1024];
+    let n = c.read(&mut resp).unwrap();
+    let head = String::from_utf8_lossy(&resp[..n]);
+    assert!(
+        head.contains("101"),
+        "expected 101 Switching Protocols, got:\n{head}"
+    );
+
+    // the tunnel is live: bytes echo back through the proxy bidirectionally
+    c.write_all(b"ping-through-proxy").unwrap();
+    let mut echo = [0u8; 64];
+    let m = c.read(&mut echo).unwrap();
+    assert_eq!(&echo[..m], b"ping-through-proxy");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
