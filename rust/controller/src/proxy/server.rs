@@ -18,6 +18,10 @@ use super::cert::SniResolver;
 use super::{Limits, Proxy, TrustProxy};
 use crate::shared::Shared;
 
+/// Max requests served per downstream keepalive connection before it is closed,
+/// so per-connection memory is reclaimed under sustained load.
+const DOWNSTREAM_KEEPALIVE_REQUEST_LIMIT: u32 = 10_000;
+
 pub struct ServeConfig {
     pub http_addr: String,
     pub https_addr: Option<String>,
@@ -112,6 +116,10 @@ pub fn run(shared: Arc<Shared>, cfg: ServeConfig) {
     );
     let mut opts = HttpServerOptions::default();
     opts.h2c = true;
+    // Cap requests per downstream keepalive connection so per-connection memory is
+    // periodically reclaimed (nginx keepalive_requests analog; Pingora defaults to
+    // unlimited). Generous so it never throttles legitimate keepalive throughput.
+    opts.keepalive_request_limit = Some(DOWNSTREAM_KEEPALIVE_REQUEST_LIMIT);
     plain.app_logic_mut().unwrap().server_options = Some(opts);
     plain.threads = Some(threads);
     plain.add_tcp(&cfg.http_addr);
@@ -133,6 +141,9 @@ pub fn run(shared: Arc<Shared>, cfg: ServeConfig) {
         let resolver = SniResolver::new(shared.clone());
         let mut tls = TlsSettings::with_callbacks(Box::new(resolver)).expect("tls settings");
         tls.enable_h2();
+        let mut tls_opts = HttpServerOptions::default();
+        tls_opts.keepalive_request_limit = Some(DOWNSTREAM_KEEPALIVE_REQUEST_LIMIT);
+        tls_svc.app_logic_mut().unwrap().server_options = Some(tls_opts);
         tls_svc.threads = Some(threads);
         tls_svc.add_tls_with_settings(&https_addr, None, tls);
         server.add_service(tls_svc);

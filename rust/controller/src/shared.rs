@@ -4,7 +4,7 @@
 //! point — it runs the reconcile functions over a [`Snapshot`] and swaps the
 //! results in, mirroring the Go controller's `mux` swap under `RWMutex`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -23,6 +23,9 @@ pub struct Shared {
     pub router: ArcSwap<Router<RouteEntry>>,
     pub route_table: Arc<RouteTable>,
     pub certs: ArcSwap<CertTable<LoadedCert>>,
+    /// Distinct hosts the router serves, for bounding host-labeled metric
+    /// cardinality (an unknown Host is collapsed to a sentinel label).
+    known_hosts: ArcSwap<HashSet<String>>,
     ready: AtomicBool,
     ingress_class: String,
     load_all_certs: bool,
@@ -34,6 +37,7 @@ impl Shared {
             router: ArcSwap::from_pointee(Router::new(HashMap::new())),
             route_table: Arc::new(RouteTable::new()),
             certs: ArcSwap::from_pointee(CertTable::empty()),
+            known_hosts: ArcSwap::from_pointee(HashSet::new()),
             ready: AtomicBool::new(false),
             ingress_class: ingress_class.into(),
             load_all_certs,
@@ -48,6 +52,12 @@ impl Shared {
     /// Flip to not-ready on shutdown so k8s/load balancers deregister this pod.
     pub fn set_not_ready(&self) {
         self.ready.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether the router serves any route for `host` (already lowercased by the
+    /// caller). Used to bound host-labeled metric cardinality.
+    pub fn is_known_host(&self, host: &str) -> bool {
+        self.known_hosts.load().contains(host)
     }
 
     /// Rebuild every table from `snap` and atomically swap them in.
@@ -66,6 +76,18 @@ impl Shared {
 
         let router = build_router(&ingresses, &svc_map, &self.ingress_class);
         let n_routes = router.len();
+        // Distinct hosts the router serves (the substring before the first '/' of
+        // each `host+path` pattern; host-less patterns contribute nothing). Drives
+        // metric-label sanitization so unknown Hosts can't blow up cardinality.
+        let known_hosts: HashSet<String> = router
+            .patterns()
+            .iter()
+            .filter_map(|p| {
+                let host = p.split('/').next().unwrap_or("");
+                (!host.is_empty()).then(|| host.to_ascii_lowercase())
+            })
+            .collect();
+        self.known_hosts.store(Arc::new(known_hosts));
         self.router.store(Arc::new(router));
         self.route_table
             .set_port_routes(build_port_routes(&services));

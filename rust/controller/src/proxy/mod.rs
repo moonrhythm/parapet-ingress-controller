@@ -37,6 +37,13 @@ use crate::shared::Shared;
 
 const MAX_RETRY: usize = 5;
 const ACME_PREFIX: &str = "/.well-known/acme-challenge";
+/// TCP connect timeout to an upstream pod (connect phase only).
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Connect + TLS-handshake timeout to an upstream pod (connect phase only).
+const UPSTREAM_TOTAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Metric label substituted for a Host the router doesn't serve, so a flood of
+/// random `Host` headers can't create unbounded Prometheus series (OOM vector).
+const UNKNOWN_HOST_LABEL: &str = "other";
 
 /// Which downstream remotes are trusted to set X-Forwarded-* headers.
 pub enum TrustProxy {
@@ -131,6 +138,11 @@ pub struct Ctx {
     timestamp: String,
     method: String,
     host: String,
+    /// `host` if the router serves it, else the [`UNKNOWN_HOST_LABEL`] sentinel.
+    /// Used for every host-labeled Prometheus series so a random-Host flood can't
+    /// grow cardinality without bound. The raw `host` is still used for the
+    /// access log and proxy-error log.
+    metric_host: String,
     request_url: String,
     request_body_size: i64,
     referer: String,
@@ -182,6 +194,14 @@ impl ProxyHttp for Proxy {
         ctx.timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         ctx.remote_ip = remote_ip.map(|i| i.to_string()).unwrap_or_default();
         ctx.capture(session, &host, scheme);
+        // Sanitize the Host for metric labels: a Host the router doesn't serve
+        // (e.g. a random-Host flood, scanners) collapses to one sentinel series
+        // instead of creating an unbounded number of them.
+        ctx.metric_host = if self.shared.is_known_host(&host) {
+            host.clone()
+        } else {
+            UNKNOWN_HOST_LABEL.to_string()
+        };
 
         // health checks (run before logging, like the Go middleware order)
         if path == "/healthz" {
@@ -229,9 +249,13 @@ impl ProxyHttp for Proxy {
         let upgrade = header_str(session, "upgrade")
             .map(|s| s.trim().to_ascii_lowercase())
             .unwrap_or_default();
-        metrics::host_active_inc(&host, &upgrade);
-        ctx.host_active = Some((host.clone(), upgrade));
+        metrics::host_active_inc(&ctx.metric_host, &upgrade);
+        ctx.host_active = Some((ctx.metric_host.clone(), upgrade));
 
+        // Concurrency-limit keys use the sanitized host (see `metric_host`): for a
+        // known host this is the host itself (unchanged behavior); unknown hosts
+        // all share one bucket, which both caps the limiter's internal map and
+        // lets the bucket shed a random-Host flood instead of growing per-host.
         if let Some(country_limit) = &self.limits.country {
             let country = self
                 .limits
@@ -240,15 +264,17 @@ impl ProxyHttp for Proxy {
                 .find_map(|h| header_str(session, h))
                 .filter(|s| !s.is_empty())
                 .unwrap_or("XX");
-            match country_limit.acquire(&format!("{host}|{country}")).await {
+            let key = format!("{}|{country}", ctx.metric_host);
+            match country_limit.acquire(&key).await {
                 Some(g) => ctx.limit_guards.push(g),
-                None => return self.reject_overloaded(session, ctx, &host).await,
+                None => return self.reject_overloaded(session, ctx).await,
             }
         }
         if let Some(host_limit) = &self.limits.host {
-            match host_limit.acquire(&host).await {
+            let key = ctx.metric_host.clone();
+            match host_limit.acquire(&key).await {
                 Some(g) => ctx.limit_guards.push(g),
-                None => return self.reject_overloaded(session, ctx, &host).await,
+                None => return self.reject_overloaded(session, ctx).await,
             }
         }
 
@@ -310,7 +336,7 @@ impl ProxyHttp for Proxy {
             ctx.backend_conn_addr = Some(addr.clone());
         }
 
-        let peer = match ctx.scheme {
+        let mut peer = match ctx.scheme {
             UpstreamScheme::H2c => {
                 let mut p = HttpPeer::new(addr.as_str(), false, String::new());
                 p.options.alpn = ALPN::H2;
@@ -329,6 +355,15 @@ impl ProxyHttp for Proxy {
                 p
             }
         };
+        // Bound the connect phase. Pingora defaults these to None (unbounded), so
+        // when a backend is overwhelmed — exactly what a DDoS does — each request
+        // would otherwise block on connect for the OS default (minutes), piling up
+        // in-flight until the proxy itself exhausts fds/memory. A bounded connect
+        // fails fast into fail_to_connect -> mark_bad -> round-robin to a healthy
+        // pod. These cover only the connect/TLS handshake, NOT data transfer, so
+        // long-lived streams (SSE / websockets / long-poll) are unaffected.
+        peer.options.connection_timeout = Some(UPSTREAM_CONNECT_TIMEOUT);
+        peer.options.total_connection_timeout = Some(UPSTREAM_TOTAL_CONNECT_TIMEOUT);
         Ok(Box::new(peer))
     }
 
@@ -496,7 +531,7 @@ impl ProxyHttp for Proxy {
         let duration = ctx.start.map(|s| s.elapsed()).unwrap_or_default();
 
         metrics::record_request(&metrics::RequestMetric {
-            host: &ctx.host,
+            host: &ctx.metric_host,
             status,
             method: &ctx.method,
             ingress_name: &ctx.meta.ingress_name,
@@ -624,13 +659,8 @@ impl Proxy {
         self.is_tls || header_str(session, "x-forwarded-proto") == Some("https")
     }
 
-    async fn reject_overloaded(
-        &self,
-        session: &mut Session,
-        ctx: &mut Ctx,
-        host: &str,
-    ) -> Result<bool> {
-        metrics::host_ratelimit_inc(host);
+    async fn reject_overloaded(&self, session: &mut Session, ctx: &mut Ctx) -> Result<bool> {
+        metrics::host_ratelimit_inc(&ctx.metric_host);
         ctx.skip_log = true; // ratelimited responses aren't access-logged (Go order)
         respond_status(session, 503).await?;
         Ok(true)

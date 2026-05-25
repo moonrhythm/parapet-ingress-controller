@@ -175,6 +175,20 @@ pub struct RequestMetric<'a> {
     pub duration_secs: f64,
 }
 
+/// Collapse an unrecognized HTTP method to `"other"`. HTTP permits arbitrary
+/// method tokens, so without this an attacker could grow the `method` label set
+/// without bound (same OOM class as the host label).
+fn known_method(method: &str) -> &str {
+    const KNOWN: [&str; 9] = [
+        "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
+    ];
+    if KNOWN.contains(&method) {
+        method
+    } else {
+        "other"
+    }
+}
+
 pub fn record_request(m: &RequestMetric) {
     let metrics = metrics();
     let status = m.status.to_string();
@@ -183,7 +197,7 @@ pub fn record_request(m: &RequestMetric) {
         .with_label_values(&[
             m.host,
             &status,
-            m.method,
+            known_method(m.method),
             m.ingress_name,
             m.ingress_namespace,
             m.service_type,
@@ -202,4 +216,19 @@ pub fn inc_reload(success: bool) {
         .reload
         .with_label_values(&[if success { "1" } else { "0" }])
         .inc();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::known_method;
+
+    #[test]
+    fn known_method_collapses_unknown() {
+        assert_eq!(known_method("GET"), "GET");
+        assert_eq!(known_method("DELETE"), "DELETE");
+        // arbitrary/extension method tokens collapse to a single label
+        assert_eq!(known_method("BREW"), "other");
+        assert_eq!(known_method(""), "other");
+        assert_eq!(known_method("get"), "other"); // standard methods arrive upper-cased
+    }
 }
