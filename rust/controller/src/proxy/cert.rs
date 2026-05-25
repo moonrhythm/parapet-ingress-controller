@@ -49,12 +49,21 @@ impl TlsAccept for SniResolver {
         let reason = if sni.is_empty() {
             "no_sni"
         } else if let Some(loaded) = self.shared.certs.load().get(&sni) {
+            // tls.crt is a full chain (leaf first, then intermediates). Install the
+            // leaf AND every intermediate: `X509::from_pem` reads only the first
+            // block, so sending leaf-only leaves clients that don't fetch missing
+            // intermediates (notably Go's crypto/tls — no AIA chasing) unable to
+            // build the chain to a trusted root, i.e. "x509: certificate signed by
+            // unknown authority". Browsers cache/fetch intermediates and so mask it.
             match (
-                X509::from_pem(&loaded.cert_pem),
+                X509::stack_from_pem(&loaded.cert_pem),
                 PKey::private_key_from_pem(&loaded.key_pem),
             ) {
-                (Ok(cert), Ok(key)) => {
-                    let _ = ext::ssl_use_certificate(ssl, &cert);
+                (Ok(chain), Ok(key)) if !chain.is_empty() => {
+                    let _ = ext::ssl_use_certificate(ssl, &chain[0]);
+                    for intermediate in &chain[1..] {
+                        let _ = ext::ssl_add_chain_cert(ssl, intermediate);
+                    }
                     let _ = ext::ssl_use_private_key(ssl, &key);
                     return;
                 }
