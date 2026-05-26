@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"time"
 
@@ -36,6 +37,9 @@ type WAFConfig struct {
 	CostLimit     uint64        // CEL cost cap per rule (0 = waf default)
 	InspectBody   int64         // inspect up to N body bytes (0 = body empty)
 	DisableMacros bool          // refuse all/exists/map/filter in rules
+	// Country resolves the client's ISO country for request.country (GeoIP).
+	// nil leaves request.country empty. Set from WAF_GEOIP_DB in main.
+	Country func(*http.Request) string
 }
 
 // InitWAF builds the global WAF instance and the (empty) zone registry. Call
@@ -81,6 +85,7 @@ func (ctrl *Controller) newWAF(scope string) *waf.WAF {
 	w.CostLimit = ctrl.WAFConfig.CostLimit
 	w.InspectBody = ctrl.WAFConfig.InspectBody
 	w.DisableMacros = ctrl.WAFConfig.DisableMacros
+	w.Country = ctrl.WAFConfig.Country // GeoIP request.country (nil = empty)
 	// Logger catches eval errors (the fail-open path) and the module's own match
 	// lines; kept at debug so a flood of matches can't spam the log (the metric
 	// below is the always-on signal).

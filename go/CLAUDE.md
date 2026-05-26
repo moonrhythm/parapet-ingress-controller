@@ -18,6 +18,7 @@ controller.go                     # Controller struct — watch/reload logic (ge
 controller_waf.go                 # WAF wiring: global instance + zone registry, ConfigMap watch
 retry.go                          # retryMiddleware — retries idempotent requests on upstream failure
 wafrule/                          # WAF rule YAML DTO + parser (-> []waf.Rule)
+geoip/                            # MaxMind .mmdb -> request.country (WAF_GEOIP_DB)
 plugin/                           # annotation-driven middleware plugins
   plugin.go                       # core plugin type + built-in plugins
   auth.go                         # BasicAuth, ForwardAuth
@@ -79,6 +80,8 @@ A CEL-rule firewall on top of `parapet/pkg/waf`. **Full design in [`../WAF.md`](
 - **Zones** (`zones atomic.Pointer[map[string]*waf.WAF]`, key `<namespace>/<name>`) — tenant rulesets an ingress binds via `parapet.moonrhythm.io/waf-zone`; `plugin.WAFZone` resolves the key (namespace-local, or `ns/id` cross-ref) and looks up the live registry per request.
 
 Global runs first and is authoritative. **WAF reload is decoupled from the mux**: ConfigMap changes call `reloadWAFDebounced` (recompile + atomic swap) and never rebuild routes; `SetRules` is all-or-nothing so a bad ruleset keeps the last-good one. Rules parse via `wafrule/`; matches count `parapet_waf_matches{rule_id,action,scope}` (`metric/waf.go`). Code: `controller_waf.go`, `plugin/waf.go`, `wafrule/`.
+
+**GeoIP** (`request.country`): when `WAF_GEOIP_DB` points at a MaxMind `.mmdb`, `main.go` opens it (`geoip/`, `maxminddb-golang`) and sets `WAFConfig.Country` to a resolver (client IP via `geoip.ClientIP`, parapet precedence → ISO code, else `"XX"`). `newWAF` assigns it to every WAF's `waf.WAF.Country` (the parapet hook added in v0.15.1), so `request.country` is set on the global and zone rulesets. nil resolver (no DB) → `request.country == ""`.
 
 ## Annotation & configuration reference
 

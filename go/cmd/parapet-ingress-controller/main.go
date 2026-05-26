@@ -20,6 +20,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 
 	controller "github.com/moonrhythm/parapet-ingress-controller/go"
+	"github.com/moonrhythm/parapet-ingress-controller/go/geoip"
 	"github.com/moonrhythm/parapet-ingress-controller/go/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/go/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/go/plugin"
@@ -51,6 +52,24 @@ func main() {
 		CostLimit:     uint64(config.Int("WAF_COST_LIMIT")),
 		InspectBody:   int64(config.Int("WAF_INSPECT_BODY")),
 		DisableMacros: config.Bool("WAF_DISABLE_MACROS"),
+	}
+	// GeoIP (request.country): load the MaxMind .mmdb when WAF is on and a path
+	// is set. A load failure is non-fatal — request.country stays empty.
+	if wafConfig.Enabled {
+		if dbPath := config.String("WAF_GEOIP_DB"); dbPath != "" {
+			if db, err := geoip.Open(dbPath); err != nil {
+				slog.Error("waf: can not open geoip database; request.country will be empty",
+					"path", dbPath, "error", err)
+			} else {
+				slog.Info("waf: geoip database loaded", "path", dbPath)
+				wafConfig.Country = func(r *http.Request) string {
+					if cc := db.Country(geoip.ClientIP(r)); cc != "" {
+						return cc
+					}
+					return "XX" // DB loaded but IP unresolved
+				}
+			}
+		}
 	}
 
 	hostname, _ := os.Hostname()
