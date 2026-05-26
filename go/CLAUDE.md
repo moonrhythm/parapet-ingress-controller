@@ -71,7 +71,7 @@ TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.
 ### Proxy
 `proxy.Proxy` wraps `httputil.ReverseProxy`. The upstream URL is resolved at request time via `route.Table.Lookup`. Protocol is controlled by the `parapet.moonrhythm.io/upstream-protocol` annotation (default: `http`).
 
-On an upstream failure (dial error, upstream 502/503), the proxy's `ErrorHandler` panics; `retryMiddleware` (`retry.go`) recovers it and retries the request (up to 5 times with backoff) — but only when the body hasn't been read, so non-idempotent requests aren't replayed. `proxy.IsRetryable` decides which errors qualify.
+On a **connection failure** (dial error — no response from upstream), the proxy's `ErrorHandler` panics; `retryMiddleware` (`retry.go`) recovers it and retries the request (up to 5 times with backoff) — but only when the body hasn't been read, so non-idempotent requests aren't replayed. `proxy.IsRetryable` is **dial-error-only**: an upstream that *responds* — including 502/503 — has processed the request, so its response passes through to the client unchanged rather than being retried (retrying could duplicate side effects and amplify load on a failing backend). This matches the Rust port; see [`../SPEC.md`](../SPEC.md).
 
 ### WAF (opt-in, `WAF_ENABLED=true`)
 A CEL-rule firewall on top of `parapet/pkg/waf`. **Full design in [`../WAF.md`](../WAF.md).** Two rulesets, both fed by label-marked ConfigMaps (`parapet.moonrhythm.io/waf: global|zone`), watched as a 5th resource:

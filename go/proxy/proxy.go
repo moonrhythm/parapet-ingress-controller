@@ -8,11 +8,6 @@ import (
 	"net/http/httputil"
 )
 
-var (
-	errBadGateway         = errors.New("bad gateway")
-	errServiceUnavailable = errors.New("service unavailable")
-)
-
 type Proxy struct {
 	OnDialError func(addr string)
 
@@ -35,16 +30,10 @@ func New() *Proxy {
 			Default: p.httpTransport,
 			H2C:     p.h2cTransport,
 		},
-		ModifyResponse: func(resp *http.Response) error {
-			switch resp.StatusCode {
-			case http.StatusBadGateway:
-				return errBadGateway
-			case http.StatusServiceUnavailable:
-				return errServiceUnavailable
-			default:
-				return nil
-			}
-		},
+		// No ModifyResponse: an upstream that responded — including with 502/503 —
+		// has processed the request, so its response passes through to the client
+		// unchanged (status, headers, body). Only connection failures (no response)
+		// reach ErrorHandler and may be retried.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
 				// client canceled request
@@ -79,15 +68,11 @@ func (p *Proxy) ConfigTransport(f func(tr *http.Transport)) {
 	f(p.httpTransport)
 }
 
+// IsRetryable reports whether err is a connection failure that's safe to retry.
+// Only dial/connection errors qualify — an upstream that *responded* (even with
+// 502/503) has already received and processed the request, so retrying could
+// duplicate side effects and amplify load on a failing backend. Those responses
+// pass through to the client unchanged instead of being retried.
 func IsRetryable(err error) bool {
-	if isDialError(err) {
-		return true
-	}
-	if errors.Is(err, errBadGateway) {
-		return true
-	}
-	if errors.Is(err, errServiceUnavailable) {
-		return true
-	}
-	return false
+	return isDialError(err)
 }

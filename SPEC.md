@@ -29,6 +29,14 @@ Endpoint selection is **round-robin**; an address that fails to dial is marked
 **bad for 2s** and skipped (reactive health — no active probing). Host is
 lowercased and port-stripped before matching.
 
+**Retry is connection-only** (both implementations): a dial failure — or a
+connection broken before any response — is retried up to 5× with backoff,
+marking the pod bad and round-robining to another. An upstream that *responds* —
+**including with 502/503** — is **never** retried; its response passes through to
+the client unchanged. A responding upstream has already received and processed
+the request, so retrying could duplicate side effects and amplify load on a
+failing backend. Non-idempotent requests (body already read) are never retried.
+
 ## Annotations
 
 All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
@@ -119,9 +127,6 @@ doesn't serve, to bound cardinality under a flood.
 
 ## Intentional Go↔Rust divergences
 
-- **Retry (Rust)** is connection-only — `fail_to_connect` + a broken reused keepalive
-  connection; **never** retries on an upstream HTTP status (Go retried 502/503),
-  since a responding upstream has already processed the request.
 - **WAF cost limit** — cel-rust has none; Rust checks `WAF_EVAL_TIMEOUT` between
   rules. **WAF body inspection** is phase-2 in Rust (`request.body` empty).
 - **Cloud Profiler/Trace** are Go-only (no Rust SDK).
