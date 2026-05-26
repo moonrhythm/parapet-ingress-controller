@@ -1,0 +1,31 @@
+name: Go Test
+on:
+  push:
+    paths:
+      - 'go/**'
+      - '.github/workflows/go-test.yaml'
+  pull_request:
+    paths:
+      - 'go/**'
+      - '.github/workflows/go-test.yaml'
+jobs:
+  runner-job:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: go
+    strategy:
+      matrix:
+        go: ['1.26.3']
+    name: Go ${{ matrix.go }}
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go }}
+    - run: go get -t -v ./...
+    - run: go vet ./...
+    - run: go test -race -coverprofile=coverage.out -covermode=atomic -coverpkg=./... ./...
+    - uses: codecov/codecov-action@v5
+      with:
+        directory: ./go

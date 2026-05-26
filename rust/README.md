@@ -1,20 +1,21 @@
-# parapet-ingress-controller (Rust port)
+# parapet-ingress-controller (Rust / Pingora)
 
-A from-scratch rewrite of the [parapet](https://github.com/moonrhythm/parapet)-based
-Kubernetes ingress controller on top of [Pingora](https://github.com/cloudflare/pingora).
-It watches Ingress / Service / Secret / Endpoints and hot-reloads its routing and
-TLS tables without restarting.
+The [Pingora](https://github.com/cloudflare/pingora) implementation of the
+Kubernetes ingress controller. It watches Ingress / Service / Secret / ConfigMap /
+Endpoints and hot-reloads its routing and TLS tables without restarting.
 
-> **Status: in progress.** The **Go controller remains the production binary**
-> until this port clears a load-test perf-parity gate (see `PHASE5.md`). GCP Cloud
-> Profiler and Cloud Trace are intentionally dropped (no Rust SDK).
+> **One of two co-maintained implementations** (the other is the parapet/Go build
+> in [`../go/`](../go/)). They share one behavior contract — see
+> [`../SPEC.md`](../SPEC.md). GCP Cloud Profiler and Cloud Trace are Go-only (no
+> Rust SDK). `PHASE{0,3,5}.md` are the original de-risk/perf notes from the port's
+> development.
 
-The request data path is at parity with Go: routing (all PathTypes), TLS/SNI with
-full-chain serving, h2c, all `parapet.moonrhythm.io/*` annotations, host/country
-concurrency, per-route rate limits, forward/basic auth, trust-proxy, graceful
-drain, JSON access log, and response compression. See the annotation reference in
-the repo-root [`CLAUDE.md`](../CLAUDE.md) — annotation behavior is shared with the
-Go controller.
+The full request data path matches the contract: routing (all PathTypes), TLS/SNI
+with full-chain serving, h2c, all `parapet.moonrhythm.io/*` annotations,
+host/country concurrency, per-route rate limits, forward/basic auth, trust-proxy,
+graceful drain, JSON access log, response compression, and the WAF. The shared
+annotation/env/metrics reference is [`../SPEC.md`](../SPEC.md); Rust-specific
+behavior and divergences are documented below.
 
 ## Layout
 
