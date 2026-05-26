@@ -162,7 +162,7 @@ The engine is free (`pkg/waf`); the work is plumbing.
   `m.Use(ctrl)` — so blocks are access-logged and counted, and `request.host`
   is already normalized.
 - **Metrics/log**: `metric.WAFMatch(ruleID, action, scope)` →
-  `parapet_waf_matches_total{rule_id,action,scope}` (bounded: rule IDs are
+  `parapet_waf_matches{rule_id,action,scope}` (bounded: rule IDs are
   operator-defined, action∈3, scope∈{global,zone}). Eval errors and match lines
   go to slog.
 
@@ -200,7 +200,7 @@ plugin model because nothing compiled lives in the router.
   `apply_route_filters` via `ctx.config.waf_zone → shared.zones.load().get(key)`,
   after `allow_remote`, before `redirect_https` — mirroring the Go order. All
   request-time lookups; nothing compiled on the hot path.
-- **Metrics**: `parapet_waf_matches_total` in `proxy/metrics.rs`, same labels.
+- **Metrics**: `parapet_waf_matches` in `proxy/metrics.rs`, same labels.
 
 ### Intentional divergences (document like the retry note)
 
@@ -219,7 +219,7 @@ plugin model because nothing compiled lives in the router.
 ## Rollout
 
 Ship rules `action: log` first (shadow mode), watch
-`parapet_waf_matches_total{action="log"}` for false positives, then flip to
+`parapet_waf_matches{action="log"}` for false positives, then flip to
 `block`. Keep `WAF_FAIL_MODE=open` in production: during a config bug,
 fail-open (one rule briefly inactive) beats fail-closed (every request 500s).
 
