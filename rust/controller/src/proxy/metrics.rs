@@ -27,6 +27,7 @@ struct Metrics {
     net_request: IntCounter,
     net_response: IntCounter,
     tls_no_cert: IntCounterVec,
+    rejected: IntCounterVec,
 }
 
 fn metrics() -> &'static Metrics {
@@ -114,11 +115,28 @@ fn metrics() -> &'static Metrics {
             &["reason"]
         )
         .expect("register parapet_tls_sni_no_cert_total"),
+        // Requests rejected at the edge before reaching a backend. Labeled only by
+        // `reason` (a bounded set) and NOT by host, so an abusive flood can't grow
+        // its cardinality — unlike `parapet_requests`, this stays safe to scrape
+        // under attack.
+        rejected: register_int_counter_vec!(
+            "parapet_rejected_requests",
+            "Requests rejected at the edge, by reason",
+            &["reason"]
+        )
+        .expect("register parapet_rejected_requests"),
     })
 }
 
 pub fn tls_no_cert_inc(reason: &str) {
     metrics().tls_no_cert.with_label_values(&[reason]).inc();
+}
+
+/// Record an edge rejection. `reason` is a small bounded set (`no_route`,
+/// `host_limit`, `rate_limit`, `body_limit`, `forbidden`, `unauthorized`) — never
+/// host-derived — so this metric's cardinality can't be driven by request input.
+pub fn rejected_inc(reason: &str) {
+    metrics().rejected.with_label_values(&[reason]).inc();
 }
 
 pub fn backend_read_add(addr: &str, n: u64) {
@@ -175,6 +193,20 @@ pub struct RequestMetric<'a> {
     pub duration_secs: f64,
 }
 
+/// Collapse an unrecognized HTTP method to `"other"`. HTTP permits arbitrary
+/// method tokens, so without this an attacker could grow the `method` label set
+/// without bound (same OOM class as the host label).
+fn known_method(method: &str) -> &str {
+    const KNOWN: [&str; 9] = [
+        "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "CONNECT", "TRACE",
+    ];
+    if KNOWN.contains(&method) {
+        method
+    } else {
+        "other"
+    }
+}
+
 pub fn record_request(m: &RequestMetric) {
     let metrics = metrics();
     let status = m.status.to_string();
@@ -183,7 +215,7 @@ pub fn record_request(m: &RequestMetric) {
         .with_label_values(&[
             m.host,
             &status,
-            m.method,
+            known_method(m.method),
             m.ingress_name,
             m.ingress_namespace,
             m.service_type,
@@ -202,4 +234,19 @@ pub fn inc_reload(success: bool) {
         .reload
         .with_label_values(&[if success { "1" } else { "0" }])
         .inc();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::known_method;
+
+    #[test]
+    fn known_method_collapses_unknown() {
+        assert_eq!(known_method("GET"), "GET");
+        assert_eq!(known_method("DELETE"), "DELETE");
+        // arbitrary/extension method tokens collapse to a single label
+        assert_eq!(known_method("BREW"), "other");
+        assert_eq!(known_method(""), "other");
+        assert_eq!(known_method("get"), "other"); // standard methods arrive upper-cased
+    }
 }

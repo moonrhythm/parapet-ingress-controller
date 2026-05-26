@@ -171,6 +171,11 @@ subsets:
                 .as_deref(),
             Some("10.0.0.1:8080")
         );
+
+        // metric-cardinality bound: the router's host is known; anything else
+        // (a random-Host flood) is not, and collapses to the sentinel label.
+        assert!(shared.is_known_host("example.com"));
+        assert!(!shared.is_known_host("evil.attacker.example"));
     }
 
     #[test]

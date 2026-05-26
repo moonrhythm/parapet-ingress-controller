@@ -6,6 +6,8 @@ A Kubernetes ingress controller built on the [parapet](https://github.com/moonrh
 
 A from-scratch rewrite on the [Pingora](https://github.com/cloudflare/pingora) framework lives in `rust/`, intended to replace the Go controller once it clears a load-test perf-parity gate. **The Go controller remains the production binary until that cutover.** GCP Cloud Profiler and Cloud Trace are dropped from the port by design (no Rust SDK).
 
+The operational reference for the port — build/run, the full **environment-variable** table (including the Rust-only `UPSTREAM_CONNECT_TIMEOUT` / `UPSTREAM_TOTAL_CONNECT_TIMEOUT` connect-phase timeouts), metrics, and DDoS-resilience notes — is [`rust/README.md`](rust/README.md). The env table below is the Go controller's.
+
 ```
 rust/
   controller/         # the real crate (lib `controller`, bin `parapet-ingress-controller`)
