@@ -149,6 +149,19 @@ fn main() {
 
     let shared = Shared::new(ingress_class, load_all_certs);
     shared.waf.configure(waf_config);
+    // GeoIP (request.country): load the MaxMind .mmdb when WAF is on and a path
+    // is configured. A load failure is non-fatal — request.country stays empty.
+    if waf_enabled {
+        if let Some(db) = std::env::var("WAF_GEOIP_DB").ok().filter(|s| !s.is_empty()) {
+            match controller::waf::GeoIp::open(&db) {
+                Ok(g) => {
+                    shared.waf.set_geoip(g);
+                    eprintln!("[waf] geoip database loaded: {db}");
+                }
+                Err(e) => eprintln!("[waf] geoip load failed ({e}); request.country will be empty"),
+            }
+        }
+    }
 
     match backend.as_str() {
         // static manifests; one-shot load, no watch (local dev / smoke tests)

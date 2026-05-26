@@ -25,10 +25,11 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use cel::{Context, ExecutionError, Program, Value};
 use ipnet::IpNet;
 use k8s_openapi::api::core::v1::ConfigMap;
+use maxminddb::{geoip2, Reader};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -98,6 +99,9 @@ pub struct RequestData {
     pub proto: String,
     pub scheme: String,
     pub remote_ip: String,
+    /// ISO 3166-1 alpha-2 country (GeoIP). "" when GeoIP is off, "XX" when the
+    /// DB is loaded but the IP can't be resolved. Exposed as `request.country`.
+    pub country: String,
     pub content_length: i64,
     pub headers: HashMap<String, String>,
     pub cookies: HashMap<String, String>,
@@ -355,12 +359,35 @@ impl Waf {
     }
 }
 
+/// A loaded MaxMind GeoLite2/GeoIP2 country database. Resolves a client IP to
+/// its ISO 3166-1 alpha-2 country code for `request.country`.
+pub struct GeoIp {
+    reader: Reader<Vec<u8>>,
+}
+
+impl GeoIp {
+    /// Open a `.mmdb` file (the GeoLite2-Country DB). Read into memory once.
+    pub fn open(path: &str) -> Result<Self, String> {
+        Reader::open_readfile(path)
+            .map(|reader| Self { reader })
+            .map_err(|e| format!("open {path}: {e}"))
+    }
+
+    /// ISO country code for `ip`, or `None` if not found / DB has no country.
+    pub fn country(&self, ip: IpAddr) -> Option<String> {
+        let res = self.reader.lookup(ip).ok()?;
+        let country = res.decode::<geoip2::Country>().ok()??;
+        country.country.iso_code.map(str::to_string)
+    }
+}
+
 /// Holds the global baseline ruleset plus the tenant zone registry. Lives in
 /// [`crate::shared::Shared`]; fed by the ConfigMap watcher, read by the proxy.
 pub struct WafRegistry {
     config: ArcSwap<WafConfig>,
     global: Waf,
     zones: ArcSwap<HashMap<String, Arc<Waf>>>,
+    geoip: ArcSwapOption<GeoIp>,
 }
 
 impl Default for WafRegistry {
@@ -369,6 +396,7 @@ impl Default for WafRegistry {
             config: ArcSwap::from_pointee(WafConfig::default()),
             global: Waf::default(),
             zones: ArcSwap::from_pointee(HashMap::new()),
+            geoip: ArcSwapOption::empty(),
         }
     }
 }
@@ -381,6 +409,25 @@ impl WafRegistry {
     /// Install the tunables (from env) before serving.
     pub fn configure(&self, cfg: WafConfig) {
         self.config.store(Arc::new(cfg));
+    }
+
+    /// Install the GeoIP database (from `WAF_GEOIP_DB`) before serving.
+    pub fn set_geoip(&self, geoip: GeoIp) {
+        self.geoip.store(Some(Arc::new(geoip)));
+    }
+
+    /// Resolve a client IP to its ISO country code for `request.country`.
+    /// Returns "" when GeoIP is disabled (no DB) — matching the Go controller's
+    /// nil resolver — and "XX" when the DB is loaded but the IP can't be
+    /// resolved (private range, missing, parse failure), so a rule can treat
+    /// "unknown" explicitly without ever seeing a missing key.
+    pub fn country_of(&self, ip: Option<IpAddr>) -> String {
+        match self.geoip.load_full() {
+            None => String::new(),
+            Some(g) => ip
+                .and_then(|ip| g.country(ip))
+                .unwrap_or_else(|| "XX".to_string()),
+        }
     }
 
     /// Replace the global ruleset (all-or-nothing).
@@ -511,6 +558,7 @@ fn request_value(d: &RequestData) -> Value {
     m.insert("proto".into(), d.proto.clone().into());
     m.insert("scheme".into(), d.scheme.clone().into());
     m.insert("remote_ip".into(), d.remote_ip.clone().into());
+    m.insert("country".into(), d.country.clone().into());
     m.insert("content_length".into(), Value::Int(d.content_length));
     m.insert("headers".into(), str_map_value(&d.headers));
     m.insert("cookies".into(), str_map_value(&d.cookies));
@@ -972,5 +1020,28 @@ mod tests {
     #[test]
     fn empty_ruleset_passes() {
         assert_eq!(decide(&Waf::new(), &req()), Decision::Pass);
+    }
+
+    #[test]
+    fn corpus_country_field() {
+        // request.country is a normalized field; rules filter on it directly,
+        // identically to the Go controller (same rule strings).
+        assert!(blocks(r#"request.country == "CN""#, |r| r.country = "CN".into()));
+        assert!(!blocks(r#"request.country == "CN""#, |r| r.country = "TH".into()));
+        assert!(blocks(
+            r#"containsAny(request.country, ["CN", "RU", "KP"])"#,
+            |r| r.country = "RU".into()
+        ));
+        // "block all except TH": an unknown country ("XX") is still blocked,
+        // and crucially does NOT fail open (request.country is always present).
+        assert!(blocks(r#"request.country != "TH""#, |r| r.country = "XX".into()));
+    }
+
+    #[test]
+    fn country_of_empty_without_db() {
+        // No GeoIP DB loaded -> "" for any IP (matches the Go nil resolver).
+        let reg = WafRegistry::new();
+        assert_eq!(reg.country_of("8.8.8.8".parse().ok()), "");
+        assert_eq!(reg.country_of(None), "");
     }
 }

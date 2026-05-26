@@ -33,6 +33,20 @@ string (not decoded); `args` are decoded first-values.
 | 13 | `urlDecode(request.query).contains("../")` | `?file=%2E%2E%2Fetc%2Fpasswd` | yes |
 | 14 | `upper(request.method) == "GET"` | method `get` | yes |
 
+## GeoIP (`request.country`)
+
+`request.country` is the GeoIP country (ISO 3166-1 alpha-2). It is **always
+present** — `""` (GeoIP off), `"XX"` (DB loaded, IP unresolved), or a code — so a
+rule referencing it never errors on a missing key.
+
+| # | expression | request.country | blocks? |
+|---|---|---|---|
+| 15 | `request.country == "CN"` | `CN` | yes |
+| 16 | `request.country == "CN"` | `TH` | no |
+| 17 | `containsAny(request.country, ["CN", "RU", "KP"])` | `RU` | yes |
+| 18 | `request.country != "TH"` (allow-list) | `XX` (unknown) | yes |
+| 19 | `request.country != "TH"` (allow-list) | `TH` | no |
+
 ## Semantics both engines honor
 
 - **Actions**: `block` terminates (status/message); `allow` short-circuits *this

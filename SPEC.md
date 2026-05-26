@@ -66,6 +66,13 @@ with actions `log` / `allow` / `block`. Global runs first and is authoritative.
 Rule **strings are portable** across both implementations; the
 [`conformance/`](conformance/) CEL corpus guards that.
 
+**GeoIP**: when `WAF_GEOIP_DB` points at a MaxMind GeoLite2/GeoIP2 `.mmdb`, rules
+can filter on `request.country` (ISO 3166-1 alpha-2, from the client IP), e.g.
+`request.country == "TH"` or `containsAny(request.country, ["CN", "RU"])`. The
+field is **always present**: `""` when GeoIP is off, `"XX"` when the DB can't
+place the IP — so it never fails open on a missing key. (Go exposes it via the
+`parapet/pkg/waf` `Country` resolver hook.)
+
 ## Configuration (environment variables)
 
 | Variable | Default | Scope | Description |
@@ -86,6 +93,7 @@ Rule **strings are portable** across both implementations; the
 | `WAF_ENABLED` | `false` | both | Master switch for the WAF |
 | `WAF_FAIL_MODE` | `open` | both | `open` (skip on rule error) / `closed` (500) |
 | `WAF_EVAL_TIMEOUT` | `5ms` | both | Per-request ruleset deadline |
+| `WAF_GEOIP_DB` | `""` | both | Path to a MaxMind GeoLite2/GeoIP2 `.mmdb`; enables `request.country`. Unset = GeoIP off (`request.country` is `""`) |
 | `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | **Go-only** | Max header size (no Pingora 0.8 equivalent) |
 | `TR_MAX_CONNS_PER_HOST` | stdlib | **Go-only** | Max conns per host (no Pingora 0.8 equivalent) |
 | `PROFILER` / `PROFILER_NAME` | `false` | **Go-only** | Cloud Profiler (no Rust SDK) |

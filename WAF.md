@@ -64,17 +64,53 @@ rules:
 Top-level `request` map (snake_case, ModSecurity-style):
 
 ```
-request.method  host  path  query  uri  proto  scheme  remote_ip
+request.method  host  path  query  uri  proto  scheme  remote_ip  country
         content_length  headers{}  cookies{}  args{}  user_agent  referer  body
 ```
 
 `headers`/`args`/`cookies` are single-valued maps; header keys are lowercased.
 `body` is empty unless body inspection is enabled (off by default).
+`country` is the GeoIP country code — see [GeoIP](#geoip-requestcountry).
 
 Custom functions: `ipInCidr(ip,cidr)`, `regexMatch(s,pattern)` (RE2, cached),
 `containsAny(s,list)`, `hasPrefixAny(s,list)`, `lower(s)`, `upper(s)`,
 `urlDecode(s)`. Query strings are **not** auto-decoded — apply `urlDecode`
 yourself so `?q=1+UNION+SELECT` is normalized before a regex sees it.
+
+## GeoIP (`request.country`)
+
+Set `WAF_GEOIP_DB` to the path of a MaxMind **GeoLite2/GeoIP2 Country** `.mmdb`
+to resolve the client IP to an ISO 3166-1 alpha-2 country, exposed to rules as
+`request.country`:
+
+```yaml
+rules:
+  - id: allow-th-only
+    expression: request.country != "TH"
+    action: block
+  - id: block-geos
+    expression: containsAny(request.country, ["CN", "RU", "KP"])
+    action: block
+```
+
+`request.country` is **always present** in the request map, so a rule referencing
+it never errors on a missing key (no fail-open):
+
+- `""` — GeoIP disabled (`WAF_GEOIP_DB` unset / DB failed to load).
+- `"XX"` — DB loaded but the IP couldn't be placed (private range, not in DB).
+- an ISO code (e.g. `"TH"`) otherwise.
+
+So `request.country != "TH"` blocks unknowns too — the safe default for an
+allow-list. The client IP is the same one used for `request.remote_ip`
+(X-Real-IP → X-Forwarded-For → peer), so it honors `TRUST_PROXY`.
+
+**Implementation.** Go exposes it through the `parapet/pkg/waf` `Country`
+resolver hook, wired to a `maxminddb-golang` lookup; Rust uses the `maxminddb`
+crate. Both load the DB once at startup; a load failure is non-fatal (country
+stays `""`). The DB is **not** shipped in the image and exceeds a ConfigMap's
+1 MB limit — mount it (a `geoipupdate` sidecar/initContainer, or a volume) and
+point `WAF_GEOIP_DB` at it. GeoLite2 requires a MaxMind account/license per their
+EULA.
 
 ## Delivery: ConfigMaps, one marker label
 

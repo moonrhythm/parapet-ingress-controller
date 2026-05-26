@@ -48,6 +48,8 @@ libc = { version = "0.2", optional = true }
 # is RE2-style (linear, no catastrophic backtracking) like Go's regexp.
 cel = { version = "0.13", optional = true }
 regex = { version = "1", optional = true }
+# GeoIP country lookup (request.country) from a MaxMind GeoLite2/GeoIP2 .mmdb.
+maxminddb = { version = "0.28", optional = true }
 
 [features]
 cluster = ["dep:kube", "dep:tokio", "dep:futures", "dep:rustls", "waf"]
@@ -68,7 +70,7 @@ proxy = [
 ]
 # The CEL WAF engine. Enabled by both `proxy` (evaluates) and `cluster`
 # (compiles rules from watched ConfigMaps); keeps cel/regex out of the fast core.
-waf = ["dep:cel", "dep:regex"]
+waf = ["dep:cel", "dep:regex", "dep:maxminddb"]
 
 [lib]
 name = "controller"
