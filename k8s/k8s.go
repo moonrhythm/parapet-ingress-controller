@@ -57,6 +57,8 @@ var client interface {
 	WatchSecrets(ctx context.Context, namespace string) (watch.Interface, error)
 	GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error)
 	WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error)
+	GetConfigMaps(ctx context.Context, namespace, labelSelector string) ([]v1.ConfigMap, error)
+	WatchConfigMaps(ctx context.Context, namespace, labelSelector string) (watch.Interface, error)
 }
 
 // WatchIngresses watches ingresses for given namespace
@@ -97,4 +99,14 @@ func GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error)
 // WatchEndpoints watches endpoints
 func WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error) {
 	return client.WatchEndpoints(ctx, namespace)
+}
+
+// GetConfigMaps lists config maps for given namespace, filtered by labelSelector
+func GetConfigMaps(ctx context.Context, namespace, labelSelector string) ([]v1.ConfigMap, error) {
+	return client.GetConfigMaps(ctx, namespace, labelSelector)
+}
+
+// WatchConfigMaps watches config maps for given namespace, filtered by labelSelector
+func WatchConfigMaps(ctx context.Context, namespace, labelSelector string) (watch.Interface, error) {
+	return client.WatchConfigMaps(ctx, namespace, labelSelector)
 }

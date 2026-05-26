@@ -78,6 +78,107 @@ manifests for the full set). Notable options:
   namespace, not just those referenced by an Ingress's `spec.tls`. Lets a
   wildcard certificate serve SNI without wiring its secret into each ingress.
 
+## Web Application Firewall (WAF)
+
+An opt-in CEL-rule firewall with a platform-wide **global** ruleset plus
+per-tenant **zones** that an ingress binds by reference. Rules live in ConfigMaps
+and hot-reload without restarting the controller or rebuilding routes. Full
+design and the complete CEL reference: [WAF.md](WAF.md).
+
+### Enable it
+
+Set `WAF_ENABLED=true` on the controller (off by default; when off the WAF does no
+work). The controller's ServiceAccount needs `list`/`watch` on `configmaps` —
+already in the [deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/master/deploy)
+role manifests.
+
+### Write rules
+
+Each ConfigMap `data` value is a YAML document of rules. A rule is a CEL
+expression returning a bool plus an action — `log` (record, continue), `allow`
+(short-circuit this ruleset and pass), or `block`:
+
+```yaml
+rules:
+  - id: block-sqli
+    expression: regexMatch(lower(urlDecode(request.query)), "(union\\s+select|or\\s+1=1)")
+    action: block
+  - id: allow-office
+    expression: ipInCidr(request.remote_ip, "203.0.113.0/24")
+    action: allow
+    priority: 0          # lower priority runs first
+```
+
+Variables (`request.method`, `.path`, `.query`, `.headers[...]`, `.remote_ip`, …)
+and functions (`ipInCidr`, `regexMatch`, `containsAny`, `hasPrefixAny`, `lower`,
+`upper`, `urlDecode`) are documented in [WAF.md](WAF.md).
+
+### Global ruleset
+
+Applies to all traffic. Create it in the controller's own namespace
+(`POD_NAMESPACE`) with the label `parapet.moonrhythm.io/waf: global`:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: waf-global
+  namespace: parapet-ingress-controller
+  labels:
+    parapet.moonrhythm.io/waf: global
+data:
+  rules.yaml: |
+    rules:
+      - id: block-scanners
+        expression: containsAny(lower(request.user_agent), ["sqlmap", "nikto"])
+        action: block
+```
+
+### Zones (per-tenant)
+
+A zone is a ConfigMap labeled `parapet.moonrhythm.io/waf: zone`; its **name** is
+the zone id. Create it in the tenant's namespace and bind ingresses to it with the
+`parapet.moonrhythm.io/waf-zone` annotation:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acme                 # zone id
+  namespace: acme-prod
+  labels:
+    parapet.moonrhythm.io/waf: zone
+data:
+  rules.yaml: |
+    rules:
+      - id: block-admin
+        expression: hasPrefixAny(request.path, ["/admin", "/internal"])
+        action: block
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: acme-prod
+  annotations:
+    parapet.moonrhythm.io/waf-zone: acme       # -> acme-prod/acme
+spec:
+  ingressClassName: parapet
+  # ...
+```
+
+A bare id resolves to a zone in the ingress's own namespace; use `namespace/zone`
+to reference a shared zone elsewhere (e.g. `team-x/acme`). The global ruleset runs
+first and is authoritative — a zone cannot `allow`-override a global `block`.
+Editing a tenant's zone affects only the ingresses bound to it.
+
+### Rollout
+
+Ship rules with `action: log` first (shadow mode), watch
+`parapet_waf_matches{action="log"}` for false positives, then switch to `block`.
+Keep `WAF_FAIL_MODE=open` (the default) so a rule evaluation error fails open
+rather than dropping legitimate traffic.
+
 ## Metrics
 
 Parapet ingress controller support prometheus metrics by add prometheus annotations to pod template.
@@ -100,6 +201,7 @@ annotations:
 - parapet_reload{success}
 - parapet_host_ratelimit_requests{host}
 - parapet_host_active_requests{host, upgrade}
+- parapet_waf_matches{rule_id, action, scope}
 
 #### Metrics directly use from parapet
 

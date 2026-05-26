@@ -8,10 +8,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/healthz"
+	"github.com/moonrhythm/parapet/pkg/waf"
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,11 +61,24 @@ type Controller struct {
 	// matching secret into each ingress. Off by default to preserve behavior.
 	LoadAllCerts bool
 
+	// WAFConfig configures the web application firewall; PodNamespace is the
+	// controller's own namespace, which bounds where the global ruleset may be
+	// defined. Both are set before Watch(). See controller_waf.go.
+	WAFConfig    WAFConfig
+	PodNamespace string
+
+	// globalWAF is the always-on baseline firewall; zones holds the tenant zone
+	// registry keyed by <namespace>/<name>, swapped atomically on WAF reload.
+	// WAF reloads are decoupled from the mux — they never rebuild routes.
+	globalWAF *waf.WAF
+	zones     atomic.Pointer[map[string]*waf.WAF]
+
 	// holds current k8s state
-	watchedIngresses sync.Map
-	watchedServices  sync.Map
-	watchedSecrets   sync.Map
-	watchedEndpoints sync.Map
+	watchedIngresses  sync.Map
+	watchedServices   sync.Map
+	watchedSecrets    sync.Map
+	watchedEndpoints  sync.Map
+	watchedConfigMaps sync.Map
 
 	certTable  cert.Table
 	routeTable route.Table
@@ -77,6 +92,7 @@ type Controller struct {
 	reloadServiceDebounce  *debounce.Debounce
 	reloadSecretDebounce   *debounce.Debounce
 	reloadEndpointDebounce *debounce.Debounce
+	reloadWAFDebounce      *debounce.Debounce
 }
 
 // New creates new ingress controller
@@ -89,6 +105,7 @@ func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl.reloadServiceDebounce = debounce.New(ctrl.reloadServiceDebounced, 300*time.Millisecond)
 	ctrl.reloadSecretDebounce = debounce.New(ctrl.reloadSecretDebounced, 300*time.Millisecond)
 	ctrl.reloadEndpointDebounce = debounce.New(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
+	ctrl.reloadWAFDebounce = debounce.New(ctrl.reloadWAFDebounced, 300*time.Millisecond)
 	ctrl.proxy = proxy
 	ctrl.proxy.OnDialError = ctrl.routeTable.MarkBad
 	return ctrl
@@ -121,6 +138,9 @@ func (ctrl *Controller) Watch() {
 	go ctrl.watchServices(ctx)
 	go ctrl.watchSecrets(ctx)
 	go ctrl.watchEndpoints(ctx)
+	if ctrl.WAFConfig.Enabled {
+		go ctrl.watchConfigMaps(ctx)
+	}
 }
 
 func (ctrl *Controller) preloadResources(ctx context.Context) {
@@ -143,6 +163,13 @@ func (ctrl *Controller) preloadResources(ctx context.Context) {
 	for _, e := range endpoints {
 		ctrl.watchedEndpoints.Store(e.Namespace+"/"+e.Name, &e)
 	}
+
+	if ctrl.WAFConfig.Enabled {
+		configmaps, _ := k8s.GetConfigMaps(ctx, ctrl.watchNamespace, wafLabelKey)
+		for _, cm := range configmaps {
+			ctrl.watchedConfigMaps.Store(cm.Namespace+"/"+cm.Name, &cm)
+		}
+	}
 }
 
 func (ctrl *Controller) firstReload() {
@@ -150,6 +177,7 @@ func (ctrl *Controller) firstReload() {
 	ctrl.reloadIngressDebounced()
 	ctrl.reloadSecretDebounced()
 	ctrl.reloadEndpointDebounced()
+	ctrl.reloadWAFDebounced() // no-op when WAF disabled
 
 	// ready to serve requests
 	ctrl.health.SetReady(true)

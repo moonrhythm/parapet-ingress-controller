@@ -61,3 +61,15 @@ func (c *clusterClient) GetEndpoints(ctx context.Context, namespace string) ([]v
 func (c *clusterClient) WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error) {
 	return c.client.CoreV1().Endpoints(namespace).Watch(ctx, metav1.ListOptions{})
 }
+
+func (c *clusterClient) GetConfigMaps(ctx context.Context, namespace, labelSelector string) ([]v1.ConfigMap, error) {
+	list, err := c.client.CoreV1().ConfigMaps(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+func (c *clusterClient) WatchConfigMaps(ctx context.Context, namespace, labelSelector string) (watch.Interface, error) {
+	return c.client.CoreV1().ConfigMaps(namespace).Watch(ctx, metav1.ListOptions{LabelSelector: labelSelector})
+}

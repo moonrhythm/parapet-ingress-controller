@@ -43,10 +43,14 @@ CI: `.github/workflows/rust-test.yaml` (fmt + clippy + test on push/PR) and `rus
 ```
 cmd/parapet-ingress-controller/   # binary entry-point (main.go, config.go)
 controller.go                     # Controller struct — watch/reload logic (generic watchResource)
+controller_waf.go                 # WAF wiring: global instance + zone registry, ConfigMap watch
 retry.go                          # retryMiddleware — retries idempotent requests on upstream failure
+WAF.md                            # WAF feature design (global + zone CEL rulesets)
+wafrule/                          # WAF rule YAML DTO + parser (-> []waf.Rule)
 plugin/                           # annotation-driven middleware plugins
   plugin.go                       # core plugin type + built-in plugins
   auth.go                         # BasicAuth, ForwardAuth
+  waf.go                          # WAFZone — bind ingress to a WAF zone by reference
   trace.go                        # OpenTelemetry tracing
 proxy/                            # reverse-proxy implementation
   proxy.go, transport.go          # http.ReverseProxy wrapper
@@ -60,7 +64,7 @@ cert/                             # TLS certificate table (SNI lookup)
 k8s/                              # Kubernetes client helpers
   k8s.go, cluster.go, fs.go      # in-cluster / local kubeconfig init + list/watch helpers
 metric/                           # Prometheus metrics
-  requests.go, backendconns.go, host.go, reload.go
+  requests.go, backendconns.go, host.go, reload.go, waf.go
   cache.go                        # generic lock+map cache for per-label-set metric handles
 state/                            # per-request state map (passed via context)
 debounce/                         # debounce helper used for reload coalescing
@@ -71,7 +75,7 @@ deploy/                           # raw Kubernetes YAML manifests
 ## Key concepts
 
 ### Controller lifecycle
-`Controller.Watch()` starts four goroutines that continuously watch Ingress, Service, Secret, and Endpoints resources. Changes are coalesced through a 300 ms `debounce.Debounce` before triggering a reload. On reload, a new `http.ServeMux` is built and swapped in under a `sync.RWMutex` — zero downtime.
+`Controller.Watch()` starts four goroutines that continuously watch Ingress, Service, Secret, and Endpoints resources (plus a fifth, ConfigMaps, when `WAF_ENABLED=true`). Changes are coalesced through a 300 ms `debounce.Debounce` before triggering a reload. On reload, a new `http.ServeMux` is built and swapped in under a `sync.RWMutex` — zero downtime. WAF ConfigMap changes are the exception: they recompile rulesets without rebuilding the mux (see the WAF concept below).
 
 ### Plugins
 A `Plugin` is `func(ctx plugin.Context)` where `Context` carries:
@@ -97,6 +101,13 @@ TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.
 
 On an upstream failure (dial error, upstream 502/503), the proxy's `ErrorHandler` panics; `retryMiddleware` (`retry.go`) recovers it and retries the request (up to 5 times with backoff) — but only when the body hasn't been read, so non-idempotent requests aren't replayed. `proxy.IsRetryable` decides which errors qualify.
 
+### WAF (opt-in, `WAF_ENABLED=true`)
+A CEL-rule firewall on top of `parapet/pkg/waf`. **Full design in [WAF.md](WAF.md).** Two rulesets, both fed by label-marked ConfigMaps (`parapet.moonrhythm.io/waf: global|zone`), watched as a 5th resource:
+- **Global** (`globalWAF`, mounted in `main.go`'s `m` chain before `ctrl`) — one baseline ruleset, honored only from `POD_NAMESPACE`, applied to all traffic.
+- **Zones** (`zones atomic.Pointer[map[string]*waf.WAF]`, key `<namespace>/<name>`) — tenant rulesets an ingress binds via `parapet.moonrhythm.io/waf-zone`; `plugin.WAFZone` resolves the key (namespace-local, or `ns/id` cross-ref) and looks up the live registry per request.
+
+Global runs first and is authoritative. **WAF reload is decoupled from the mux**: ConfigMap changes call `reloadWAFDebounced` (recompile + atomic swap) and never rebuild routes; `SetRules` is all-or-nothing so a bad ruleset keeps the last-good one. Rules parse via `wafrule/`; matches count `parapet_waf_matches{rule_id,action,scope}` (`metric/waf.go`). Code: `controller_waf.go`, `plugin/waf.go`, `wafrule/`.
+
 ## Annotation reference
 
 | Annotation | Values | Effect |
@@ -115,6 +126,7 @@ On an upstream failure (dial error, upstream 502/503), the proxy's `ErrorHandler
 | `parapet.moonrhythm.io/strip-prefix` | path prefix | Strip prefix from request path |
 | `parapet.moonrhythm.io/basic-auth` | see auth.go | HTTP Basic Auth |
 | `parapet.moonrhythm.io/forward-auth` | URL | Delegate auth to external service |
+| `parapet.moonrhythm.io/waf-zone` | zone id, or `ns/id` | Bind the ingress to a WAF zone (see [WAF.md](WAF.md)) |
 
 ## Configuration (environment variables)
 
@@ -139,6 +151,12 @@ On an upstream failure (dial error, upstream 502/503), the proxy's `ErrorHandler
 | `PROFILER` | `false` | Enable Cloud Profiler |
 | `PROFILER_NAME` | | Cloud Profiler service name |
 | `DISABLE_LOG` | `false` | Suppress access log |
+| `WAF_ENABLED` | `false` | Master switch for the WAF (global + zone rulesets from ConfigMaps; see [WAF.md](WAF.md)) |
+| `WAF_FAIL_MODE` | `open` | `open` (rule eval error → allow + log) or `closed` (→ 500) |
+| `WAF_EVAL_TIMEOUT` | `5ms` | Per-request deadline for the whole ruleset |
+| `WAF_COST_LIMIT` | `1000000` | CEL cost cap per rule |
+| `WAF_INSPECT_BODY` | `0` | Inspect up to N request-body bytes (0 = `request.body` is empty) |
+| `WAF_DISABLE_MACROS` | `false` | Refuse rules using `all`/`exists`/`map`/`filter` |
 
 ## Build & run
 

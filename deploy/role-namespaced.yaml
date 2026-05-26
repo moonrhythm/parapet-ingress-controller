@@ -19,6 +19,7 @@ rules:
   - services
   - secrets
   - endpoints
+  - configmaps
   verbs:
   - list
   - watch
