@@ -8,12 +8,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/moonrhythm/parapet"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 
+	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 )
 
@@ -192,6 +194,62 @@ func TestBuildRoutes_Duplicate(t *testing.T) {
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	assert.True(t, called)
+}
+
+// /healthz is served only when the request is addressed to an IP — k8s probes
+// hit the pod IP, never a configured domain (parapet healthz Host:false). A
+// request with a domain Host falls through to normal routing, so external
+// callers can't probe health and a backend's own /healthz is reachable. This
+// also confirms the known_host metric wiring (run after Healthz) doesn't change
+// that.
+func TestHealthzServedOnlyOnIPHost(t *testing.T) {
+	t.Parallel()
+
+	ctrl := New("default", proxy.New())
+	ctrl.firstReload() // ready; rebuilds knownHosts (empty: no ingresses here)
+
+	// the edge chain as wired in main(): Healthz first, then the
+	// known_host-bounded metric middlewares, then routing (404 here).
+	m := parapet.Middlewares{}
+	m.Use(ctrl.Healthz())
+	m.Use(metric.HostActiveTracker(ctrl.IsKnownHost))
+	m.Use(metric.Requests(ctrl.IsKnownHost))
+	h := m.ServeHandler(http.NotFoundHandler())
+
+	get := func(target string) int {
+		r := httptest.NewRequest(http.MethodGet, target, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+
+	// IP Host (probe style): liveness + readiness are served.
+	assert.Equal(t, http.StatusOK, get("http://10.0.0.5/healthz"), "liveness on IP host")
+	assert.Equal(t, http.StatusOK, get("http://10.0.0.5/healthz?ready=1"), "readiness on IP host")
+
+	// domain Host: not intercepted — falls through to routing (404, not 200).
+	assert.Equal(t, http.StatusNotFound, get("http://app.example.com/healthz"),
+		"/healthz on a domain host must route normally, not hit the health check")
+}
+
+func TestBuildKnownHosts(t *testing.T) {
+	t.Parallel()
+
+	routes := map[string]http.Handler{
+		"example.com/":        http.NotFoundHandler(),
+		"example.com/path":    http.NotFoundHandler(),
+		"api.example.com/v1/": http.NotFoundHandler(),
+		"/host-less-path":     http.NotFoundHandler(), // host-less => no host
+	}
+	known := buildKnownHosts(routes)
+
+	_, ok := known["example.com"]
+	assert.True(t, ok, "example.com is known")
+	_, ok = known["api.example.com"]
+	assert.True(t, ok, "api.example.com is known")
+	assert.Len(t, known, 2, "only the two distinct hosts; host-less route contributes none")
+	_, ok = known["evil.example.com"]
+	assert.False(t, ok, "unconfigured host is not known")
 }
 
 func TestGetIngressClass(t *testing.T) {

@@ -16,8 +16,11 @@ import (
 
 const requestSizeHint = 1000
 
-// Requests returns middleware that collect request information
-func Requests() parapet.Middleware {
+// Requests returns middleware that collect request information. isKnownHost (may
+// be nil) bounds the `host` label: a host the router doesn't serve collapses to
+// the "other" sentinel so a random-Host flood can't grow series cardinality.
+func Requests(isKnownHost func(host string) bool) parapet.Middleware {
+	_promRequests.isKnownHost = isKnownHost
 	return &_promRequests
 }
 
@@ -28,6 +31,8 @@ type promRequests struct {
 	durations *prometheus.HistogramVec
 
 	cache *cache[requestKey, *requestMetric]
+
+	isKnownHost func(host string) bool
 }
 
 // requestKey is the cache key for the per-label-set metric handles. Using a
@@ -70,8 +75,18 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 	ctx := r.Context()
 	s := state.Get(ctx)
 
+	host := HostLabel(r.Host, p.isKnownHost)
+
+	// Edge rejection: a tracked rejection status where the request never reached
+	// a backend (makeHandler sets serviceTarget only when it proxies). Counted in
+	// the host-less rejected_requests metric, so an abusive flood can't grow its
+	// cardinality the way the host-labeled `requests` metric otherwise would.
+	if reason := edgeRejectReason(s["serviceTarget"] != "", status); reason != "" {
+		RejectedRequest(reason)
+	}
+
 	key := requestKey{
-		host:        r.Host,
+		host:        host,
 		namespace:   s["namespace"],
 		ingress:     s["ingress"],
 		serviceName: s["serviceName"],
@@ -83,7 +98,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 	rm := p.cache.getOrCreate(key, func() *requestMetric {
 		return &requestMetric{
 			counter: p.vec.With(prometheus.Labels{
-				"host":              r.Host,
+				"host":              host,
 				"method":            r.Method,
 				"ingress_name":      s["ingress"],
 				"ingress_namespace": s["namespace"],

@@ -51,13 +51,16 @@ func (p *host) getM(host, upgrade string) prometheus.Gauge {
 	})
 }
 
-type promHostTracker struct{}
+type promHostTracker struct {
+	isKnownHost func(host string) bool
+}
 
 func (p promHostTracker) ServeHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upgrade := strings.ToLower(strings.TrimSpace(header.Get(r.Header, header.Upgrade)))
 
-		m := _host.getM(r.Host, upgrade)
+		// Sanitize once so the Inc/Dec pair use the same (bounded) label.
+		m := _host.getM(HostLabel(r.Host, p.isKnownHost), upgrade)
 		m.Inc()
 		defer m.Dec()
 
@@ -65,8 +68,11 @@ func (p promHostTracker) ServeHandler(h http.Handler) http.Handler {
 	})
 }
 
-func HostActiveTracker() parapet.Middleware {
-	return promHostTracker{}
+// HostActiveTracker returns middleware tracking in-flight requests per host.
+// isKnownHost (may be nil) bounds the `host` label to the "other" sentinel for
+// hosts the router doesn't serve.
+func HostActiveTracker(isKnownHost func(host string) bool) parapet.Middleware {
+	return promHostTracker{isKnownHost: isKnownHost}
 }
 
 var _hostRatelimit promHostRatelimit
