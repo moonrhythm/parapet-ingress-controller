@@ -41,6 +41,12 @@ type Controller struct {
 	// mu is the mutex for mux
 	mu  sync.RWMutex
 	mux *http.ServeMux
+	// knownHosts is the set of hosts the current mux serves (the host part of
+	// each registered route). Guarded by mu and swapped atomically with mux on
+	// reload. Used to bound host-labeled metric cardinality: a Host the router
+	// doesn't serve collapses to a sentinel label instead of creating an
+	// unbounded number of series under a random-Host flood.
+	knownHosts map[string]struct{}
 
 	// namespace to watch, or empty to watch all
 	watchNamespace string
@@ -356,10 +362,34 @@ func (ctrl *Controller) reloadIngressDebounced() {
 	})
 
 	mux := buildRoutes(routes)
+	knownHosts := buildKnownHosts(routes)
 	ctrl.mu.Lock()
 	ctrl.mux = mux
+	ctrl.knownHosts = knownHosts
 	ctrl.mu.Unlock()
 	ctrl.reloadSecret()
+}
+
+// buildKnownHosts extracts the distinct host part (everything before the first
+// '/') of each registered route key. Host-less routes (keys starting with '/')
+// contribute nothing.
+func buildKnownHosts(routes map[string]http.Handler) map[string]struct{} {
+	hosts := make(map[string]struct{}, len(routes))
+	for r := range routes {
+		if i := strings.IndexByte(r, '/'); i > 0 {
+			hosts[r[:i]] = struct{}{}
+		}
+	}
+	return hosts
+}
+
+// IsKnownHost reports whether the current routes serve host (already lowercased
+// and port-stripped by the upstream middleware, matching the registered keys).
+func (ctrl *Controller) IsKnownHost(host string) bool {
+	ctrl.mu.RLock()
+	_, ok := ctrl.knownHosts[host]
+	ctrl.mu.RUnlock()
+	return ok
 }
 
 func (ctrl *Controller) reloadService() {

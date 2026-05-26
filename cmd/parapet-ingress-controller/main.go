@@ -110,15 +110,15 @@ func main() {
 	m.Use(ctrl.Healthz())
 	m.Use(host.StripPort())
 	m.Use(host.ToLower())
-	m.Use(metric.HostActiveTracker())
-	m.Use(hostCountryRateLimit())
-	m.Use(hostRateLimit())
+	m.Use(metric.HostActiveTracker(ctrl.IsKnownHost))
+	m.Use(hostCountryRateLimit(ctrl.IsKnownHost))
+	m.Use(hostRateLimit(ctrl.IsKnownHost))
 
 	if !disableLog {
 		m.Use(logger.Stdout())
 	}
 	m.Use(state.Middleware())
-	m.Use(metric.Requests())
+	m.Use(metric.Requests(ctrl.IsKnownHost))
 	m.Use(compress.Gzip())
 	m.Use(compress.BrWithQuality(4))
 	m.Use(ctrl)
@@ -233,7 +233,7 @@ func configTransport(tr *http.Transport) {
 }
 
 // hostRateLimit protects from unresponsive upstreams by limit concurrent requests to the same host.
-func hostRateLimit() parapet.Middleware {
+func hostRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
 	concurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY") // concurrent requests
 	concurrentSize := config.Int("HOST_CONCURRENT_SIZE")         // queue size
 
@@ -247,7 +247,8 @@ func hostRateLimit() parapet.Middleware {
 
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		metric.HostRatelimitRequest(keyFromRequest(r))
+		metric.HostRatelimitRequest(metric.HostLabel(r.Host, isKnownHost))
+		metric.RejectedRequest("host_limit")
 	}
 
 	if concurrentSize > 0 {
@@ -277,7 +278,7 @@ func hostRateLimit() parapet.Middleware {
 }
 
 // hostCountryRateLimit protects from unresponsive upstreams by limit concurrent requests to the same host and country.
-func hostCountryRateLimit() parapet.Middleware {
+func hostCountryRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
 	concurrentCapacity := config.Int("HOST_COUNTRY_CONCURRENT_CAPACITY") // concurrent requests
 	concurrentSize := config.Int("HOST_COUNTRY_CONCURRENT_SIZE")         // queue size
 	countryHeaderRaw := strings.TrimSpace(config.String("HOST_COUNTRY_HEADER"))
@@ -315,7 +316,8 @@ func hostCountryRateLimit() parapet.Middleware {
 
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		metric.HostRatelimitRequest(keyFromRequest(r))
+		metric.HostRatelimitRequest(metric.HostLabel(r.Host, isKnownHost))
+		metric.RejectedRequest("host_limit")
 	}
 
 	if concurrentSize > 0 {

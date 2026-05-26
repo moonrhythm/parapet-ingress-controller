@@ -194,6 +194,26 @@ func TestBuildRoutes_Duplicate(t *testing.T) {
 	assert.True(t, called)
 }
 
+func TestBuildKnownHosts(t *testing.T) {
+	t.Parallel()
+
+	routes := map[string]http.Handler{
+		"example.com/":        http.NotFoundHandler(),
+		"example.com/path":    http.NotFoundHandler(),
+		"api.example.com/v1/": http.NotFoundHandler(),
+		"/host-less-path":     http.NotFoundHandler(), // host-less => no host
+	}
+	known := buildKnownHosts(routes)
+
+	_, ok := known["example.com"]
+	assert.True(t, ok, "example.com is known")
+	_, ok = known["api.example.com"]
+	assert.True(t, ok, "api.example.com is known")
+	assert.Len(t, known, 2, "only the two distinct hosts; host-less route contributes none")
+	_, ok = known["evil.example.com"]
+	assert.False(t, ok, "unconfigured host is not known")
+}
+
 func TestGetIngressClass(t *testing.T) {
 	t.Parallel()
 
