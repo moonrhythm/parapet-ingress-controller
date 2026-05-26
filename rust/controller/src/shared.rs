@@ -76,23 +76,44 @@ impl Shared {
 
         let router = build_router(&ingresses, &svc_map, &self.ingress_class);
         let n_routes = router.len();
+        let patterns = router.patterns();
         // Distinct hosts the router serves (the substring before the first '/' of
         // each `host+path` pattern; host-less patterns contribute nothing). Drives
         // metric-label sanitization so unknown Hosts can't blow up cardinality.
-        let known_hosts: HashSet<String> = router
-            .patterns()
+        let known_hosts: HashSet<String> = patterns
             .iter()
             .filter_map(|p| {
                 let host = p.split('/').next().unwrap_or("");
                 (!host.is_empty()).then(|| host.to_ascii_lowercase())
             })
             .collect();
+        // Bound the per-pattern rate-limit map to the live route set, so windows
+        // for deleted routes don't linger for the process lifetime.
+        #[cfg(feature = "proxy")]
+        crate::proxy::ratelimit::windows().retain_patterns(&patterns.iter().copied().collect());
         self.known_hosts.store(Arc::new(known_hosts));
         self.router.store(Arc::new(router));
         self.route_table
             .set_port_routes(build_port_routes(&services));
-        self.route_table
-            .set_host_routes(build_host_routes(&endpoints));
+
+        let host_routes = build_host_routes(&endpoints);
+        // Drop addr-keyed backend metric series for pod IPs that are no longer
+        // routable; otherwise the registry accumulates a dead series per pod IP
+        // ever seen, since IPs churn on every deploy.
+        #[cfg(feature = "proxy")]
+        crate::proxy::metrics::prune_backend_addrs(
+            &host_routes
+                .values()
+                .flat_map(|lb| lb.ips())
+                .map(String::as_str)
+                .collect(),
+        );
+        self.route_table.set_host_routes(host_routes);
+        // Prune stale bad-addr marks. The route maps above are replaced wholesale,
+        // but the bad-addr set persists for the process lifetime, so without this
+        // it grows one entry per distinct failed pod IP forever (pod IPs churn on
+        // every deploy — exactly when reloads fire).
+        self.route_table.prune_bad();
         let certs = build_certs(&ingresses, &sec_map, self.load_all_certs);
         let n_certs = certs.len();
         self.certs.store(Arc::new(CertTable::build(certs)));
