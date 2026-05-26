@@ -209,8 +209,10 @@ state — no Pingora `ConnState` equivalent) and `go_*` runtime metrics.
 - **Retry is connection-only.** The proxy retries (up to 5×, marking the bad pod
   and round-robining) only on *connection* failures — `fail_to_connect` and a
   reused keepalive connection breaking before a response. It **never** retries on
-  an upstream HTTP status (Go retried 502/503): once the upstream responds it has
-  processed the request, so retrying could duplicate side effects and amplify load.
+  an upstream HTTP status: once the upstream responds it has processed the
+  request, so retrying could duplicate side effects and amplify load. (The Go
+  implementation matches this — `IsRetryable` is dial-error-only; see
+  [`../SPEC.md`](../SPEC.md).)
 - **DDoS resilience.** Bounded upstream connect timeouts (above), host/method
   metric-cardinality bounding, a downstream `keepalive_request_limit`, and a 60s
   default downstream read timeout (Slowloris).
