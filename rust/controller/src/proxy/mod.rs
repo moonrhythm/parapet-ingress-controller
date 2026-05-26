@@ -213,11 +213,14 @@ impl ProxyHttp for Proxy {
         let host = req_host(session);
         let path = session.req_header().uri.path().to_string();
 
-        // capture access-log fields up front
+        // Always-needed fields: request start (metrics duration), method (metrics
+        // label), and host (the proxy-error log). The richer access-log fields are
+        // captured only when the access log is enabled — with DISABLE_LOG=true none
+        // of the timestamp / client-IP / URL / header-string work below is done per
+        // request, so disabling the log actually removes its per-request cost.
         ctx.start = Some(Instant::now());
-        ctx.timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-        ctx.remote_ip = remote_ip.map(|i| i.to_string()).unwrap_or_default();
-        ctx.capture(session, &host, scheme);
+        ctx.method = session.req_header().method.to_string();
+        ctx.host = host.clone();
         // Sanitize the Host for metric labels: a Host the router doesn't serve
         // (e.g. a random-Host flood, scanners) collapses to one sentinel series
         // instead of creating an unbounded number of them.
@@ -226,6 +229,11 @@ impl ProxyHttp for Proxy {
         } else {
             UNKNOWN_HOST_LABEL.to_string()
         };
+        if self.log_enabled {
+            ctx.timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+            ctx.remote_ip = remote_ip.map(|i| i.to_string()).unwrap_or_default();
+            ctx.capture(session, scheme);
+        }
 
         // health checks (run before logging, like the Go middleware order).
         // Only intercept when the request is addressed to an IP — k8s probes hit
@@ -747,15 +755,16 @@ impl Proxy {
 }
 
 impl Ctx {
-    fn capture(&mut self, session: &Session, host: &str, scheme: &str) {
+    /// Capture the access-log-only fields. Called only when the access log is
+    /// enabled (see `request_filter`); `method` and `host` are set there because
+    /// metrics and the proxy-error log need them even with the log disabled.
+    fn capture(&mut self, session: &Session, scheme: &str) {
         let req = session.req_header();
-        self.method = req.method.to_string();
-        self.host = host.to_string();
         // Path only — never the query string, which can carry sensitive data
         // (tokens, emails). Same reason `request_summary` redacts pingora's error
         // logs; this keeps it out of the JSON access log's `requestUrl` too.
         let path = req.uri.path();
-        self.request_url = format!("{scheme}://{host}{path}");
+        self.request_url = format!("{scheme}://{}{path}", self.host);
         self.request_body_size = content_length(session).map(|c| c as i64).unwrap_or(-1);
         // Strip the Referer's query too — a client-supplied URL can leak secrets
         // there (e.g. an OAuth code in a redirect Referer).
