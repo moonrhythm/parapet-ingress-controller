@@ -8,8 +8,10 @@
 //! connections). `parapet_connections` (downstream gauge by connection state)
 //! has no Pingora `ConnState` equivalent and is not implemented.
 
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
+use prometheus::core::Collector;
 use prometheus::{
     register_histogram_vec, register_int_counter, register_int_counter_vec, register_int_gauge_vec,
     HistogramVec, IntCounter, IntCounterVec, IntGaugeVec,
@@ -207,6 +209,25 @@ fn known_method(method: &str) -> &str {
     }
 }
 
+/// Collapse the `Upgrade` request header to a bounded label set for the
+/// `host_active_requests` gauge. The Upgrade token is client-controlled and
+/// arbitrary, so labeling the gauge with it raw lets a client mint an unbounded
+/// number of permanent series by sending random `Upgrade:` values to a known
+/// host (same OOM class as the host label, which is why `host` is sanitized).
+/// `""` is the (common) no-upgrade bucket; everything unrecognized is `"other"`.
+/// Returns a `'static` label so the caller stores no per-request allocation.
+pub fn known_upgrade(upgrade: &str) -> &'static str {
+    if upgrade.is_empty() {
+        ""
+    } else if upgrade.eq_ignore_ascii_case("websocket") {
+        "websocket"
+    } else if upgrade.eq_ignore_ascii_case("h2c") {
+        "h2c"
+    } else {
+        "other"
+    }
+}
+
 pub fn record_request(m: &RequestMetric) {
     let metrics = metrics();
     let status = m.status.to_string();
@@ -236,9 +257,78 @@ pub fn inc_reload(success: bool) {
         .inc();
 }
 
+/// Pull the `addr` label value out of every series of an addr-keyed metric vec.
+/// Pingora/Prometheus never drops a label set on its own, so this is how we find
+/// the stale ones to remove.
+fn addr_label_values<C: Collector>(c: &C) -> Vec<String> {
+    c.collect()
+        .iter()
+        .flat_map(|mf| mf.get_metric())
+        .filter_map(|m| {
+            m.get_label()
+                .iter()
+                .find(|l| l.get_name() == "addr")
+                .map(|l| l.get_value().to_string())
+        })
+        .collect()
+}
+
+/// Remove addr-keyed backend series whose pod IP is no longer routable. The
+/// `addr` label is `podIP:port`, and pod IPs churn on every deploy, so without
+/// this the registry accumulates one dead series per pod IP ever seen — growing
+/// both resident memory and the `/metrics` scrape payload without bound. Called
+/// on reload with the current pod-IP set (the only churning part of the addr;
+/// the port comes from stable service config).
+pub fn prune_backend_addrs(current_ips: &HashSet<&str>) {
+    let m = metrics();
+    prune_addr_series(
+        &m.backend_read,
+        &m.backend_write,
+        &m.backend_conn,
+        current_ips,
+    );
+}
+
+/// The pruning logic, over explicit vecs so it can be unit-tested on local
+/// (unregistered) metrics — testing it against the process-global registry would
+/// race other tests that also call `prune_backend_addrs` via `Shared::rebuild`.
+fn prune_addr_series(
+    read: &IntCounterVec,
+    write: &IntCounterVec,
+    conn: &IntGaugeVec,
+    current_ips: &HashSet<&str>,
+) {
+    // `podIP:port` — split off the last ':' so IPv6 (which contains ':') still
+    // yields the bare IP, matching the IPs stored in the route table.
+    let is_stale = |addr: &str| -> bool {
+        let ip = addr.rsplit_once(':').map(|(ip, _)| ip).unwrap_or(addr);
+        !current_ips.contains(ip)
+    };
+
+    // Byte counters: safe to drop the moment the pod IP is gone.
+    for vec in [read, write] {
+        for addr in addr_label_values(vec) {
+            if is_stale(&addr) {
+                let _ = vec.remove_label_values(&[&addr]);
+            }
+        }
+    }
+    // In-flight gauge: only drop a stale addr once it has no live requests. A
+    // long-lived request to a since-removed pod can still be in flight (gauge
+    // >= 1); removing it then would let its `dec` on completion re-create the
+    // series at -1. `<= 0` (not `== 0`) so that if such a -1 ever slips through a
+    // prune/inc/dec race it still self-heals on a later reload instead of
+    // sticking forever (a stuck -1 would never satisfy `== 0`).
+    for addr in addr_label_values(conn) {
+        if is_stale(&addr) && conn.with_label_values(&[&addr]).get() <= 0 {
+            let _ = conn.remove_label_values(&[&addr]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::known_method;
+    use super::*;
 
     #[test]
     fn known_method_collapses_unknown() {
@@ -248,5 +338,58 @@ mod tests {
         assert_eq!(known_method("BREW"), "other");
         assert_eq!(known_method(""), "other");
         assert_eq!(known_method("get"), "other"); // standard methods arrive upper-cased
+    }
+
+    #[test]
+    fn known_upgrade_collapses_unknown() {
+        assert_eq!(known_upgrade(""), ""); // no Upgrade header -> normal bucket
+        assert_eq!(known_upgrade("websocket"), "websocket");
+        assert_eq!(known_upgrade("WebSocket"), "websocket"); // case-insensitive
+        assert_eq!(known_upgrade("h2c"), "h2c");
+        // arbitrary client-supplied tokens collapse to one label (cardinality cap)
+        assert_eq!(known_upgrade("evil-random-123"), "other");
+        assert_eq!(known_upgrade("TLS/1.2"), "other");
+    }
+
+    #[test]
+    fn prune_addr_series_drops_stale_pod_ips() {
+        use prometheus::Opts;
+        // Local, unregistered vecs: isolated from the process-global registry
+        // (other tests call prune via Shared::rebuild and would race us).
+        let read = IntCounterVec::new(Opts::new("t_read", "h"), &["addr"]).unwrap();
+        let write = IntCounterVec::new(Opts::new("t_write", "h"), &["addr"]).unwrap();
+        let conn = IntGaugeVec::new(Opts::new("t_conn", "h"), &["addr"]).unwrap();
+
+        let live = "10.0.0.1:8080";
+        let dead = "10.0.0.2:8080";
+        write.with_label_values(&[live]).inc();
+        write.with_label_values(&[dead]).inc();
+        read.with_label_values(&[dead]).inc();
+        conn.with_label_values(&[dead]).inc(); // in-flight > 0 -> not pruned yet
+
+        // Only 10.0.0.1 is still routable; 10.0.0.2's pod is gone.
+        let current: HashSet<&str> = ["10.0.0.1"].into_iter().collect();
+        prune_addr_series(&read, &write, &conn, &current);
+
+        let writes = addr_label_values(&write);
+        assert!(writes.iter().any(|a| a == live), "live addr kept");
+        assert!(!writes.iter().any(|a| a == dead), "stale counter removed");
+        assert!(
+            !addr_label_values(&read).iter().any(|a| a == dead),
+            "stale read counter removed"
+        );
+        // gauge still > 0 for the stale addr -> retained to avoid a negative re-create
+        assert!(
+            addr_label_values(&conn).iter().any(|a| a == dead),
+            "in-flight gauge for stale addr retained until it hits 0"
+        );
+
+        // once it settles to 0, a later prune drops it
+        conn.with_label_values(&[dead]).dec();
+        prune_addr_series(&read, &write, &conn, &current);
+        assert!(
+            !addr_label_values(&conn).iter().any(|a| a == dead),
+            "settled stale gauge pruned"
+        );
     }
 }

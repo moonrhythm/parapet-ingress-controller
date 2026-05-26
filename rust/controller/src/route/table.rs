@@ -60,6 +60,15 @@ impl Table {
     pub fn mark_bad(&self, addr: &str) {
         self.bad.mark_bad(addr);
     }
+
+    /// Drop bad-address entries whose 2s window has expired. The `bad` map lives
+    /// for the process lifetime (it is not rebuilt on reload like the route maps),
+    /// so without this it would accumulate one entry per distinct failed pod IP
+    /// forever — and pod IPs churn on every deploy. Called from the reload path,
+    /// which is also when pod IPs turn over.
+    pub fn prune_bad(&self) {
+        self.bad.clear();
+    }
 }
 
 #[cfg(test)]

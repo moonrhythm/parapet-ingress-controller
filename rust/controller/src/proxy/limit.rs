@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -22,16 +22,36 @@ pub struct HostConcurrency {
 struct Slot {
     count: AtomicUsize,
     sem: Option<Arc<Semaphore>>, // present only for the queueing strategy
+    key: String,                 // own copy of the map key, so `Guard::drop` can evict
 }
 
 pub struct Guard {
     slot: Arc<Slot>,
+    limiter: Weak<HostConcurrency>,
     _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
-        self.slot.count.fetch_sub(1, Ordering::Relaxed);
+        // Release the in-flight slot. If this was the last holder, evict the now
+        // idle slot from the map so it can't accumulate one entry per distinct
+        // key forever — notably `host|country` keys, where the country comes from
+        // a request header and is otherwise unbounded. `count` is mutated only
+        // under the `slots` lock (in `acquire`), so re-checking it under that lock
+        // here makes the evict race-free: a slot at count 0 under the lock has no
+        // live or pending holders.
+        if self.slot.count.fetch_sub(1, Ordering::Relaxed) == 1 {
+            if let Some(limiter) = self.limiter.upgrade() {
+                let mut slots = limiter.slots.lock().unwrap();
+                if let Some(existing) = slots.get(&self.slot.key) {
+                    if Arc::ptr_eq(existing, &self.slot)
+                        && self.slot.count.load(Ordering::Relaxed) == 0
+                    {
+                        slots.remove(&self.slot.key);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -50,25 +70,34 @@ impl HostConcurrency {
 
     /// Acquire a slot for `key`, waiting if queueing is enabled. Returns `None`
     /// when the limit (capacity, plus the bounded queue) is exceeded.
-    pub async fn acquire(&self, key: &str) -> Option<Guard> {
-        let slot = {
+    pub async fn acquire(self: &Arc<Self>, key: &str) -> Option<Guard> {
+        let (slot, n) = {
             let mut slots = self.slots.lock().unwrap();
-            slots
-                .entry(key.to_string())
-                .or_insert_with(|| {
-                    Arc::new(Slot {
+            // Look up first so the common (slot-exists) path allocates no String;
+            // only a brand-new key pays for the owned map key + the slot's own copy.
+            let slot = match slots.get(key) {
+                Some(s) => s.clone(),
+                None => {
+                    let s = Arc::new(Slot {
                         count: AtomicUsize::new(0),
                         sem: (self.size > 0).then(|| Arc::new(Semaphore::new(self.capacity))),
-                    })
-                })
-                .clone()
+                        key: key.to_string(),
+                    });
+                    slots.insert(key.to_string(), s.clone());
+                    s
+                }
+            };
+            // Increment under the lock (paired with the evict check in `Guard::drop`)
+            // so a slot observed at count 0 under the lock is truly idle.
+            let n = slot.count.fetch_add(1, Ordering::Relaxed) + 1;
+            (slot, n)
         };
 
-        let n = slot.count.fetch_add(1, Ordering::Relaxed) + 1;
         // Tie the count decrement to a guard immediately, so it is released even
         // if this future is dropped while awaiting the permit (client disconnect).
         let mut guard = Guard {
             slot: slot.clone(),
+            limiter: Arc::downgrade(self),
             _permit: None,
         };
 
@@ -124,5 +153,25 @@ mod tests {
         // releasing the active slot lets the waiter through
         drop(g1);
         assert!(waiter.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn idle_slots_are_evicted() {
+        let lc = HostConcurrency::new(2, 0).unwrap();
+        // distinct keys (e.g. host|country) come and go; each must leave no trace
+        for i in 0..100 {
+            let g = lc.acquire(&format!("country-{i}")).await.unwrap();
+            drop(g); // last holder drops -> slot evicted
+        }
+        assert_eq!(lc.slots.lock().unwrap().len(), 0, "no idle slots retained");
+
+        // a slot with a live holder is NOT evicted, and is reclaimed once idle
+        let g1 = lc.acquire("h").await.unwrap();
+        let g2 = lc.acquire("h").await.unwrap();
+        assert_eq!(lc.slots.lock().unwrap().len(), 1);
+        drop(g1);
+        assert_eq!(lc.slots.lock().unwrap().len(), 1, "still one holder");
+        drop(g2);
+        assert_eq!(lc.slots.lock().unwrap().len(), 0, "evicted when last drops");
     }
 }
