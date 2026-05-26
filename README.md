@@ -1,6 +1,7 @@
 # parapet-ingress-controller
 
-![Build Status](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml/badge.svg?branch=master)
+[![Go Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml/badge.svg?branch=master)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml)
+[![Rust Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/rust-test.yaml/badge.svg?branch=master)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/rust-test.yaml)
 [![codecov](https://codecov.io/gh/moonrhythm/parapet-ingress-controller/branch/master/graph/badge.svg)](https://codecov.io/gh/moonrhythm/parapet-ingress-controller)
 [![Go Report Card](https://goreportcard.com/badge/github.com/moonrhythm/parapet-ingress-controller)](https://goreportcard.com/report/github.com/moonrhythm/parapet-ingress-controller)
 
