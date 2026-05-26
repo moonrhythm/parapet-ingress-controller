@@ -1,0 +1,129 @@
+# Behavior contract
+
+This is the **single source of truth** for what the controller does — the
+contract that **both** implementations ([`go/`](go/) and [`rust/`](rust/)) must
+honor. When behavior changes, change it here first, then in both implementations
+and the [`conformance/`](conformance/) fixtures.
+
+Anything marked **Go-only** or **Rust-only** is an intentional divergence (with a
+reason); everything else must behave identically across the two binaries.
+
+## IngressClass
+
+Handles Ingresses whose `ingressClassName` (or the legacy
+`kubernetes.io/ingress.class` annotation) equals `INGRESS_CLASS` (default
+`parapet`). Others are ignored.
+
+## Routing
+
+Routes are keyed `host + path`. PathType semantics:
+
+| PathType | Registration |
+|---|---|
+| `Prefix` | both `host/path` and `host/path/` |
+| `Exact` | `host/path` only (trailing slash stripped; root `/` falls back to prefix) |
+| `ImplementationSpecific` | as-is |
+
+Backends resolve to a Service `host:port`, then to pod IPs via Endpoints.
+Endpoint selection is **round-robin**; an address that fails to dial is marked
+**bad for 2s** and skipped (reactive health — no active probing). Host is
+lowercased and port-stripped before matching.
+
+## Annotations
+
+All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
+
+| Annotation | Values | Effect |
+|---|---|---|
+| `redirect-https` | `"true"` | 301 HTTP→HTTPS (skips `/.well-known/acme-challenge`) |
+| `hsts` | `"preload"` / any | Strict-Transport-Security header |
+| `redirect` | YAML map `host: url` (or `host: "code,url"`) | Host-level redirect rules |
+| `ratelimit-s` / `-m` / `-h` | integer | Fixed-window requests per second / minute / hour |
+| `body-limitrequest` | bytes (int64) | Max request body size (413 above) |
+| `upstream-protocol` | `http` / `https` | Force upstream scheme |
+| `upstream-host` | hostname | Override `Host` sent upstream |
+| `upstream-path` | path prefix | Prepend path (+ optional query) upstream |
+| `allow-remote` | comma-sep CIDRs | IP allowlist (403 otherwise; skips ACME) |
+| `strip-prefix` | path prefix | Strip prefix from request path |
+| `basic-auth` | `user:pass` | HTTP Basic Auth |
+| `forward-auth` | YAML (`url`, `authRequestHeaders`, `authResponseHeaders`) | Delegate auth to an external service |
+| `waf-zone` | zone id, or `ns/id` | Bind the Ingress to a WAF zone (see [WAF.md](WAF.md)) |
+
+### Per-request order
+
+1. host normalization → `/healthz` (IP-host only) → host/country concurrency limits
+2. **global WAF** (before routing)
+3. routing → per-route: `allow-remote` → **zone WAF** → `redirect-https` → rate limits → body limit → basic-auth → forward-auth
+4. upstream proxy (with retry on connection failure + bad-addr skip)
+
+## WAF
+
+Full design in **[WAF.md](WAF.md)**. Summary: a global baseline ruleset
+(ConfigMaps labeled `parapet.moonrhythm.io/waf: global`, honored only in
+`POD_NAMESPACE`) plus tenant zones (labeled `…/waf: zone`, zone id = ConfigMap
+name), bound per-Ingress by `waf-zone` (namespace-local or `ns/id`). CEL rules
+with actions `log` / `allow` / `block`. Global runs first and is authoritative.
+Rule **strings are portable** across both implementations; the
+[`conformance/`](conformance/) CEL corpus guards that.
+
+## Configuration (environment variables)
+
+| Variable | Default | Scope | Description |
+|---|---|---|---|
+| `HTTP_PORT` | `80` | both | HTTP (+ h2c) listener port |
+| `HTTPS_PORT` | `443` | both | TLS port; **empty** = HTTP-only; unset = 443 |
+| `INGRESS_CLASS` | `parapet` | both | IngressClassName to handle |
+| `WATCH_NAMESPACE` | `""` (all) | both | Restrict the watch to one namespace |
+| `POD_NAMESPACE` | `""` | both | Controller's namespace (bounds global WAF rules) |
+| `LOAD_ALL_CERTS` | `false` | both | Index every TLS secret, not just `spec.tls`-referenced |
+| `TRUST_PROXY` | `""` | both | `true`/`false`/CIDRs (+ `cloudflare`/`google`/`bunny`) |
+| `WAIT_BEFORE_SHUTDOWN` | `30s` | both | Drain delay on SIGTERM |
+| `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host in-flight cap / queue size |
+| `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host+country cap / queue |
+| `HOST_COUNTRY_HEADER` | `""` | both | Header(s) carrying the country code |
+| `TR_MAX_IDLE_CONNS_PER_HOST` | stdlib / 128 | both | Upstream idle pool (Rust: process-global) |
+| `DISABLE_LOG` | `false` | both | Suppress the access log |
+| `WAF_ENABLED` | `false` | both | Master switch for the WAF |
+| `WAF_FAIL_MODE` | `open` | both | `open` (skip on rule error) / `closed` (500) |
+| `WAF_EVAL_TIMEOUT` | `5ms` | both | Per-request ruleset deadline |
+| `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | **Go-only** | Max header size (no Pingora 0.8 equivalent) |
+| `TR_MAX_CONNS_PER_HOST` | stdlib | **Go-only** | Max conns per host (no Pingora 0.8 equivalent) |
+| `PROFILER` / `PROFILER_NAME` | `false` | **Go-only** | Cloud Profiler (no Rust SDK) |
+| `WAF_COST_LIMIT` / `WAF_INSPECT_BODY` / `WAF_DISABLE_MACROS` | — | **Go-only** | cel-rust has no cost limit; body inspection is phase-2 |
+| `UPSTREAM_CONNECT_TIMEOUT` | `2s` | **Rust-only** | TCP connect timeout to a pod (connect phase) |
+| `UPSTREAM_TOTAL_CONNECT_TIMEOUT` | `3s` | **Rust-only** | Connect + TLS-handshake timeout |
+| `DEBUG_ENDPOINTS` | `false` | **Rust-only** | Serve `GET /debug/routes` |
+
+## Metrics
+
+Prometheus, served on `:9187`. Names/labels match across implementations where
+the metric exists in both.
+
+| Metric | Scope |
+|---|---|
+| `parapet_requests{host,status,method,ingress_name,ingress_namespace,service_type,service_name}` | both |
+| `parapet_service_duration_seconds{service_type,service_namespace,service_name}` | both |
+| `parapet_reload{success}` | both |
+| `parapet_host_active_requests{host,upgrade}` | both |
+| `parapet_host_ratelimit_requests{host}` | both |
+| `parapet_backend_connections{addr}` | both (Rust = in-flight-per-addr approximation) |
+| `parapet_backend_network_read_bytes{addr}` / `_write_bytes{addr}` | both |
+| `parapet_network_request_bytes` / `parapet_network_response_bytes` | both |
+| `parapet_waf_matches{rule_id,action,scope}` | both (note: **no** `_total` suffix) |
+| `parapet_connections{state}` | **Go-only** (no Pingora `ConnState` equivalent) |
+| `go_*` runtime, Cloud Profiler/Trace | **Go-only** |
+| `parapet_rejected_requests{reason}`, `parapet_tls_sni_no_cert_total{reason}`, `process_*` (custom `/proc`) | **Rust-only** (Go gets `process_*` from client_golang) |
+
+Host and HTTP-method labels are collapsed to `other` for values the router
+doesn't serve, to bound cardinality under a flood.
+
+## Intentional Go↔Rust divergences
+
+- **Retry (Rust)** is connection-only — `fail_to_connect` + a broken reused keepalive
+  connection; **never** retries on an upstream HTTP status (Go retried 502/503),
+  since a responding upstream has already processed the request.
+- **WAF cost limit** — cel-rust has none; Rust checks `WAF_EVAL_TIMEOUT` between
+  rules. **WAF body inspection** is phase-2 in Rust (`request.body` empty).
+- **Cloud Profiler/Trace** are Go-only (no Rust SDK).
+- See [`go/CLAUDE.md`-style notes in `CLAUDE.md`](CLAUDE.md) and
+  [`rust/README.md`](rust/README.md) for the full per-impl detail.
