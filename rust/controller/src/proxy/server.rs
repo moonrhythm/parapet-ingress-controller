@@ -38,6 +38,8 @@ pub struct ServeConfig {
     /// pool is process-global, not per-host like Go's Transport.MaxIdleConnsPerHost,
     /// so this is a best-effort mapping. `None` keeps Pingora's default (128).
     pub upstream_keepalive_pool_size: Option<usize>,
+    /// WAF master switch (WAF_ENABLED). When false the proxy does no WAF work.
+    pub waf_enabled: bool,
 }
 
 /// Custom shutdown watcher: on SIGTERM, flip readiness to not-ready and keep
@@ -114,6 +116,7 @@ pub fn run(shared: Arc<Shared>, cfg: ServeConfig) {
             cfg.upstream_timeouts,
             cfg.log_enabled,
             cfg.debug,
+            cfg.waf_enabled,
         ),
     );
     let mut opts = HttpServerOptions::default();
@@ -139,6 +142,7 @@ pub fn run(shared: Arc<Shared>, cfg: ServeConfig) {
                 cfg.upstream_timeouts,
                 cfg.log_enabled,
                 cfg.debug,
+                cfg.waf_enabled,
             ),
         );
         let resolver = SniResolver::new(shared.clone());

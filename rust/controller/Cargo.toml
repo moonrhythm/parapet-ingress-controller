@@ -44,8 +44,13 @@ env_logger = { version = "0.11", optional = true }
 # (proxy/procmetrics.rs). Compiles everywhere; only used on Linux.
 libc = { version = "0.2", optional = true }
 
+# WAF rule engine (CEL parity with the Go controller's parapet/pkg/waf). `regex`
+# is RE2-style (linear, no catastrophic backtracking) like Go's regexp.
+cel = { version = "0.13", optional = true }
+regex = { version = "1", optional = true }
+
 [features]
-cluster = ["dep:kube", "dep:tokio", "dep:futures", "dep:rustls"]
+cluster = ["dep:kube", "dep:tokio", "dep:futures", "dep:rustls", "waf"]
 proxy = [
     "dep:pingora",
     "dep:async-trait",
@@ -59,7 +64,11 @@ proxy = [
     "dep:bytes",
     "dep:env_logger",
     "dep:libc",
+    "waf",
 ]
+# The CEL WAF engine. Enabled by both `proxy` (evaluates) and `cluster`
+# (compiles rules from watched ConfigMaps); keeps cel/regex out of the fast core.
+waf = ["dep:cel", "dep:regex"]
 
 [lib]
 name = "controller"

@@ -125,8 +125,19 @@ fn main() {
             .and_then(|s| parse_duration(&s))
             .unwrap_or(default_timeouts.total_connect),
     };
-    // POD_NAMESPACE is informational (parity with the Go controller's startup log).
+    // POD_NAMESPACE bounds where the global WAF ruleset may be defined (and is in
+    // the startup log, like the Go controller).
     let pod_namespace = env_or("POD_NAMESPACE", "");
+    // WAF (opt-in). Off by default; when off the proxy does no WAF work and the
+    // ConfigMap watch isn't started.
+    let waf_enabled = std::env::var("WAF_ENABLED").ok().as_deref() == Some("true");
+    let waf_config = controller::waf::WafConfig {
+        fail_closed: std::env::var("WAF_FAIL_MODE").ok().as_deref() == Some("closed"),
+        eval_timeout: std::env::var("WAF_EVAL_TIMEOUT")
+            .ok()
+            .and_then(|s| parse_duration(&s))
+            .unwrap_or_else(|| std::time::Duration::from_millis(5)),
+    };
     eprintln!(
         "[config] ingress_class={ingress_class} watch_namespace={} pod_namespace={pod_namespace} \
          load_all_certs={load_all_certs} http_port={http_port} https_port={https_port} \
@@ -137,6 +148,7 @@ fn main() {
     );
 
     let shared = Shared::new(ingress_class, load_all_certs);
+    shared.waf.configure(waf_config);
 
     match backend.as_str() {
         // static manifests; one-shot load, no watch (local dev / smoke tests)
@@ -145,16 +157,27 @@ fn main() {
                 .expect("KUBERNETES_FS is required for the fs backend");
             let snap = k8s::fs::load_dir(Path::new(&dir)).expect("load fs manifests");
             eprintln!(
-                "fs backend: {} ingresses, {} services, {} endpoints, {} secrets",
+                "fs backend: {} ingresses, {} services, {} endpoints, {} secrets, {} configmaps",
                 snap.ingresses.len(),
                 snap.services.len(),
                 snap.endpoints.len(),
-                snap.secrets.len()
+                snap.secrets.len(),
+                snap.configmaps.len(),
             );
             shared.rebuild(&snap);
+            if waf_enabled {
+                controller::waf::reconcile_configmaps(
+                    &shared.waf,
+                    &snap.configmaps,
+                    &pod_namespace,
+                );
+            }
         }
         // live cluster watch on a dedicated runtime thread
         _ => {
+            let waf_watch = waf_enabled.then(|| controller::k8s::cluster::WafWatch {
+                pod_namespace: pod_namespace.clone(),
+            });
             let shared = shared.clone();
             std::thread::spawn(move || {
                 let rt = tokio::runtime::Builder::new_multi_thread()
@@ -162,7 +185,7 @@ fn main() {
                     .build()
                     .expect("build tokio runtime");
                 rt.block_on(async move {
-                    if let Err(e) = k8s::cluster::run(shared, watch_namespace).await {
+                    if let Err(e) = k8s::cluster::run(shared, watch_namespace, waf_watch).await {
                         eprintln!("k8s watch error: {e}");
                     }
                 });
@@ -188,6 +211,7 @@ fn main() {
             debug,
             wait_before_shutdown,
             upstream_keepalive_pool_size,
+            waf_enabled,
         },
     );
 }

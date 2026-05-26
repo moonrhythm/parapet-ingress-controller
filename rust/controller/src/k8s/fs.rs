@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use k8s_openapi::api::core::v1::{Endpoints, Secret, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, Endpoints, Secret, Service};
 use k8s_openapi::api::networking::v1::Ingress;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use serde::Deserialize;
@@ -66,6 +66,7 @@ fn add_value(snap: &mut Snapshot, v: Value) {
         "Service" => push(&mut snap.services, v, |o: &mut Service| &mut o.metadata),
         "Endpoints" => push(&mut snap.endpoints, v, |o: &mut Endpoints| &mut o.metadata),
         "Secret" => push(&mut snap.secrets, v, |o: &mut Secret| &mut o.metadata),
+        "ConfigMap" => push(&mut snap.configmaps, v, |o: &mut ConfigMap| &mut o.metadata),
         _ => {}
     }
 }

@@ -12,5 +12,8 @@ pub mod route;
 pub mod router;
 pub mod shared;
 
+#[cfg(feature = "waf")]
+pub mod waf;
+
 #[cfg(feature = "proxy")]
 pub mod proxy;
