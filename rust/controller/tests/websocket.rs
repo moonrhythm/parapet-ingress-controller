@@ -101,7 +101,9 @@ fn wait_ready(port: u16) {
     while Instant::now() < deadline {
         if let Ok(mut c) = TcpStream::connect(("127.0.0.1", port)) {
             let _ = c.set_read_timeout(Some(Duration::from_millis(500)));
-            if c.write_all(b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            // /healthz is served only for IP hosts (k8s probes the pod IP), so
+            // probe with an IP Host, not a domain.
+            if c.write_all(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
                 .is_ok()
             {
                 let mut resp = Vec::new();
