@@ -44,6 +44,15 @@ func main() {
 	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
 	loadAllCerts := config.Bool("LOAD_ALL_CERTS")
 
+	wafConfig := controller.WAFConfig{
+		Enabled:       config.Bool("WAF_ENABLED"),
+		FailClosed:    config.String("WAF_FAIL_MODE") == "closed",
+		EvalTimeout:   config.DurationDefault("WAF_EVAL_TIMEOUT", 5*time.Millisecond),
+		CostLimit:     uint64(config.Int("WAF_COST_LIMIT")),
+		InspectBody:   int64(config.Int("WAF_INSPECT_BODY")),
+		DisableMacros: config.Bool("WAF_DISABLE_MACROS"),
+	}
+
 	hostname, _ := os.Hostname()
 
 	if ingressClass != "" {
@@ -61,6 +70,7 @@ func main() {
 		"profiler", enableProfiler,
 		"http_server_max_header_bytes", httpServerMaxHeaderBytes,
 		"load_all_certs", loadAllCerts,
+		"waf_enabled", wafConfig.Enabled,
 	)
 
 	if enableProfiler {
@@ -90,8 +100,14 @@ func main() {
 
 	ctrl := controller.New(watchNamespace, proxy)
 	ctrl.LoadAllCerts = loadAllCerts
+	ctrl.PodNamespace = podNamespace
+	ctrl.WAFConfig = wafConfig
+	ctrl.InitWAF()
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)
+	if wafConfig.Enabled {
+		ctrl.Use(plugin.WAFZone(ctrl.LookupZone))
+	}
 	ctrl.Use(plugin.RedirectHTTPS)
 	ctrl.Use(plugin.InjectHSTS)
 	ctrl.Use(plugin.RedirectRules)
@@ -121,6 +137,12 @@ func main() {
 	m.Use(metric.Requests(ctrl.IsKnownHost))
 	m.Use(compress.Gzip())
 	m.Use(compress.BrWithQuality(4))
+	if wafConfig.Enabled {
+		// Global WAF runs just before routing: blocks are access-logged and
+		// counted above, and request.host is already normalized. Per-zone WAF
+		// runs inside the per-ingress chain (plugin.WAFZone).
+		m.Use(ctrl.GlobalWAF())
+	}
 	m.Use(ctrl)
 
 	var trustProxy parapet.Conditional

@@ -21,12 +21,13 @@ import (
 )
 
 type fsClient struct {
-	mu        sync.RWMutex
-	dir       string
-	ingresses []networking.Ingress
-	services  []v1.Service
-	endpoints []v1.Endpoints
-	secrets   []v1.Secret
+	mu         sync.RWMutex
+	dir        string
+	ingresses  []networking.Ingress
+	services   []v1.Service
+	endpoints  []v1.Endpoints
+	secrets    []v1.Secret
+	configmaps []v1.ConfigMap
 }
 
 func newFSClient(dir string) (*fsClient, error) {
@@ -45,6 +46,7 @@ func (c *fsClient) reset() {
 	c.services = nil
 	c.endpoints = nil
 	c.secrets = nil
+	c.configmaps = nil
 }
 
 func (c *fsClient) load() error {
@@ -179,6 +181,17 @@ func (c *fsClient) addObject(raw []byte) {
 		}
 		c.autofillMeta(&s.ObjectMeta)
 		c.secrets = append(c.secrets, s)
+	case runtime.TypeMeta{
+		APIVersion: "v1",
+		Kind:       "ConfigMap",
+	}:
+		var cm v1.ConfigMap
+		err := c.decode(raw, &cm)
+		if err != nil {
+			return
+		}
+		c.autofillMeta(&cm.ObjectMeta)
+		c.configmaps = append(c.configmaps, cm)
 	}
 	ok = true
 }
@@ -229,6 +242,20 @@ func (c *fsClient) GetEndpoints(ctx context.Context, namespace string) ([]v1.End
 }
 
 func (c *fsClient) WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error) {
+	ch := make(chan watch.Event)
+	return watch.NewProxyWatcher(ch), nil
+}
+
+// GetConfigMaps returns all loaded config maps. The label selector is ignored
+// here (the fs backend has no label index); the controller filters by the
+// parapet.moonrhythm.io/waf label value after listing.
+func (c *fsClient) GetConfigMaps(ctx context.Context, namespace, labelSelector string) ([]v1.ConfigMap, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.configmaps, nil
+}
+
+func (c *fsClient) WatchConfigMaps(ctx context.Context, namespace, labelSelector string) (watch.Interface, error) {
 	ch := make(chan watch.Event)
 	return watch.NewProxyWatcher(ch), nil
 }
