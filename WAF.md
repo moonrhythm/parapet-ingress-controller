@@ -107,10 +107,27 @@ allow-list. The client IP is the same one used for `request.remote_ip`
 **Implementation.** Go exposes it through the `parapet/pkg/waf` `Country`
 resolver hook, wired to a `maxminddb-golang` lookup; Rust uses the `maxminddb`
 crate. Both load the DB once at startup; a load failure is non-fatal (country
-stays `""`). The DB is **not** shipped in the image and exceeds a ConfigMap's
-1 MB limit — mount it (a `geoipupdate` sidecar/initContainer, or a volume) and
-point `WAF_GEOIP_DB` at it. GeoLite2 requires a MaxMind account/license per their
-EULA.
+stays `""`).
+
+**Providing the DB.** It exceeds a ConfigMap's 1 MB limit, so either:
+
+- **Bake at build time** (both Dockerfiles). Pass the edition flag and the MaxMind
+  license key as a BuildKit secret; the `.mmdb` is downloaded into the image at
+  `/geoip/<edition>.mmdb` and the key never lands in a layer:
+
+  ```bash
+  docker build --build-arg GEOIP_EDITION=GeoLite2-Country \
+    --secret id=maxmind_license,env=MAXMIND_LICENSE_KEY -t img go/   # or rust/
+  # then run with: WAF_GEOIP_DB=/geoip/GeoLite2-Country.mmdb
+  ```
+
+  Simple to deploy, but the DB is as stale as the image (rebuild to refresh).
+
+- **Mount at runtime** — a `geoipupdate` sidecar / initContainer or a volume, with
+  `WAF_GEOIP_DB` pointing at the mount. Refreshes without a rebuild.
+
+GeoLite2 requires a MaxMind account/license per their EULA. The default build
+bakes **no** DB (`GEOIP_EDITION` empty).
 
 ## Delivery: ConfigMaps, one marker label
 

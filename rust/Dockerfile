@@ -61,6 +61,28 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       --bin parapet-ingress-controller \
     && cp target/release/parapet-ingress-controller /usr/local/bin/parapet-ingress-controller
 
+# ---- optional GeoIP database ----
+# Off by default. Set the edition flag and pass the MaxMind license key as a
+# BuildKit secret to bake the .mmdb into the image:
+#
+#     docker build --build-arg GEOIP_EDITION=GeoLite2-Country \
+#       --secret id=maxmind_license,env=MAXMIND_LICENSE_KEY -t img rust/
+#
+# then run with WAF_GEOIP_DB=/geoip/GeoLite2-Country.mmdb. The key is read from a
+# secret mount, so it never lands in an image layer. Empty edition (default) bakes
+# no DB but still creates /geoip so the COPY below always succeeds.
+FROM debian:trixie-slim AS geoip
+ARG GEOIP_EDITION=
+RUN --mount=type=secret,id=maxmind_license \
+    mkdir -p /geoip && \
+    if [ -n "$GEOIP_EDITION" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+        curl -fsSL "https://download.maxmind.com/app/geoip_download?edition_id=${GEOIP_EDITION}&license_key=$(cat /run/secrets/maxmind_license)&suffix=tar.gz" -o /tmp/geoip.tar.gz && \
+        tar -xzf /tmp/geoip.tar.gz -C /tmp && \
+        find /tmp -name '*.mmdb' -exec mv {} /geoip/ \; && \
+        ls -l /geoip; \
+    fi
+
 # ---- runtime ----
 # distroless/cc already provides libssl3, ca-certificates, glibc and libgcc, so
 # there is no apt step here (the image has no package manager). Runs as root
@@ -70,6 +92,7 @@ FROM ${RUNTIME_IMAGE}
 COPY --from=builder \
      /usr/local/bin/parapet-ingress-controller \
      /usr/local/bin/parapet-ingress-controller
+COPY --from=geoip /geoip/ /geoip/
 
 # HTTP, HTTPS, Prometheus
 EXPOSE 80 443 9187
