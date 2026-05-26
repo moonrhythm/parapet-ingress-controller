@@ -209,6 +209,25 @@ fn known_method(method: &str) -> &str {
     }
 }
 
+/// Collapse the `Upgrade` request header to a bounded label set for the
+/// `host_active_requests` gauge. The Upgrade token is client-controlled and
+/// arbitrary, so labeling the gauge with it raw lets a client mint an unbounded
+/// number of permanent series by sending random `Upgrade:` values to a known
+/// host (same OOM class as the host label, which is why `host` is sanitized).
+/// `""` is the (common) no-upgrade bucket; everything unrecognized is `"other"`.
+/// Returns a `'static` label so the caller stores no per-request allocation.
+pub fn known_upgrade(upgrade: &str) -> &'static str {
+    if upgrade.is_empty() {
+        ""
+    } else if upgrade.eq_ignore_ascii_case("websocket") {
+        "websocket"
+    } else if upgrade.eq_ignore_ascii_case("h2c") {
+        "h2c"
+    } else {
+        "other"
+    }
+}
+
 pub fn record_request(m: &RequestMetric) {
     let metrics = metrics();
     let status = m.status.to_string();
@@ -294,12 +313,14 @@ fn prune_addr_series(
             }
         }
     }
-    // In-flight gauge: only drop a stale addr once it reads 0. A long-lived
-    // request to a since-removed pod can still be in flight; removing it now
-    // would let its `dec` on completion re-create the series at -1. It gets
-    // pruned on a later reload once it settles to 0.
+    // In-flight gauge: only drop a stale addr once it has no live requests. A
+    // long-lived request to a since-removed pod can still be in flight (gauge
+    // >= 1); removing it then would let its `dec` on completion re-create the
+    // series at -1. `<= 0` (not `== 0`) so that if such a -1 ever slips through a
+    // prune/inc/dec race it still self-heals on a later reload instead of
+    // sticking forever (a stuck -1 would never satisfy `== 0`).
     for addr in addr_label_values(conn) {
-        if is_stale(&addr) && conn.with_label_values(&[&addr]).get() == 0 {
+        if is_stale(&addr) && conn.with_label_values(&[&addr]).get() <= 0 {
             let _ = conn.remove_label_values(&[&addr]);
         }
     }
@@ -317,6 +338,17 @@ mod tests {
         assert_eq!(known_method("BREW"), "other");
         assert_eq!(known_method(""), "other");
         assert_eq!(known_method("get"), "other"); // standard methods arrive upper-cased
+    }
+
+    #[test]
+    fn known_upgrade_collapses_unknown() {
+        assert_eq!(known_upgrade(""), ""); // no Upgrade header -> normal bucket
+        assert_eq!(known_upgrade("websocket"), "websocket");
+        assert_eq!(known_upgrade("WebSocket"), "websocket"); // case-insensitive
+        assert_eq!(known_upgrade("h2c"), "h2c");
+        // arbitrary client-supplied tokens collapse to one label (cardinality cap)
+        assert_eq!(known_upgrade("evil-random-123"), "other");
+        assert_eq!(known_upgrade("TLS/1.2"), "other");
     }
 
     #[test]

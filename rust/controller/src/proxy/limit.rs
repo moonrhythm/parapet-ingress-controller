@@ -22,11 +22,11 @@ pub struct HostConcurrency {
 struct Slot {
     count: AtomicUsize,
     sem: Option<Arc<Semaphore>>, // present only for the queueing strategy
+    key: String,                 // own copy of the map key, so `Guard::drop` can evict
 }
 
 pub struct Guard {
     slot: Arc<Slot>,
-    key: String,
     limiter: Weak<HostConcurrency>,
     _permit: Option<OwnedSemaphorePermit>,
 }
@@ -43,11 +43,11 @@ impl Drop for Guard {
         if self.slot.count.fetch_sub(1, Ordering::Relaxed) == 1 {
             if let Some(limiter) = self.limiter.upgrade() {
                 let mut slots = limiter.slots.lock().unwrap();
-                if let Some(existing) = slots.get(&self.key) {
+                if let Some(existing) = slots.get(&self.slot.key) {
                     if Arc::ptr_eq(existing, &self.slot)
                         && self.slot.count.load(Ordering::Relaxed) == 0
                     {
-                        slots.remove(&self.key);
+                        slots.remove(&self.slot.key);
                     }
                 }
             }
@@ -73,15 +73,20 @@ impl HostConcurrency {
     pub async fn acquire(self: &Arc<Self>, key: &str) -> Option<Guard> {
         let (slot, n) = {
             let mut slots = self.slots.lock().unwrap();
-            let slot = slots
-                .entry(key.to_string())
-                .or_insert_with(|| {
-                    Arc::new(Slot {
+            // Look up first so the common (slot-exists) path allocates no String;
+            // only a brand-new key pays for the owned map key + the slot's own copy.
+            let slot = match slots.get(key) {
+                Some(s) => s.clone(),
+                None => {
+                    let s = Arc::new(Slot {
                         count: AtomicUsize::new(0),
                         sem: (self.size > 0).then(|| Arc::new(Semaphore::new(self.capacity))),
-                    })
-                })
-                .clone();
+                        key: key.to_string(),
+                    });
+                    slots.insert(key.to_string(), s.clone());
+                    s
+                }
+            };
             // Increment under the lock (paired with the evict check in `Guard::drop`)
             // so a slot observed at count 0 under the lock is truly idle.
             let n = slot.count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -92,7 +97,6 @@ impl HostConcurrency {
         // if this future is dropped while awaiting the permit (client disconnect).
         let mut guard = Guard {
             slot: slot.clone(),
-            key: key.to_string(),
             limiter: Arc::downgrade(self),
             _permit: None,
         };

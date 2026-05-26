@@ -97,18 +97,24 @@ impl Shared {
             .set_port_routes(build_port_routes(&services));
 
         let host_routes = build_host_routes(&endpoints);
+        // Snapshot the current pod IPs before the table takes ownership of the map.
+        #[cfg(feature = "proxy")]
+        let current_pod_ips: HashSet<String> = host_routes
+            .values()
+            .flat_map(|lb| lb.ips())
+            .cloned()
+            .collect();
+        self.route_table.set_host_routes(host_routes);
         // Drop addr-keyed backend metric series for pod IPs that are no longer
         // routable; otherwise the registry accumulates a dead series per pod IP
-        // ever seen, since IPs churn on every deploy.
+        // ever seen, since IPs churn on every deploy. Done AFTER the route swap so
+        // new requests already route to current pods: a stale addr can then only
+        // be touched by an already-in-flight request (gauge >= 1, so it's kept),
+        // which closes the window where a prune/inc/dec race could strand a -1.
         #[cfg(feature = "proxy")]
         crate::proxy::metrics::prune_backend_addrs(
-            &host_routes
-                .values()
-                .flat_map(|lb| lb.ips())
-                .map(String::as_str)
-                .collect(),
+            &current_pod_ips.iter().map(String::as_str).collect(),
         );
-        self.route_table.set_host_routes(host_routes);
         // Prune stale bad-addr marks. The route maps above are replaced wholesale,
         // but the bad-addr set persists for the process lifetime, so without this
         // it grows one entry per distinct failed pod IP forever (pod IPs churn on

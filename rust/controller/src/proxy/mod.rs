@@ -179,7 +179,7 @@ pub struct Ctx {
     skip_log: bool,
     // host concurrency
     limit_guards: Vec<Guard>,
-    host_active: Option<(String, String)>,
+    host_active: Option<(String, &'static str)>,
     // forward-auth response headers to copy upstream
     auth_response_headers: Vec<(String, String)>,
 }
@@ -283,10 +283,12 @@ impl ProxyHttp for Proxy {
         // host concurrency limits (parapet HostActiveTracker + host/country rate
         // limit middlewares run before routing/logging). On reject: 503, counted
         // in host_ratelimit, and not access-logged.
-        let upgrade = header_str(session, "upgrade")
-            .map(|s| s.trim().to_ascii_lowercase())
-            .unwrap_or_default();
-        metrics::host_active_inc(&ctx.metric_host, &upgrade);
+        // Sanitize the Upgrade header to a bounded label (it's client-controlled,
+        // so a raw label is an unbounded-cardinality / OOM vector — same class as
+        // the host label). `known_upgrade` returns a `'static` label, so inc/dec
+        // share it with no per-request allocation.
+        let upgrade = metrics::known_upgrade(header_str(session, "upgrade").unwrap_or("").trim());
+        metrics::host_active_inc(&ctx.metric_host, upgrade);
         ctx.host_active = Some((ctx.metric_host.clone(), upgrade));
 
         // Concurrency-limit keys use the sanitized host (see `metric_host`): for a
