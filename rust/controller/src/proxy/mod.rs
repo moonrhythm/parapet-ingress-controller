@@ -227,8 +227,13 @@ impl ProxyHttp for Proxy {
             UNKNOWN_HOST_LABEL.to_string()
         };
 
-        // health checks (run before logging, like the Go middleware order)
-        if path == "/healthz" {
+        // health checks (run before logging, like the Go middleware order).
+        // Only intercept when the request is addressed to an IP — k8s probes hit
+        // the pod IP, never a configured domain. A request with a domain Host
+        // falls through to normal routing, so `/healthz` on a real host reaches
+        // its backend and external callers can't probe the controller's health.
+        // Mirrors parapet's healthz `Host: false` semantics (net.ParseIP gate).
+        if path == "/healthz" && is_ip_host(&host) {
             ctx.skip_log = true;
             let want_ready = session
                 .req_header()
@@ -794,6 +799,13 @@ fn req_host(session: &Session) -> String {
     String::new()
 }
 
+/// Whether `host` (already port-stripped by [`req_host`]) is an IP literal — the
+/// gate for serving `/healthz`. A domain host is not, so it routes normally.
+/// Empty likewise isn't an IP, matching parapet's `net.ParseIP` behavior.
+fn is_ip_host(host: &str) -> bool {
+    host.parse::<IpAddr>().is_ok()
+}
+
 fn client_ip(session: &Session) -> Option<IpAddr> {
     session
         .client_addr()
@@ -1132,6 +1144,16 @@ mod tests {
         assert!(should_log_proxy_error(&e));
         e.esource = ErrorSource::Internal;
         assert!(should_log_proxy_error(&e));
+    }
+
+    #[test]
+    fn is_ip_host_only_matches_ip_literals() {
+        assert!(is_ip_host("127.0.0.1"), "IPv4 is an IP host");
+        assert!(is_ip_host("10.0.0.5"));
+        assert!(is_ip_host("::1"), "IPv6 is an IP host");
+        assert!(!is_ip_host("api.example.com"), "domain is not");
+        assert!(!is_ip_host(""), "empty is not");
+        assert!(!is_ip_host("localhost"), "localhost is not an IP literal");
     }
 
     #[test]
