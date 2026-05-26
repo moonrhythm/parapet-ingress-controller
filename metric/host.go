@@ -57,7 +57,7 @@ type promHostTracker struct {
 
 func (p promHostTracker) ServeHandler(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		upgrade := strings.ToLower(strings.TrimSpace(header.Get(r.Header, header.Upgrade)))
+		upgrade := upgradeLabel(strings.ToLower(strings.TrimSpace(header.Get(r.Header, header.Upgrade))))
 
 		// Sanitize once so the Inc/Dec pair use the same (bounded) label.
 		m := _host.getM(HostLabel(r.Host, p.isKnownHost), upgrade)
@@ -66,6 +66,21 @@ func (p promHostTracker) ServeHandler(h http.Handler) http.Handler {
 
 		h.ServeHTTP(w, r)
 	})
+}
+
+// upgradeLabel collapses the client-controlled Upgrade header to a bounded label
+// set for the host_active_requests gauge. The token is arbitrary, so labeling
+// the gauge with it raw lets a client mint unbounded permanent series — and grow
+// the handle cache — by sending random Upgrade values to a known host (the same
+// OOM class the host label is sanitized against). Input is already lower-cased
+// and trimmed; "" is the no-upgrade bucket, anything unrecognized is "other".
+func upgradeLabel(upgrade string) string {
+	switch upgrade {
+	case "", "websocket", "h2c":
+		return upgrade
+	default:
+		return "other"
+	}
 }
 
 // HostActiveTracker returns middleware tracking in-flight requests per host.
