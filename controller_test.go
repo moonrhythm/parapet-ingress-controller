@@ -8,12 +8,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/moonrhythm/parapet"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
 
+	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 )
 
@@ -192,6 +194,33 @@ func TestBuildRoutes_Duplicate(t *testing.T) {
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, r)
 	assert.True(t, called)
+}
+
+// The health check must answer regardless of Host — k8s probes hit the pod IP,
+// never a configured ingress host. This guards that the known_host metric
+// bounding (and its wiring order) never gates /healthz on a "known" host.
+func TestHealthzPassesUnknownHost(t *testing.T) {
+	t.Parallel()
+
+	ctrl := New("default", proxy.New())
+	ctrl.firstReload() // ready; rebuilds knownHosts (empty: no ingresses here)
+	assert.False(t, ctrl.IsKnownHost("10.0.0.5"), "a probe host is not a known host")
+
+	// the edge chain as wired in main(): Healthz first, then the
+	// known_host-bounded metric middlewares.
+	m := parapet.Middlewares{}
+	m.Use(ctrl.Healthz())
+	m.Use(metric.HostActiveTracker(ctrl.IsKnownHost))
+	m.Use(metric.Requests(ctrl.IsKnownHost))
+	h := m.ServeHandler(http.NotFoundHandler())
+
+	// liveness and readiness both succeed with a Host that isn't a known host
+	for _, target := range []string{"http://10.0.0.5/healthz", "http://10.0.0.5/healthz?ready=1"} {
+		r := httptest.NewRequest(http.MethodGet, target, nil)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		assert.Equal(t, http.StatusOK, w.Code, target)
+	}
 }
 
 func TestBuildKnownHosts(t *testing.T) {
