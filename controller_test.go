@@ -196,31 +196,40 @@ func TestBuildRoutes_Duplicate(t *testing.T) {
 	assert.True(t, called)
 }
 
-// The health check must answer regardless of Host — k8s probes hit the pod IP,
-// never a configured ingress host. This guards that the known_host metric
-// bounding (and its wiring order) never gates /healthz on a "known" host.
-func TestHealthzPassesUnknownHost(t *testing.T) {
+// /healthz is served only when the request is addressed to an IP — k8s probes
+// hit the pod IP, never a configured domain (parapet healthz Host:false). A
+// request with a domain Host falls through to normal routing, so external
+// callers can't probe health and a backend's own /healthz is reachable. This
+// also confirms the known_host metric wiring (run after Healthz) doesn't change
+// that.
+func TestHealthzServedOnlyOnIPHost(t *testing.T) {
 	t.Parallel()
 
 	ctrl := New("default", proxy.New())
 	ctrl.firstReload() // ready; rebuilds knownHosts (empty: no ingresses here)
-	assert.False(t, ctrl.IsKnownHost("10.0.0.5"), "a probe host is not a known host")
 
 	// the edge chain as wired in main(): Healthz first, then the
-	// known_host-bounded metric middlewares.
+	// known_host-bounded metric middlewares, then routing (404 here).
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
 	m.Use(metric.HostActiveTracker(ctrl.IsKnownHost))
 	m.Use(metric.Requests(ctrl.IsKnownHost))
 	h := m.ServeHandler(http.NotFoundHandler())
 
-	// liveness and readiness both succeed with a Host that isn't a known host
-	for _, target := range []string{"http://10.0.0.5/healthz", "http://10.0.0.5/healthz?ready=1"} {
+	get := func(target string) int {
 		r := httptest.NewRequest(http.MethodGet, target, nil)
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
-		assert.Equal(t, http.StatusOK, w.Code, target)
+		return w.Code
 	}
+
+	// IP Host (probe style): liveness + readiness are served.
+	assert.Equal(t, http.StatusOK, get("http://10.0.0.5/healthz"), "liveness on IP host")
+	assert.Equal(t, http.StatusOK, get("http://10.0.0.5/healthz?ready=1"), "readiness on IP host")
+
+	// domain Host: not intercepted — falls through to routing (404, not 200).
+	assert.Equal(t, http.StatusNotFound, get("http://app.example.com/healthz"),
+		"/healthz on a domain host must route normally, not hit the health check")
 }
 
 func TestBuildKnownHosts(t *testing.T) {
