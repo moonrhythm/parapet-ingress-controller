@@ -143,6 +143,12 @@ pub fn run(shared: Arc<Shared>, cfg: ServeConfig) {
         );
         let resolver = SniResolver::new(shared.clone());
         let mut tls = TlsSettings::with_callbacks(Box::new(resolver)).expect("tls settings");
+        // Pin the downstream TLS floor at 1.2, matching the Go controller's explicit
+        // `MinVersion: tls.VersionTLS12`. Pingora's `mozilla_intermediate_v5` default
+        // already disables TLS 1.0/1.1, but setting it explicitly keeps the floor
+        // from silently shifting if that upstream default ever changes.
+        tls.set_min_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))
+            .expect("set min tls version");
         tls.enable_h2();
         let mut tls_opts = HttpServerOptions::default();
         tls_opts.keepalive_request_limit = Some(DOWNSTREAM_KEEPALIVE_REQUEST_LIMIT);
