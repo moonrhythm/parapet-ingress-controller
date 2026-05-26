@@ -751,12 +751,15 @@ impl Ctx {
         let req = session.req_header();
         self.method = req.method.to_string();
         self.host = host.to_string();
-        let pq = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-        self.request_url = format!("{scheme}://{host}{pq}");
+        // Path only — never the query string, which can carry sensitive data
+        // (tokens, emails). Same reason `request_summary` redacts pingora's error
+        // logs; this keeps it out of the JSON access log's `requestUrl` too.
+        let path = req.uri.path();
+        self.request_url = format!("{scheme}://{host}{path}");
         self.request_body_size = content_length(session).map(|c| c as i64).unwrap_or(-1);
-        self.referer = header_str(session, "referer")
-            .unwrap_or_default()
-            .to_string();
+        // Strip the Referer's query too — a client-supplied URL can leak secrets
+        // there (e.g. an OAuth code in a redirect Referer).
+        self.referer = strip_query(header_str(session, "referer").unwrap_or_default()).to_string();
         self.user_agent = header_str(session, "user-agent")
             .unwrap_or_default()
             .to_string();
@@ -834,6 +837,12 @@ fn header_str<'a>(session: &'a Session, name: &str) -> Option<&'a str> {
 /// reach the logs. Pure, so it's unit-testable.
 fn redacted_summary(req: &RequestHeader, host: &str) -> String {
     format!("{} {}, Host: {host}", req.method.as_str(), req.uri.path())
+}
+
+/// Drop the `?query` (and anything after) from an arbitrary URL string, so a
+/// query carrying sensitive data never reaches a log. Pure, unit-testable.
+fn strip_query(s: &str) -> &str {
+    s.split('?').next().unwrap_or(s)
 }
 
 fn check_basic_auth(session: &Session, ba: &BasicAuth) -> bool {
@@ -1181,6 +1190,16 @@ mod tests {
         assert!(!summary.contains("token"), "query string must not appear");
         assert!(!summary.contains("s3cret"));
         assert!(!summary.contains('?'));
+    }
+
+    #[test]
+    fn strip_query_drops_query() {
+        assert_eq!(
+            strip_query("https://ref/page?token=s3cret"),
+            "https://ref/page"
+        );
+        assert_eq!(strip_query("/just/a/path"), "/just/a/path");
+        assert_eq!(strip_query(""), "");
     }
 
     #[test]
