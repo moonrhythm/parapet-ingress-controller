@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::StreamExt;
-use k8s_openapi::api::core::v1::{Endpoints, Secret, Service};
+use k8s_openapi::api::core::v1::{ConfigMap, Endpoints, Secret, Service};
 use k8s_openapi::api::networking::v1::Ingress;
 use kube::runtime::{reflector, watcher, WatchStreamExt};
 use kube::{Api, Client};
@@ -16,6 +16,14 @@ use tokio::sync::mpsc;
 
 use super::Snapshot;
 use crate::shared::Shared;
+use crate::waf::WAF_LABEL_KEY;
+
+/// WAF watch settings, passed to [`run`] when `WAF_ENABLED=true`. `None` skips
+/// the ConfigMap watch entirely (zero cost when the WAF is off).
+pub struct WafWatch {
+    /// Controller's own namespace; bounds where the global ruleset may live.
+    pub pod_namespace: String,
+}
 
 /// Build a reflector store for `$ty`, drive it on a background task, and poke
 /// `$tx` on every successful event. Returns the read handle (`Store`).
@@ -56,7 +64,11 @@ macro_rules! reflect {
 }
 
 /// Watch the cluster and keep `shared` reloaded. Runs until the process exits.
-pub async fn run(shared: Arc<Shared>, namespace: Option<String>) -> Result<(), kube::Error> {
+pub async fn run(
+    shared: Arc<Shared>,
+    namespace: Option<String>,
+    waf: Option<WafWatch>,
+) -> Result<(), kube::Error> {
     let client = Client::try_default().await?;
     eprintln!(
         "[watch] connected to cluster; watching namespace={}",
@@ -69,11 +81,26 @@ pub async fn run(shared: Arc<Shared>, namespace: Option<String>) -> Result<(), k
     let endpoints = reflect!(Endpoints, client, namespace, tx);
     let secrets = reflect!(Secret, client, namespace, tx);
 
+    // WAF ConfigMaps run on a *separate* reflector + debounce loop: rule edits
+    // recompile the rulesets but must never rebuild the router (decoupled
+    // lifecycle). Only started when WAF_ENABLED.
+    if let Some(w) = waf {
+        spawn_waf_watch(
+            client.clone(),
+            namespace.clone(),
+            shared.clone(),
+            w.pod_namespace,
+        );
+    }
+
     let snapshot = || Snapshot {
         ingresses: ingresses.state(),
         services: services.state(),
         endpoints: endpoints.state(),
         secrets: secrets.state(),
+        // WAF ConfigMaps are watched on a separate reflector (see spawn_waf_watch),
+        // decoupled from the router rebuild, so they're not part of the snapshot.
+        configmaps: Vec::new(),
     };
 
     // initial sync: wait for each store to fill, then do the first reload
@@ -95,4 +122,48 @@ pub async fn run(shared: Arc<Shared>, namespace: Option<String>) -> Result<(), k
     }
 
     Ok(())
+}
+
+/// Drive a label-filtered ConfigMap reflector and recompile the WAF rulesets on
+/// every change (300ms-debounced), independent of the router reconcile.
+fn spawn_waf_watch(
+    client: Client,
+    namespace: Option<String>,
+    shared: Arc<Shared>,
+    pod_namespace: String,
+) {
+    let api: Api<ConfigMap> = match &namespace {
+        Some(ns) => Api::namespaced(client, ns),
+        None => Api::all(client),
+    };
+    let (reader, writer) = reflector::store::<ConfigMap>();
+    let cfg = watcher::Config::default().labels(WAF_LABEL_KEY);
+    let stream = reflector::reflector(writer, watcher(api, cfg)).default_backoff();
+    let (tx, mut rx) = mpsc::channel::<()>(32);
+
+    // driver: mirror events into the store and poke the debounce channel
+    tokio::spawn(async move {
+        futures::pin_mut!(stream);
+        while let Some(event) = stream.next().await {
+            match event {
+                Ok(_) => {
+                    let _ = tx.try_send(());
+                }
+                Err(e) => eprintln!("[watch] ConfigMap error: {e}"),
+            }
+        }
+    });
+
+    // reconcile loop: initial sync, then debounced rebuilds of the WAF rulesets
+    tokio::spawn(async move {
+        let _ = reader.wait_until_ready().await;
+        eprintln!("[watch] waf: initial configmap sync complete");
+        crate::waf::reconcile_configmaps(&shared.waf, &reader.state(), &pod_namespace);
+        while rx.recv().await.is_some() {
+            while let Ok(Some(())) =
+                tokio::time::timeout(Duration::from_millis(300), rx.recv()).await
+            {}
+            crate::waf::reconcile_configmaps(&shared.waf, &reader.state(), &pod_namespace);
+        }
+    });
 }

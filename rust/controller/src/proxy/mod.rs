@@ -30,10 +30,13 @@ use pingora::{Error, ErrorSource, ErrorType, Result};
 use serde::Serialize;
 
 use self::limit::{Guard, HostConcurrency};
-use crate::config::{single_joining_slash, BasicAuth, ForwardAuth, Hsts, RouteConfig};
+use crate::config::{
+    resolve_zone_key, single_joining_slash, BasicAuth, ForwardAuth, Hsts, RouteConfig,
+};
 use crate::reconcile::{RouteKind, RouteMeta, UpstreamScheme};
 use crate::router::Match;
 use crate::shared::Shared;
+use crate::waf::Decision as WafDecision;
 
 const MAX_RETRY: usize = 5;
 const ACME_PREFIX: &str = "/.well-known/acme-challenge";
@@ -122,9 +125,12 @@ pub struct Proxy {
     log_enabled: bool,
     /// When set (DEBUG_ENDPOINTS=true), serves GET /debug/routes.
     debug: bool,
+    /// WAF master switch (WAF_ENABLED). When false the proxy does no WAF work.
+    waf_enabled: bool,
 }
 
 impl Proxy {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         shared: Arc<Shared>,
         is_tls: bool,
@@ -133,6 +139,7 @@ impl Proxy {
         timeouts: UpstreamTimeouts,
         log_enabled: bool,
         debug: bool,
+        waf_enabled: bool,
     ) -> Self {
         Self {
             shared,
@@ -142,6 +149,73 @@ impl Proxy {
             timeouts,
             log_enabled,
             debug,
+            waf_enabled,
+        }
+    }
+
+    /// Build the `request.*` data the WAF exposes to CEL, from the live session.
+    /// Mirrors the Go `buildRequestMap`: `query` is the raw query string, `args`
+    /// are decoded first-values, headers are lowercased, body is empty (header
+    /// phase only — see `waf.rs` divergences).
+    fn build_waf_request(
+        &self,
+        session: &Session,
+        host: &str,
+        method: &str,
+    ) -> crate::waf::RequestData {
+        use std::collections::HashMap;
+        let req = session.req_header();
+        let path = req.uri.path().to_string();
+        let query = req.uri.query().unwrap_or("").to_string();
+        let uri = req
+            .uri
+            .path_and_query()
+            .map(|p| p.as_str().to_string())
+            .unwrap_or_else(|| path.clone());
+        let proto = format!("{:?}", req.version);
+        let scheme = if self.is_https(session) {
+            "https"
+        } else {
+            "http"
+        }
+        .to_string();
+        // X-Real-Ip was set by apply_forwarded_headers per the trust policy,
+        // matching Go's clientIP preference (X-Real-IP first).
+        let remote_ip = header_str(session, "x-real-ip")
+            .unwrap_or_default()
+            .to_string();
+        let content_length = content_length(session).map(|c| c as i64).unwrap_or(-1);
+
+        let mut headers = HashMap::new();
+        for (name, value) in req.headers.iter() {
+            if let Ok(v) = value.to_str() {
+                // first value wins, lowercase keys (HeaderMap iterates in order)
+                headers
+                    .entry(name.as_str().to_ascii_lowercase())
+                    .or_insert_with(|| v.to_string());
+            }
+        }
+
+        crate::waf::RequestData {
+            method: method.to_string(),
+            host: host.to_string(),
+            path,
+            query: query.clone(),
+            uri,
+            proto,
+            scheme,
+            remote_ip,
+            content_length,
+            headers,
+            cookies: parse_cookies(header_str(session, "cookie").unwrap_or("")),
+            args: parse_query_args(&query),
+            user_agent: header_str(session, "user-agent")
+                .unwrap_or_default()
+                .to_string(),
+            referer: header_str(session, "referer")
+                .unwrap_or_default()
+                .to_string(),
+            body: String::new(),
         }
     }
 }
@@ -314,6 +388,21 @@ impl ProxyHttp for Proxy {
             match host_limit.acquire(&key).await {
                 Some(g) => ctx.limit_guards.push(g),
                 None => return self.reject_overloaded(session, ctx).await,
+            }
+        }
+
+        // Global WAF (always-on baseline) runs before routing. An authoritative
+        // platform block here can't be overridden by a tenant zone. Skipped when
+        // disabled or no global rules are loaded (no per-request map built).
+        if self.waf_enabled && self.shared.waf.global_has_rules() {
+            let req = self.build_waf_request(session, &host, &ctx.method);
+            let decision = self.shared.waf.evaluate_global(&req, |id, action| {
+                metrics::waf_match_inc(id, action.as_str(), "global")
+            });
+            if let WafDecision::Block { status, message } = decision {
+                metrics::rejected_inc("waf");
+                respond_with_body(session, status, message.into_bytes()).await?;
+                return Ok(true);
             }
         }
 
@@ -649,6 +738,30 @@ impl Proxy {
             }
         }
 
+        // Per-zone WAF (tenant rules), bound by the waf-zone annotation and
+        // resolved live against the registry — so a zone edit or a newly-created
+        // zone takes effect without a reconcile. Runs after the global WAF
+        // (request_filter) and the IP allow-list, before the redirect/auth gates.
+        if self.waf_enabled {
+            if let Some(key) = cfg
+                .waf_zone
+                .as_deref()
+                .and_then(|raw| resolve_zone_key(&ctx.meta.ingress_namespace, raw))
+            {
+                if let Some(zone) = self.shared.waf.zone(&key) {
+                    let req = self.build_waf_request(session, host, &ctx.method);
+                    let decision = self.shared.waf.evaluate_zone(&zone, &req, |id, action| {
+                        metrics::waf_match_inc(id, action.as_str(), "zone")
+                    });
+                    if let WafDecision::Block { status, message } = decision {
+                        metrics::rejected_inc("waf");
+                        respond_with_body(session, status, message.into_bytes()).await?;
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+
         if cfg.redirect_https && !is_acme && !self.is_https(session) {
             let pq = session
                 .req_header()
@@ -806,6 +919,38 @@ fn is_event_stream(resp: &ResponseHeader) -> bool {
                 .eq_ignore_ascii_case(b"text/event-stream")
         })
         .unwrap_or(false)
+}
+
+/// Parse a `Cookie` header into a name->value map (last write wins, matching Go's
+/// `Request.Cookies` behavior). Values are not unquoted (a minor divergence).
+fn parse_cookies(s: &str) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    for part in s.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = part.split_once('=') {
+            m.insert(k.trim().to_string(), v.trim().to_string());
+        }
+    }
+    m
+}
+
+/// Parse a raw query string into a first-value-per-key map, percent-decoding keys
+/// and values like Go's `url.Query()`. `request.query` stays raw; only `args` is
+/// decoded (matching the Go controller).
+fn parse_query_args(query: &str) -> std::collections::HashMap<String, String> {
+    let decode = |s: &str| crate::waf::query_unescape(s).unwrap_or_else(|| s.to_string());
+    let mut m = std::collections::HashMap::new();
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+        m.entry(decode(k)).or_insert_with(|| decode(v));
+    }
+    m
 }
 
 fn req_host(session: &Session) -> String {

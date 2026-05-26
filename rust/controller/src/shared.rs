@@ -29,6 +29,11 @@ pub struct Shared {
     ready: AtomicBool,
     ingress_class: String,
     load_all_certs: bool,
+    /// WAF registry: global ruleset + tenant zones. Fed by the ConfigMap watcher
+    /// (cluster), read by the proxy. Decoupled from `rebuild` — WAF reloads never
+    /// rebuild the router.
+    #[cfg(feature = "waf")]
+    pub waf: crate::waf::WafRegistry,
 }
 
 impl Shared {
@@ -41,6 +46,8 @@ impl Shared {
             ready: AtomicBool::new(false),
             ingress_class: ingress_class.into(),
             load_all_certs,
+            #[cfg(feature = "waf")]
+            waf: crate::waf::WafRegistry::new(),
         })
     }
 

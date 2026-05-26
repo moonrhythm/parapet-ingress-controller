@@ -30,6 +30,7 @@ struct Metrics {
     net_response: IntCounter,
     tls_no_cert: IntCounterVec,
     rejected: IntCounterVec,
+    waf_matches: IntCounterVec,
 }
 
 fn metrics() -> &'static Metrics {
@@ -127,7 +128,24 @@ fn metrics() -> &'static Metrics {
             &["reason"]
         )
         .expect("register parapet_rejected_requests"),
+        // WAF rule matches. All three labels are bounded: rule ids are
+        // operator-defined (a fixed ruleset), action is log|allow|block, and
+        // scope is global|zone — so request input can't grow the cardinality.
+        waf_matches: register_int_counter_vec!(
+            "parapet_waf_matches",
+            "WAF rule matches by rule, action, and scope",
+            &["rule_id", "action", "scope"]
+        )
+        .expect("register parapet_waf_matches"),
     })
+}
+
+/// Record a WAF rule match. `scope` is "global" or "zone".
+pub fn waf_match_inc(rule_id: &str, action: &str, scope: &str) {
+    metrics()
+        .waf_matches
+        .with_label_values(&[rule_id, action, scope])
+        .inc();
 }
 
 pub fn tls_no_cert_inc(reason: &str) {

@@ -150,9 +150,31 @@ use Go-duration syntax: `1500ms`, `2s`, `1m`, `1h`, or a bare integer (seconds).
 | `DEBUG_ENDPOINTS` | `false` | Serve `GET /debug/routes` (loaded route keys + cert SNIs + readiness) for diagnosis |
 | `RUST_LOG` | `info` | Log filter for Pingora's internal `log` output (h2 handshake errors, etc.) |
 
+### WAF (opt-in)
+
+A CEL-rule firewall on the [`cel`](https://crates.io/crates/cel) crate, the port
+of the Go controller's `parapet/pkg/waf`. A global baseline ruleset plus
+per-tenant zones, all from label-marked ConfigMaps; an ingress binds a zone via
+`parapet.moonrhythm.io/waf-zone`. **Full model and rule reference: [`../WAF.md`](../WAF.md).**
+
+| Variable | Default | Description |
+|---|---|---|
+| `WAF_ENABLED` | `false` | Master switch. When off the proxy does no WAF work and the ConfigMap watch isn't started |
+| `WAF_FAIL_MODE` | `open` | `open` (a rule eval error is logged and skipped) or `closed` (eval error → 500) |
+| `WAF_EVAL_TIMEOUT` | `5ms` | Per-request deadline for the whole ruleset, checked between rules (Go-duration syntax) |
+
+Global rules are honored only from ConfigMaps labeled
+`parapet.moonrhythm.io/waf: global` in `POD_NAMESPACE`; zones are ConfigMaps
+labeled `parapet.moonrhythm.io/waf: zone` (the zone id is the ConfigMap name).
+The WAF watch runs on its own reflector — rule edits recompile the rulesets
+without rebuilding the router. The `fs` backend reads WAF ConfigMaps from the
+manifest directory at startup (no live reload).
+
 > Not configurable in this port: `TR_MAX_CONNS_PER_HOST` and
 > `HTTP_SERVER_MAX_HEADER_BYTES` (no Pingora 0.8 equivalent). The metrics endpoint
-> address (`:9187`) is fixed.
+> address (`:9187`) is fixed. WAF cost-limit / body-inspection / macro toggles
+> (`WAF_COST_LIMIT`, `WAF_INSPECT_BODY`, `WAF_DISABLE_MACROS` in Go) are not
+> supported here — see *Behavior notes* below.
 
 ## Metrics
 
@@ -169,6 +191,8 @@ and labels match the Go controller so existing dashboards keep working:
 - `parapet_tls_sni_no_cert_total{reason}` — TLS handshakes served the self-signed
   fallback (`reason` = `no_sni` | `no_match` | `parse_error`); a rising rate means
   clients see `unknown authority`
+- `parapet_waf_matches{rule_id,action,scope}` — WAF rule matches (`scope` =
+  `global` | `zone`); WAF blocks also increment `parapet_rejected_requests{reason="waf"}`
 - `process_*` (Linux only; a custom `/proc` collector — `process_cpu_seconds_total`
   is float, ms-precision)
 
@@ -192,6 +216,14 @@ state — no Pingora `ConnState` equivalent) and `go_*` runtime metrics.
 - **Two services share one state.** A plaintext+h2c service and a TLS+SNI service
   share one hot-swappable `Shared` (router/cert table behind `ArcSwap`); reloads
   are coalesced with a 300ms debounce.
+- **WAF parity, with three intentional divergences from cel-go.** Rule *strings*
+  are portable (a shared cross-impl test corpus guards this), but: (1) **no cost
+  limit** — cel-rust has none, so the `WAF_EVAL_TIMEOUT` deadline is checked
+  *between* rules (eval isn't interruptible mid-expression) and `regexMatch` uses
+  the linear `regex` crate; (2) **body inspection is phase-2** — `request.body` is
+  always empty, matching Go's default; (3) a **non-bool result or missing map key
+  is a runtime error** (fail-open by default), since cel-rust is dynamically typed
+  and can't reject it at compile time like cel-go's `OutputType` check.
 
 ## Docker
 

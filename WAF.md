@@ -7,9 +7,10 @@ reused verbatim in the Go controller, and reimplemented on
 [cel-rust](https://github.com/cel-rust/cel-rust) in the Rust port (`rust/`) for
 CEL-string parity.
 
-> Status: **design** (this doc) → Go implementation in progress → Rust port to
-> follow against a shared CEL test corpus. The Go controller is the production
-> binary; see `CLAUDE.md`.
+> Status: **implemented** in both the Go controller (`controller_waf.go`,
+> `plugin/waf.go`, `wafrule/`) and the Rust port (`rust/controller/src/waf.rs`,
+> behind the `waf` feature), gated by `WAF_ENABLED` (off by default). The Go
+> controller is the production binary; see `CLAUDE.md`.
 
 ## Why this shape
 

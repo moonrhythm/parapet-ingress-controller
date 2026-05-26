@@ -27,6 +27,11 @@ pub struct RouteConfig {
     pub strip_prefix: Option<String>,
     pub basic_auth: Option<BasicAuth>,
     pub forward_auth: Option<ForwardAuth>,
+    /// Raw `waf-zone` annotation value (a zone id, or `ns/id` cross-ref). Left
+    /// unresolved here — [`resolve_zone_key`] turns it into a registry key at
+    /// request time using the ingress namespace, so zone edits and new zones
+    /// take effect without a reconcile.
+    pub waf_zone: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -101,7 +106,30 @@ impl RouteConfig {
             strip_prefix: get("/strip-prefix").map(str::to_string),
             basic_auth: get("/basic-auth").and_then(parse_basic_auth),
             forward_auth: get("/forward-auth").and_then(parse_forward_auth),
+            waf_zone: get("/waf-zone").map(str::to_string),
         }
+    }
+}
+
+/// Resolve a `waf-zone` annotation value to a zone registry key
+/// (`<namespace>/<name>`). A bare id uses the ingress's own namespace;
+/// `ns/id` is used verbatim (cross-ref to a shared zone). Returns `None` for an
+/// empty or malformed value. Mirrors the Go controller's `plugin.ZoneKey`.
+pub fn resolve_zone_key(ingress_namespace: &str, annotation: &str) -> Option<String> {
+    let v = annotation.trim();
+    if v.is_empty() {
+        return None;
+    }
+    match v.split_once('/') {
+        Some((ns, name)) => {
+            let ns = ns.trim();
+            let name = name.trim();
+            if ns.is_empty() || name.is_empty() || name.contains('/') {
+                return None;
+            }
+            Some(format!("{ns}/{name}"))
+        }
+        None => Some(format!("{ingress_namespace}/{v}")),
     }
 }
 
@@ -364,5 +392,36 @@ mod tests {
             RouteConfig::from_annotations(&BTreeMap::new()),
             RouteConfig::default()
         );
+    }
+
+    #[test]
+    fn waf_zone_parsed() {
+        let c = RouteConfig::from_annotations(&ann(&[("/waf-zone", "acme")]));
+        assert_eq!(c.waf_zone.as_deref(), Some("acme"));
+        assert!(RouteConfig::from_annotations(&BTreeMap::new())
+            .waf_zone
+            .is_none());
+    }
+
+    #[test]
+    fn resolve_zone_key_namespace_local_and_crossref() {
+        assert_eq!(
+            resolve_zone_key("cust1", "acme").as_deref(),
+            Some("cust1/acme")
+        );
+        assert_eq!(
+            resolve_zone_key("cust1", "  acme  ").as_deref(),
+            Some("cust1/acme")
+        );
+        assert_eq!(
+            resolve_zone_key("cust1", "team-x/acme").as_deref(),
+            Some("team-x/acme")
+        );
+        // malformed / empty
+        assert_eq!(resolve_zone_key("cust1", ""), None);
+        assert_eq!(resolve_zone_key("cust1", "   "), None);
+        assert_eq!(resolve_zone_key("cust1", "ns/"), None);
+        assert_eq!(resolve_zone_key("cust1", "/name"), None);
+        assert_eq!(resolve_zone_key("cust1", "a/b/c"), None);
     }
 }
