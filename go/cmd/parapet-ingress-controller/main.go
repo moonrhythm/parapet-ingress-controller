@@ -53,8 +53,8 @@ func main() {
 		InspectBody:   int64(config.Int("WAF_INSPECT_BODY")),
 		DisableMacros: config.Bool("WAF_DISABLE_MACROS"),
 	}
-	// GeoIP (request.country): load the MaxMind .mmdb when WAF is on and a path
-	// is set. A load failure is non-fatal — request.country stays empty.
+	// GeoIP (request.country): load the IPLocate ip-to-country .mmdb when WAF is
+	// on and a path is set. A load failure is non-fatal — request.country stays empty.
 	if wafConfig.Enabled {
 		if dbPath := config.String("WAF_GEOIP_DB"); dbPath != "" {
 			if db, err := geoip.Open(dbPath); err != nil {
@@ -67,6 +67,19 @@ func main() {
 						return cc
 					}
 					return "XX" // DB loaded but IP unresolved
+				}
+			}
+		}
+		// ASN (request.asn): load the IPLocate ip-to-asn .mmdb. A load failure is
+		// non-fatal — request.asn stays 0. Unresolved IPs also resolve to 0.
+		if dbPath := config.String("WAF_ASN_DB"); dbPath != "" {
+			if db, err := geoip.OpenASN(dbPath); err != nil {
+				slog.Error("waf: can not open asn database; request.asn will be 0",
+					"path", dbPath, "error", err)
+			} else {
+				slog.Info("waf: asn database loaded", "path", dbPath)
+				wafConfig.ASN = func(r *http.Request) int64 {
+					return db.ASN(geoip.ClientIP(r))
 				}
 			}
 		}

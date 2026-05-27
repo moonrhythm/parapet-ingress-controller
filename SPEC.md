@@ -66,12 +66,19 @@ with actions `log` / `allow` / `block`. Global runs first and is authoritative.
 Rule **strings are portable** across both implementations; the
 [`conformance/`](conformance/) CEL corpus guards that.
 
-**GeoIP**: when `WAF_GEOIP_DB` points at a MaxMind GeoLite2/GeoIP2 `.mmdb`, rules
+**GeoIP**: when `WAF_GEOIP_DB` points at an IPLocate ip-to-country `.mmdb`, rules
 can filter on `request.country` (ISO 3166-1 alpha-2, from the client IP), e.g.
 `request.country == "TH"` or `containsAny(request.country, ["CN", "RU"])`. The
 field is **always present**: `""` when GeoIP is off, `"XX"` when the DB can't
 place the IP — so it never fails open on a missing key. (Go exposes it via the
 `parapet/pkg/waf` `Country` resolver hook.)
+
+**ASN**: when `WAF_ASN_DB` points at an IPLocate ip-to-asn `.mmdb`, rules can
+filter on `request.asn` (the autonomous system number, an **int**, from the client
+IP), e.g. `request.asn == 13335`. Always present: `0` when ASN lookup is off or the
+IP can't be placed (RFC 7607 reserved, so `request.asn == 0` is a usable predicate
+and the field never fails open). Go exposes it via the `parapet/pkg/waf` `ASN`
+resolver hook (parapet ≥ v0.15.2).
 
 ## Configuration (environment variables)
 
@@ -93,7 +100,8 @@ place the IP — so it never fails open on a missing key. (Go exposes it via the
 | `WAF_ENABLED` | `false` | both | Master switch for the WAF |
 | `WAF_FAIL_MODE` | `open` | both | `open` (skip on rule error) / `closed` (500) |
 | `WAF_EVAL_TIMEOUT` | `5ms` | both | Per-request ruleset deadline |
-| `WAF_GEOIP_DB` | `""` | both | Path to a MaxMind GeoLite2/GeoIP2 `.mmdb`; enables `request.country`. Unset = GeoIP off (`request.country` is `""`) |
+| `WAF_GEOIP_DB` | `""` | both | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); enables `request.country`. Unset = GeoIP off (`request.country` is `""`) |
+| `WAF_ASN_DB` | `""` | both | Path to an IPLocate ip-to-asn `.mmdb` (flat string `asn`); enables `request.asn`. Unset = ASN off (`request.asn` is `0`) |
 | `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | **Go-only** | Max header size (no Pingora 0.8 equivalent) |
 | `TR_MAX_CONNS_PER_HOST` | stdlib | **Go-only** | Max conns per host (no Pingora 0.8 equivalent) |
 | `PROFILER` / `PROFILER_NAME` | `false` | **Go-only** | Cloud Profiler (no Rust SDK) |

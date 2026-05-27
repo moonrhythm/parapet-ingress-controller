@@ -184,9 +184,12 @@ impl Proxy {
         let remote_ip = header_str(session, "x-real-ip")
             .unwrap_or_default()
             .to_string();
-        // GeoIP: resolve the client IP to a country for request.country ("" when
-        // GeoIP is off, "XX" when the DB can't place the IP).
-        let country = self.shared.waf.country_of(remote_ip.parse().ok());
+        // GeoIP: resolve the client IP once to a country for request.country ("" when
+        // GeoIP is off, "XX" when the DB can't place the IP) and an AS number for
+        // request.asn (0 when off or unplaceable). IpAddr is Copy.
+        let client_ip = remote_ip.parse().ok();
+        let country = self.shared.waf.country_of(client_ip);
+        let asn = self.shared.waf.asn_of(client_ip);
         let content_length = content_length(session).map(|c| c as i64).unwrap_or(-1);
 
         let mut headers = HashMap::new();
@@ -209,6 +212,7 @@ impl Proxy {
             scheme,
             remote_ip,
             country,
+            asn,
             content_length,
             headers,
             cookies: parse_cookies(header_str(session, "cookie").unwrap_or("")),

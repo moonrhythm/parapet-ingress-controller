@@ -6,7 +6,7 @@ require (
 	cloud.google.com/go/profiler v0.6.0
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.32.0
 	github.com/acoshift/configfile v1.9.0
-	github.com/moonrhythm/parapet v0.15.1
+	github.com/moonrhythm/parapet v0.15.2
 	github.com/oschwald/maxminddb-golang v1.13.1
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1

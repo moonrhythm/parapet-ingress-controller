@@ -48,7 +48,7 @@ libc = { version = "0.2", optional = true }
 # is RE2-style (linear, no catastrophic backtracking) like Go's regexp.
 cel = { version = "0.13", optional = true }
 regex = { version = "1", optional = true }
-# GeoIP country lookup (request.country) from a MaxMind GeoLite2/GeoIP2 .mmdb.
+# GeoIP country lookup (request.country) from an IPLocate ip-to-country .mmdb.
 maxminddb = { version = "0.28", optional = true }
 
 [features]

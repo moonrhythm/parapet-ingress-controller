@@ -149,8 +149,8 @@ fn main() {
 
     let shared = Shared::new(ingress_class, load_all_certs);
     shared.waf.configure(waf_config);
-    // GeoIP (request.country): load the MaxMind .mmdb when WAF is on and a path
-    // is configured. A load failure is non-fatal — request.country stays empty.
+    // GeoIP (request.country): load the IPLocate ip-to-country .mmdb when WAF is
+    // on and a path is configured. A load failure is non-fatal — request.country stays empty.
     if waf_enabled {
         if let Some(db) = std::env::var("WAF_GEOIP_DB").ok().filter(|s| !s.is_empty()) {
             match controller::waf::GeoIp::open(&db) {
@@ -159,6 +159,17 @@ fn main() {
                     eprintln!("[waf] geoip database loaded: {db}");
                 }
                 Err(e) => eprintln!("[waf] geoip load failed ({e}); request.country will be empty"),
+            }
+        }
+        // ASN (request.asn): load the IPLocate ip-to-asn .mmdb. Non-fatal on
+        // failure — request.asn stays 0.
+        if let Some(db) = std::env::var("WAF_ASN_DB").ok().filter(|s| !s.is_empty()) {
+            match controller::waf::AsnDb::open(&db) {
+                Ok(a) => {
+                    shared.waf.set_asndb(a);
+                    eprintln!("[waf] asn database loaded: {db}");
+                }
+                Err(e) => eprintln!("[waf] asn load failed ({e}); request.asn will be 0"),
             }
         }
     }

@@ -21,27 +21,24 @@ RUN go build \
 		-tags=cbrotli \
 		./cmd/parapet-ingress-controller
 
-# Optional GeoIP database for the WAF's request.country. Off by default — set the
-# edition flag and pass the MaxMind license key as a BuildKit secret to bake the
-# .mmdb into the image:
-#
-#   docker build --build-arg GEOIP_EDITION=GeoLite2-Country \
-#     --secret id=maxmind_license,env=MAXMIND_LICENSE_KEY -t img go/
-#
-# then run with WAF_GEOIP_DB=/geoip/GeoLite2-Country.mmdb. The key is read from a
-# secret mount, so it never lands in an image layer. Empty edition (default) bakes
-# no DB but still creates /geoip so the COPY below always succeeds.
+# GeoIP databases for the WAF. The ip-to-country DB (request.country) is baked by
+# default from IPLocate's free MMDB (CC BY-SA 4.0 — no account or license key, just
+# keep the attribution to iplocate.io); run with WAF_GEOIP_DB=/geoip/ip-to-country.mmdb.
+# The ip-to-asn DB (request.asn) is opt-in — it is ~74 MB, so it is NOT baked unless
+# you pass ASN_DB_URL; then run with WAF_ASN_DB=/geoip/ip-to-asn.mmdb. Override either
+# URL to bake a different .mmdb, or pass an empty value to bake none (the /geoip dir
+# is still created so the COPY below always succeeds).
+#   docker build --build-arg ASN_DB_URL=https://github.com/iplocate/ip-address-databases/raw/main/ip-to-asn/ip-to-asn.mmdb -t img go/
 FROM debian:trixie-slim AS geoip
-ARG GEOIP_EDITION=
-RUN --mount=type=secret,id=maxmind_license \
-	mkdir -p /geoip && \
-	if [ -n "$GEOIP_EDITION" ]; then \
-		apt-get update && apt-get -y install --no-install-recommends curl ca-certificates && \
-		curl -fsSL "https://download.maxmind.com/app/geoip_download?edition_id=${GEOIP_EDITION}&license_key=$(cat /run/secrets/maxmind_license)&suffix=tar.gz" -o /tmp/geoip.tar.gz && \
-		tar -xzf /tmp/geoip.tar.gz -C /tmp && \
-		find /tmp -name '*.mmdb' -exec mv {} /geoip/ \; && \
-		ls -l /geoip; \
-	fi
+ARG GEOIP_DB_URL=https://github.com/iplocate/ip-address-databases/raw/main/ip-to-country/ip-to-country.mmdb
+ARG ASN_DB_URL=
+RUN mkdir -p /geoip && \
+	if [ -n "$GEOIP_DB_URL" ] || [ -n "$ASN_DB_URL" ]; then \
+		apt-get update && apt-get -y install --no-install-recommends curl ca-certificates; \
+	fi && \
+	if [ -n "$GEOIP_DB_URL" ]; then curl -fsSL "$GEOIP_DB_URL" -o /geoip/ip-to-country.mmdb; fi && \
+	if [ -n "$ASN_DB_URL" ]; then curl -fsSL "$ASN_DB_URL" -o /geoip/ip-to-asn.mmdb; fi && \
+	ls -l /geoip
 
 FROM debian:trixie-slim
 

@@ -47,6 +47,15 @@ spec:
           value: "4000"
         - name: PROFILER
           value: "false"
+        # Opt into the WAF + GeoIP filtering (request.country / request.asn). The
+        # images bake the IPLocate ip-to-country DB by default; the ip-to-asn DB is
+        # opt-in at build time (Dockerfile ASN_DB_URL) or mounted. Uncomment to enable:
+        # - name: WAF_ENABLED
+        #   value: "true"
+        # - name: WAF_GEOIP_DB
+        #   value: /geoip/ip-to-country.mmdb
+        # - name: WAF_ASN_DB
+        #   value: /geoip/ip-to-asn.mmdb
         livenessProbe:
           failureThreshold: 5
           httpGet:

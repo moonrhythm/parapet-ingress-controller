@@ -163,7 +163,8 @@ per-tenant zones, all from label-marked ConfigMaps; an ingress binds a zone via
 | `WAF_ENABLED` | `false` | Master switch. When off the proxy does no WAF work and the ConfigMap watch isn't started |
 | `WAF_FAIL_MODE` | `open` | `open` (a rule eval error is logged and skipped) or `closed` (eval error → 500) |
 | `WAF_EVAL_TIMEOUT` | `5ms` | Per-request deadline for the whole ruleset, checked between rules (Go-duration syntax) |
-| `WAF_GEOIP_DB` | `""` | Path to a MaxMind GeoLite2/GeoIP2 `.mmdb` (`maxminddb` crate); enables `request.country` (ISO alpha-2 from the client IP). `""` when off, `"XX"` when the DB can't place the IP. Load failure is non-fatal |
+| `WAF_GEOIP_DB` | `""` | Path to an IPLocate ip-to-country `.mmdb` (`maxminddb` crate, flat `country_code` schema); enables `request.country` (ISO alpha-2 from the client IP). `""` when off, `"XX"` when the DB can't place the IP. Load failure is non-fatal |
+| `WAF_ASN_DB` | `""` | Path to an IPLocate ip-to-asn `.mmdb` (`maxminddb` crate, flat string `asn`); enables `request.asn` (the AS number as an int, from the client IP). `0` when off or the DB can't place the IP. Load failure is non-fatal |
 
 Global rules are honored only from ConfigMaps labeled
 `parapet.moonrhythm.io/waf: global` in `POD_NAMESPACE`; zones are ConfigMaps

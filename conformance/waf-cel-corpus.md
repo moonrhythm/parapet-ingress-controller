@@ -47,6 +47,21 @@ rule referencing it never errors on a missing key.
 | 18 | `request.country != "TH"` (allow-list) | `XX` (unknown) | yes |
 | 19 | `request.country != "TH"` (allow-list) | `TH` | no |
 
+## GeoIP (`request.asn`)
+
+`request.asn` is the GeoIP autonomous system number (an integer). It is **always
+present** — `0` when ASN lookup is off or the IP can't be placed (RFC 7607
+reserved), otherwise the AS number — so a rule referencing it never errors on a
+missing key.
+
+| # | expression | request.asn | blocks? |
+|---|---|---|---|
+| 20 | `request.asn == 13335` | `13335` | yes |
+| 21 | `request.asn == 13335` | `15169` | no |
+| 22 | `request.asn == 0` (unknown) | `0` | yes |
+| 23 | `request.asn != 4808` (allow-list) | `0` (unknown) | yes |
+| 24 | `request.asn != 4808` (allow-list) | `4808` | no |
+
 ## Semantics both engines honor
 
 - **Actions**: `block` terminates (status/message); `allow` short-circuits *this
