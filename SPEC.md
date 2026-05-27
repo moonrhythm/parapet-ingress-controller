@@ -151,6 +151,12 @@ doesn't serve, to bound cardinality under a flood.
 
 - **WAF cost limit** — cel-rust has none; Rust checks `WAF_EVAL_TIMEOUT` between
   rules. **WAF body inspection** is phase-2 in Rust (`request.body` empty).
+- **WAF CEL surface** — Go uses cel-go's full stdlib + macros; Rust uses
+  cel-rust 0.13 (a subset). The portable surface (the contract) is documented in
+  [`WAF.md`](WAF.md#cel-surface): `bool()`/`type()`/`dyn()` and the tz-arg time
+  accessors are Go-only, `max()`/`min()`/`optional.*` are Rust-only,
+  `WAF_DISABLE_MACROS` is Go-only, and no CEL extension libraries are enabled in
+  either.
 - **Cloud Profiler/Trace** are Go-only (no Rust SDK).
 - See [`go/CLAUDE.md`-style notes in `CLAUDE.md`](CLAUDE.md) and
   [`rust/README.md`](rust/README.md) for the full per-impl detail.
