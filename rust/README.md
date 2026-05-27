@@ -245,7 +245,12 @@ docker build --build-arg TARGET_CPU=x86-64-v3 -t ...:rust rust/
 ## CI
 
 - `.github/workflows/rust-test.yaml` — fmt + clippy + test on push/PR.
-- `.github/workflows/rust-build.yaml` — builds and pushes `rust-`-prefixed images
+- `.github/workflows/rust-build.yaml` — builds and pushes `rust-<sha>` images
   on `master`.
+- `.github/workflows/rust-release.yaml` — on a tag push, builds and pushes
+  `rust-<tag>` and `rust-latest` (plus the `-amd64v1` compatibility variants).
 
-Both are path-filtered to `rust/**`, so Go-only changes never trigger them.
+`rust-test` / `rust-build` are path-filtered to `rust/**`, so Go-only changes
+never trigger them. `rust-release` is tag-triggered (tags can't be path-filtered),
+so a tag release builds **both** implementations — Go publishes `:<tag>`/`:latest`,
+Rust publishes `rust-<tag>`/`rust-latest`.
