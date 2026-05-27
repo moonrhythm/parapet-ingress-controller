@@ -1109,8 +1109,10 @@ mod tests {
 
     // Tiny IPLocate-shaped fixture (flat country_code schema), shared with the
     // Go tests under conformance/. See conformance/geoip/README.md.
-    const TEST_DB: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../conformance/geoip/iplocate-country.mmdb");
+    const TEST_DB: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/geoip/iplocate-country.mmdb"
+    );
 
     #[test]
     fn geoip_decodes_iplocate_flat_schema() {
@@ -1153,8 +1155,10 @@ mod tests {
 
     // Tiny IPLocate-shaped ip-to-asn fixture (flat string `asn`), shared with the
     // Go tests under conformance/. See conformance/geoip/README.md.
-    const ASN_TEST_DB: &str =
-        concat!(env!("CARGO_MANIFEST_DIR"), "/../../conformance/geoip/iplocate-asn.mmdb");
+    const ASN_TEST_DB: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/geoip/iplocate-asn.mmdb"
+    );
 
     #[test]
     fn asn_decodes_iplocate_flat_string() {
