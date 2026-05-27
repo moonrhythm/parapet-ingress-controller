@@ -11,7 +11,7 @@ on:
 jobs:
   build:
     name: Build (rust)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2
