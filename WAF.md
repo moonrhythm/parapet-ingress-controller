@@ -64,17 +64,125 @@ rules:
 Top-level `request` map (snake_case, ModSecurity-style):
 
 ```
-request.method  host  path  query  uri  proto  scheme  remote_ip
+request.method  host  path  query  uri  proto  scheme  remote_ip  country  asn
         content_length  headers{}  cookies{}  args{}  user_agent  referer  body
 ```
 
 `headers`/`args`/`cookies` are single-valued maps; header keys are lowercased.
 `body` is empty unless body inspection is enabled (off by default).
+`country` is the GeoIP country code — see [GeoIP](#geoip-requestcountry).
+`asn` is the GeoIP autonomous system number (an int) — see [ASN](#asn-requestasn).
 
 Custom functions: `ipInCidr(ip,cidr)`, `regexMatch(s,pattern)` (RE2, cached),
 `containsAny(s,list)`, `hasPrefixAny(s,list)`, `lower(s)`, `upper(s)`,
 `urlDecode(s)`. Query strings are **not** auto-decoded — apply `urlDecode`
 yourself so `?q=1+UNION+SELECT` is normalized before a regex sees it.
+
+## GeoIP (`request.country`)
+
+`WAF_GEOIP_DB` defaults to the **IPLocate ip-to-country** `.mmdb` baked into the
+image (`/geoip/ip-to-country.mmdb`); point it at a custom path, or set `""` to
+disable. It resolves the client IP to an ISO 3166-1 alpha-2 country, exposed to
+rules as `request.country`:
+
+```yaml
+rules:
+  - id: allow-th-only
+    expression: request.country != "TH"
+    action: block
+  - id: block-geos
+    expression: containsAny(request.country, ["CN", "RU", "KP"])
+    action: block
+```
+
+`request.country` is **always present** in the request map, so a rule referencing
+it never errors on a missing key (no fail-open):
+
+- `""` — GeoIP disabled (`WAF_GEOIP_DB` set to `""`, or no DB at the path).
+- `"XX"` — DB loaded but the IP couldn't be placed (private range, not in DB).
+- an ISO code (e.g. `"TH"`) otherwise.
+
+So `request.country != "TH"` blocks unknowns too — the safe default for an
+allow-list. The client IP is the same one used for `request.remote_ip`
+(X-Real-IP → X-Forwarded-For → peer), so it honors `TRUST_PROXY`.
+
+Whenever the DB is loaded, the resolved country is also forwarded **upstream** as
+the `X-Forwarded-Country` header — overwriting any client-supplied value so a
+backend can trust it (`"XX"` for an unplaceable IP). With GeoIP off the header is
+left untouched.
+
+The DB is the [IPLocate ip-to-country](https://github.com/iplocate/ip-address-databases)
+MMDB. Its records are **flat** — `country_code` at the top level — unlike MaxMind
+GeoIP2, which nests it under `country.iso_code`; both implementations read the
+flat schema. Any standard `.mmdb` reader works on the file; only the record layout
+differs, so a MaxMind GeoLite2-Country `.mmdb` will **not** resolve here.
+
+**Implementation.** Go exposes it through the `parapet/pkg/waf` `Country`
+resolver hook, wired to a `maxminddb-golang` lookup; Rust uses the `maxminddb`
+crate. Both decode a flat `{ country_code }` record, load the DB once at startup,
+and treat a load failure as non-fatal (country stays `""`).
+
+**Providing the DB.** It exceeds a ConfigMap's 1 MB limit, so either:
+
+- **Bake at build time** (both Dockerfiles, the default). The IPLocate ip-to-country
+  `.mmdb` is downloaded straight from GitHub — no account or license key — into the
+  image at `/geoip/ip-to-country.mmdb`:
+
+  ```bash
+  docker build -t img go/   # or rust/  — bakes the DB by default
+  # then run with: WAF_GEOIP_DB=/geoip/ip-to-country.mmdb
+  ```
+
+  Override `--build-arg GEOIP_DB_URL=<url>` to bake a different `.mmdb`, or pass an
+  empty value to bake none. Simple to deploy, but the DB is as stale as the image
+  (rebuild to refresh).
+
+- **Mount at runtime** — an updater sidecar / initContainer or a volume, with
+  `WAF_GEOIP_DB` pointing at the mount. Refreshes without a rebuild.
+
+IPLocate's free databases are **CC BY-SA 4.0**: keep the attribution to
+[iplocate.io](https://www.iplocate.io) where the data is used. No EULA or license
+key is required.
+
+## ASN (`request.asn`)
+
+`WAF_ASN_DB` defaults to the **IPLocate ip-to-asn** `.mmdb` baked into the image
+(`/geoip/ip-to-asn.mmdb`); point it at a custom path, or set `""` to disable. It
+resolves the client IP to its autonomous system number, exposed to rules as
+`request.asn`:
+
+```yaml
+rules:
+  - id: block-asn
+    expression: request.asn == 13335
+    action: block
+```
+
+`request.asn` is an **integer, always present**:
+
+- `0` — ASN lookup disabled (`WAF_ASN_DB` set to `""`, or no DB at the path) **or**
+  the IP couldn't be placed. `0` is reserved by RFC 7607, so `request.asn == 0` is a
+  usable "unknown AS" predicate and a rule referencing the field never fails open.
+- the AS number otherwise.
+
+It is exposed as a CEL **int** (not uint), so rules use plain integer literals
+(`request.asn == 13335`, not `13335u`). The client IP is resolved the same way as
+`request.country`, so it honors `TRUST_PROXY`. IPLocate's ip-to-asn records are
+flat, with `asn` stored as a *string* that the resolver parses to an integer.
+
+Whenever the DB is loaded, the resolved ASN is also forwarded **upstream** as the
+`X-Forwarded-ASN` header (overwriting any client-supplied value; `0` for an
+unplaceable IP). With ASN lookup off the header is left untouched.
+
+**Implementation.** Go exposes it through the `parapet/pkg/waf` `ASN` resolver
+hook (added in parapet v0.15.2); Rust builds `request.asn` directly. Both load the
+DB once at startup; a load failure is non-fatal (`request.asn` stays 0).
+
+**Providing the DB** mirrors GeoIP, with its own `WAF_ASN_DB` env var. Both
+Dockerfiles bake the ip-to-asn `.mmdb` to `/geoip/ip-to-asn.mmdb` by default
+(`ASN_DB_URL`). It is much larger than the country DB (~74 MB), so pass
+`--build-arg ASN_DB_URL=` (empty) to skip baking it if you don't need
+`request.asn`, or override the URL / mount it at runtime instead.
 
 ## Delivery: ConfigMaps, one marker label
 

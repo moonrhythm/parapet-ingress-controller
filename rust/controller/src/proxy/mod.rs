@@ -184,6 +184,12 @@ impl Proxy {
         let remote_ip = header_str(session, "x-real-ip")
             .unwrap_or_default()
             .to_string();
+        // GeoIP: resolve the client IP once to a country for request.country ("" when
+        // GeoIP is off, "XX" when the DB can't place the IP) and an AS number for
+        // request.asn (0 when off or unplaceable). IpAddr is Copy.
+        let client_ip = remote_ip.parse().ok();
+        let country = self.shared.waf.country_of(client_ip);
+        let asn = self.shared.waf.asn_of(client_ip);
         let content_length = content_length(session).map(|c| c as i64).unwrap_or(-1);
 
         let mut headers = HashMap::new();
@@ -205,6 +211,8 @@ impl Proxy {
             proto,
             scheme,
             remote_ip,
+            country,
+            asn,
             content_length,
             headers,
             cookies: parse_cookies(header_str(session, "cookie").unwrap_or("")),
@@ -283,6 +291,22 @@ impl ProxyHttp for Proxy {
 
         // trust-proxy / X-Forwarded-* (parapet proxy middleware)
         self.apply_forwarded_headers(session, remote_ip, scheme);
+
+        // X-Forwarded-Country / X-Forwarded-ASN: hand the upstream the GeoIP result
+        // for the same client IP the WAF uses (x-real-ip after trust handling). Each
+        // header is set only when its DB is loaded, overwriting any client-supplied
+        // value so it can't be spoofed; an unplaceable IP yields "XX" / 0.
+        let client_ip = header_str(session, "x-real-ip").and_then(|s| s.parse::<IpAddr>().ok());
+        if let Some(cc) = self.shared.waf.forwarded_country(client_ip) {
+            let _ = session
+                .req_header_mut()
+                .insert_header("x-forwarded-country", cc);
+        }
+        if let Some(asn) = self.shared.waf.forwarded_asn(client_ip) {
+            let _ = session
+                .req_header_mut()
+                .insert_header("x-forwarded-asn", asn.to_string());
+        }
 
         let host = req_host(session);
         let path = session.req_header().uri.path().to_string();

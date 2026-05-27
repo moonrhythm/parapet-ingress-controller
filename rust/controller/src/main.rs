@@ -149,6 +149,48 @@ fn main() {
 
     let shared = Shared::new(ingress_class, load_all_certs);
     shared.waf.configure(waf_config);
+    // GeoIP databases. WAF_GEOIP_DB (request.country) and WAF_ASN_DB (request.asn)
+    // default to the paths baked into the image; set either to a custom path, or to
+    // "" to disable. A missing file at an explicitly-set path is logged; a missing
+    // file at the default path is a quiet no-op. Loading is always non-fatal.
+    if waf_enabled {
+        // db_path returns (path, explicit): the env value when set ("" disables),
+        // else the baked default (a missing default file is not an error).
+        let db_path = |env: &str, default: &str| -> (String, bool) {
+            match std::env::var(env) {
+                Ok(v) => (v, true),
+                Err(_) => (default.to_string(), false),
+            }
+        };
+
+        let (path, explicit) = db_path("WAF_GEOIP_DB", "/geoip/ip-to-country.mmdb");
+        if !path.is_empty() {
+            match controller::waf::GeoIp::open(&path) {
+                Ok(g) => {
+                    shared.waf.set_geoip(g);
+                    eprintln!("[waf] geoip database loaded: {path}");
+                }
+                Err(e) if explicit => {
+                    eprintln!("[waf] geoip load failed ({e}); request.country will be empty")
+                }
+                Err(_) => {} // default path absent -> quiet no-op
+            }
+        }
+
+        let (path, explicit) = db_path("WAF_ASN_DB", "/geoip/ip-to-asn.mmdb");
+        if !path.is_empty() {
+            match controller::waf::AsnDb::open(&path) {
+                Ok(a) => {
+                    shared.waf.set_asndb(a);
+                    eprintln!("[waf] asn database loaded: {path}");
+                }
+                Err(e) if explicit => {
+                    eprintln!("[waf] asn load failed ({e}); request.asn will be 0")
+                }
+                Err(_) => {} // default path absent -> quiet no-op
+            }
+        }
+    }
 
     match backend.as_str() {
         // static manifests; one-shot load, no watch (local dev / smoke tests)

@@ -61,6 +61,25 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
       --bin parapet-ingress-controller \
     && cp target/release/parapet-ingress-controller /usr/local/bin/parapet-ingress-controller
 
+# ---- GeoIP databases ----
+# Both baked by default from IPLocate's free MMDBs (CC BY-SA 4.0 — no account or
+# license key, just keep the attribution to iplocate.io): ip-to-country
+# (request.country, run with WAF_GEOIP_DB=/geoip/ip-to-country.mmdb) and ip-to-asn
+# (request.asn, run with WAF_ASN_DB=/geoip/ip-to-asn.mmdb). The ip-to-asn DB is
+# large (~74 MB) — pass --build-arg ASN_DB_URL= (empty) to skip it if you don't
+# need request.asn. Override either URL to bake a different .mmdb; an empty value
+# bakes none (the /geoip dir is still created so the COPY below always succeeds).
+FROM debian:trixie-slim AS geoip
+ARG GEOIP_DB_URL=https://github.com/iplocate/ip-address-databases/raw/main/ip-to-country/ip-to-country.mmdb
+ARG ASN_DB_URL=https://github.com/iplocate/ip-address-databases/raw/main/ip-to-asn/ip-to-asn.mmdb
+RUN mkdir -p /geoip && \
+    if [ -n "$GEOIP_DB_URL" ] || [ -n "$ASN_DB_URL" ]; then \
+        apt-get update && apt-get install -y --no-install-recommends curl ca-certificates; \
+    fi && \
+    if [ -n "$GEOIP_DB_URL" ]; then curl -fsSL "$GEOIP_DB_URL" -o /geoip/ip-to-country.mmdb; fi && \
+    if [ -n "$ASN_DB_URL" ]; then curl -fsSL "$ASN_DB_URL" -o /geoip/ip-to-asn.mmdb; fi && \
+    ls -l /geoip
+
 # ---- runtime ----
 # distroless/cc already provides libssl3, ca-certificates, glibc and libgcc, so
 # there is no apt step here (the image has no package manager). Runs as root
@@ -70,6 +89,7 @@ FROM ${RUNTIME_IMAGE}
 COPY --from=builder \
      /usr/local/bin/parapet-ingress-controller \
      /usr/local/bin/parapet-ingress-controller
+COPY --from=geoip /geoip/ /geoip/
 
 # HTTP, HTTPS, Prometheus
 EXPOSE 80 443 9187

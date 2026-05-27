@@ -47,6 +47,12 @@ spec:
           value: "4000"
         - name: PROFILER
           value: "false"
+        # Opt into the WAF. GeoIP filtering (request.country / request.asn) then works
+        # out of the box: the images bake both IPLocate DBs and WAF_GEOIP_DB /
+        # WAF_ASN_DB default to them. Set those to "" to disable a lookup, or to a
+        # custom path. Uncomment to enable:
+        # - name: WAF_ENABLED
+        #   value: "true"
         livenessProbe:
           failureThreshold: 5
           httpGet:

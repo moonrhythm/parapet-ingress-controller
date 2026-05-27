@@ -25,10 +25,11 @@ use std::net::IpAddr;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use cel::{Context, ExecutionError, Program, Value};
 use ipnet::IpNet;
 use k8s_openapi::api::core::v1::ConfigMap;
+use maxminddb::Reader;
 use regex::Regex;
 use serde::Deserialize;
 
@@ -98,6 +99,12 @@ pub struct RequestData {
     pub proto: String,
     pub scheme: String,
     pub remote_ip: String,
+    /// ISO 3166-1 alpha-2 country (GeoIP). "" when GeoIP is off, "XX" when the
+    /// DB is loaded but the IP can't be resolved. Exposed as `request.country`.
+    pub country: String,
+    /// Autonomous system number (GeoIP). 0 when ASN lookup is off or the IP
+    /// can't be placed. Exposed as `request.asn`.
+    pub asn: i64,
     pub content_length: i64,
     pub headers: HashMap<String, String>,
     pub cookies: HashMap<String, String>,
@@ -355,12 +362,76 @@ impl Waf {
     }
 }
 
+/// A loaded IPLocate ip-to-country database. Resolves a client IP to its
+/// ISO 3166-1 alpha-2 country code for `request.country`.
+pub struct GeoIp {
+    reader: Reader<Vec<u8>>,
+}
+
+/// One IPLocate ip-to-country record. The schema is flat — `country_code` at
+/// the top level — unlike MaxMind GeoIP2, which nests it under `country.iso_code`.
+#[derive(Deserialize)]
+struct CountryRecord {
+    country_code: Option<String>,
+}
+
+impl GeoIp {
+    /// Open a `.mmdb` file (the IPLocate ip-to-country DB). Read into memory once.
+    pub fn open(path: &str) -> Result<Self, String> {
+        Reader::open_readfile(path)
+            .map(|reader| Self { reader })
+            .map_err(|e| format!("open {path}: {e}"))
+    }
+
+    /// ISO country code for `ip`, or `None` if not found / DB has no country.
+    pub fn country(&self, ip: IpAddr) -> Option<String> {
+        let res = self.reader.lookup(ip).ok()?;
+        let rec = res.decode::<CountryRecord>().ok()??;
+        rec.country_code
+    }
+}
+
+/// A loaded IPLocate ip-to-asn database. Resolves a client IP to its
+/// autonomous system number for `request.asn`.
+pub struct AsnDb {
+    reader: Reader<Vec<u8>>,
+}
+
+/// One IPLocate ip-to-asn record. `asn` is stored as a string (e.g. "15169"),
+/// which the resolver parses to an integer.
+#[derive(Deserialize)]
+struct AsnRecord {
+    asn: Option<String>,
+}
+
+impl AsnDb {
+    /// Open a `.mmdb` file (the IPLocate ip-to-asn DB). Read into memory once.
+    pub fn open(path: &str) -> Result<Self, String> {
+        Reader::open_readfile(path)
+            .map(|reader| Self { reader })
+            .map_err(|e| format!("open {path}: {e}"))
+    }
+
+    /// AS number for `ip`, or 0 if not found / no ASN / unparseable.
+    pub fn asn(&self, ip: IpAddr) -> i64 {
+        let Ok(res) = self.reader.lookup(ip) else {
+            return 0;
+        };
+        match res.decode::<AsnRecord>() {
+            Ok(Some(rec)) => rec.asn.and_then(|s| s.parse().ok()).unwrap_or(0),
+            _ => 0,
+        }
+    }
+}
+
 /// Holds the global baseline ruleset plus the tenant zone registry. Lives in
 /// [`crate::shared::Shared`]; fed by the ConfigMap watcher, read by the proxy.
 pub struct WafRegistry {
     config: ArcSwap<WafConfig>,
     global: Waf,
     zones: ArcSwap<HashMap<String, Arc<Waf>>>,
+    geoip: ArcSwapOption<GeoIp>,
+    asndb: ArcSwapOption<AsnDb>,
 }
 
 impl Default for WafRegistry {
@@ -369,6 +440,8 @@ impl Default for WafRegistry {
             config: ArcSwap::from_pointee(WafConfig::default()),
             global: Waf::default(),
             zones: ArcSwap::from_pointee(HashMap::new()),
+            geoip: ArcSwapOption::empty(),
+            asndb: ArcSwapOption::empty(),
         }
     }
 }
@@ -381,6 +454,50 @@ impl WafRegistry {
     /// Install the tunables (from env) before serving.
     pub fn configure(&self, cfg: WafConfig) {
         self.config.store(Arc::new(cfg));
+    }
+
+    /// Install the GeoIP database (from `WAF_GEOIP_DB`) before serving.
+    pub fn set_geoip(&self, geoip: GeoIp) {
+        self.geoip.store(Some(Arc::new(geoip)));
+    }
+
+    /// Install the ASN database (from `WAF_ASN_DB`) before serving.
+    pub fn set_asndb(&self, asndb: AsnDb) {
+        self.asndb.store(Some(Arc::new(asndb)));
+    }
+
+    /// The country to forward as `X-Forwarded-Country`: `Some` iff a GeoIP DB is
+    /// loaded — the ISO code, or "XX" when the DB can't place the IP — else `None`
+    /// (lookup disabled, so the proxy leaves the header untouched).
+    pub fn forwarded_country(&self, ip: Option<IpAddr>) -> Option<String> {
+        self.geoip.load_full().map(|g| {
+            ip.and_then(|ip| g.country(ip))
+                .unwrap_or_else(|| "XX".to_string())
+        })
+    }
+
+    /// The ASN to forward as `X-Forwarded-ASN`: `Some` iff an ASN DB is loaded —
+    /// the AS number, or 0 (RFC 7607 reserved) when the DB can't place the IP —
+    /// else `None` (lookup disabled, so the proxy leaves the header untouched).
+    pub fn forwarded_asn(&self, ip: Option<IpAddr>) -> Option<i64> {
+        self.asndb
+            .load_full()
+            .map(|db| ip.map(|ip| db.asn(ip)).unwrap_or(0))
+    }
+
+    /// Resolve a client IP to its ISO country code for `request.country`: the
+    /// [`Self::forwarded_country`] value, or "" when GeoIP is disabled (matching
+    /// the Go controller's nil resolver). The field is always present, so a rule
+    /// referencing it never errors on a missing key.
+    pub fn country_of(&self, ip: Option<IpAddr>) -> String {
+        self.forwarded_country(ip).unwrap_or_default()
+    }
+
+    /// Resolve a client IP to its AS number for `request.asn`: the
+    /// [`Self::forwarded_asn`] value, or 0 when ASN lookup is disabled. The field
+    /// is always present (0 is RFC 7607-reserved, a usable "unknown" predicate).
+    pub fn asn_of(&self, ip: Option<IpAddr>) -> i64 {
+        self.forwarded_asn(ip).unwrap_or(0)
     }
 
     /// Replace the global ruleset (all-or-nothing).
@@ -511,6 +628,8 @@ fn request_value(d: &RequestData) -> Value {
     m.insert("proto".into(), d.proto.clone().into());
     m.insert("scheme".into(), d.scheme.clone().into());
     m.insert("remote_ip".into(), d.remote_ip.clone().into());
+    m.insert("country".into(), d.country.clone().into());
+    m.insert("asn".into(), Value::Int(d.asn));
     m.insert("content_length".into(), Value::Int(d.content_length));
     m.insert("headers".into(), str_map_value(&d.headers));
     m.insert("cookies".into(), str_map_value(&d.cookies));
@@ -972,5 +1091,128 @@ mod tests {
     #[test]
     fn empty_ruleset_passes() {
         assert_eq!(decide(&Waf::new(), &req()), Decision::Pass);
+    }
+
+    #[test]
+    fn corpus_country_field() {
+        // request.country is a normalized field; rules filter on it directly,
+        // identically to the Go controller (same rule strings).
+        assert!(blocks(r#"request.country == "CN""#, |r| r.country = "CN".into()));
+        assert!(!blocks(r#"request.country == "CN""#, |r| r.country = "TH".into()));
+        assert!(blocks(
+            r#"containsAny(request.country, ["CN", "RU", "KP"])"#,
+            |r| r.country = "RU".into()
+        ));
+        // "block all except TH": an unknown country ("XX") is still blocked,
+        // and crucially does NOT fail open (request.country is always present).
+        assert!(blocks(r#"request.country != "TH""#, |r| r.country = "XX".into()));
+    }
+
+    #[test]
+    fn country_of_empty_without_db() {
+        // No GeoIP DB loaded -> "" for any IP (matches the Go nil resolver).
+        let reg = WafRegistry::new();
+        assert_eq!(reg.country_of("8.8.8.8".parse().ok()), "");
+        assert_eq!(reg.country_of(None), "");
+    }
+
+    // Tiny IPLocate-shaped fixture (flat country_code schema), shared with the
+    // Go tests under conformance/. See conformance/geoip/README.md.
+    const TEST_DB: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/geoip/iplocate-country.mmdb"
+    );
+
+    #[test]
+    fn geoip_decodes_iplocate_flat_schema() {
+        // Proves GeoIp::country reads IPLocate's flat `country_code`. It would
+        // return None for every IP if the decode reverted to MaxMind's nested
+        // `country.iso_code`, which this DB does not carry.
+        let g = GeoIp::open(TEST_DB).expect("open fixture");
+        let cc = |ip: &str| g.country(ip.parse::<IpAddr>().unwrap());
+        assert_eq!(cc("8.8.8.8").as_deref(), Some("US"));
+        assert_eq!(cc("1.1.1.1").as_deref(), Some("AU"));
+        assert_eq!(cc("203.0.113.5").as_deref(), Some("TH")); // test-net-3
+        assert_eq!(cc("2001:db8::1").as_deref(), Some("DE")); // ipv6 doc range
+        assert_eq!(cc("192.0.2.1"), None); // unmapped -> no record
+    }
+
+    #[test]
+    fn country_of_resolves_and_falls_back_to_xx() {
+        // With a DB loaded, country_of returns the ISO code for a placeable IP
+        // and "XX" otherwise — never "" (that would signal GeoIP is off).
+        let reg = WafRegistry::new();
+        reg.set_geoip(GeoIp::open(TEST_DB).expect("open fixture"));
+        assert_eq!(reg.country_of("8.8.8.8".parse().ok()), "US");
+        assert_eq!(reg.country_of("2001:db8::1".parse().ok()), "DE");
+        assert_eq!(reg.country_of("192.0.2.1".parse().ok()), "XX"); // unmapped
+        assert_eq!(reg.country_of(None), "XX"); // DB present, but no IP
+    }
+
+    #[test]
+    fn corpus_asn_field() {
+        // request.asn is a normalized int field; rules filter on it directly,
+        // identically to the Go controller (same rule strings) — corpus rows 20-24.
+        assert!(blocks("request.asn == 13335", |r| r.asn = 13335));
+        assert!(!blocks("request.asn == 13335", |r| r.asn = 15169));
+        // unknown/off is 0, a usable explicit predicate, and an allow-list
+        // (`!= 4808`) still blocks it — never fails open (asn is always present).
+        assert!(blocks("request.asn == 0", |r| r.asn = 0));
+        assert!(blocks("request.asn != 4808", |r| r.asn = 0));
+        assert!(!blocks("request.asn != 4808", |r| r.asn = 4808));
+    }
+
+    // Tiny IPLocate-shaped ip-to-asn fixture (flat string `asn`), shared with the
+    // Go tests under conformance/. See conformance/geoip/README.md.
+    const ASN_TEST_DB: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../conformance/geoip/iplocate-asn.mmdb"
+    );
+
+    #[test]
+    fn asn_decodes_iplocate_flat_string() {
+        // IPLocate stores `asn` as a string; AsnDb parses it to an integer.
+        let db = AsnDb::open(ASN_TEST_DB).expect("open fixture");
+        let n = |ip: &str| db.asn(ip.parse::<IpAddr>().unwrap());
+        assert_eq!(n("8.8.8.8"), 15169);
+        assert_eq!(n("1.1.1.1"), 13335);
+        assert_eq!(n("203.150.0.1"), 4618);
+        assert_eq!(n("2001:db8::1"), 64500); // ipv6 doc range
+        assert_eq!(n("192.0.2.1"), 0); // unmapped -> no record
+    }
+
+    #[test]
+    fn asn_of_resolves_and_zero_without_db() {
+        // No DB -> 0 for any IP (matches the Go nil resolver).
+        let reg = WafRegistry::new();
+        assert_eq!(reg.asn_of("8.8.8.8".parse().ok()), 0);
+        // With a DB: the AS number for a placeable IP, 0 otherwise (never a
+        // missing key).
+        reg.set_asndb(AsnDb::open(ASN_TEST_DB).expect("open fixture"));
+        assert_eq!(reg.asn_of("1.1.1.1".parse().ok()), 13335);
+        assert_eq!(reg.asn_of("192.0.2.1".parse().ok()), 0); // unmapped
+        assert_eq!(reg.asn_of(None), 0); // DB present, but no IP
+    }
+
+    #[test]
+    fn forwarded_headers_present_only_with_db() {
+        // No DB -> None: the proxy leaves X-Forwarded-Country/ASN untouched.
+        let reg = WafRegistry::new();
+        assert_eq!(reg.forwarded_country("8.8.8.8".parse().ok()), None);
+        assert_eq!(reg.forwarded_asn("8.8.8.8".parse().ok()), None);
+        // DB loaded -> Some(value), overwriting any client value; an unplaceable
+        // IP still yields Some("XX") / Some(0) (authoritative, never the client's).
+        reg.set_geoip(GeoIp::open(TEST_DB).expect("open fixture"));
+        reg.set_asndb(AsnDb::open(ASN_TEST_DB).expect("open fixture"));
+        assert_eq!(
+            reg.forwarded_country("8.8.8.8".parse().ok()).as_deref(),
+            Some("US")
+        );
+        assert_eq!(
+            reg.forwarded_country("192.0.2.1".parse().ok()).as_deref(),
+            Some("XX")
+        );
+        assert_eq!(reg.forwarded_asn("1.1.1.1".parse().ok()), Some(13335));
+        assert_eq!(reg.forwarded_asn("192.0.2.1".parse().ok()), Some(0));
     }
 }

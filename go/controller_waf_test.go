@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,6 +30,34 @@ func wafCM(namespace, name, role, rules string) *v1.ConfigMap {
 		},
 		Data: map[string]string{"rules.yaml": rules},
 	}
+}
+
+func TestWAFCountryResolverWired(t *testing.T) {
+	t.Parallel()
+
+	// A WAFConfig.Country resolver must reach request.country in the compiled
+	// WAFs (global + zones) via newWAF -> parapet WAF.Country.
+	ctrl := New("", proxy.New())
+	ctrl.PodNamespace = "ctrl-ns"
+	ctrl.WAFConfig = WAFConfig{
+		Enabled: true,
+		Country: func(_ *http.Request) string { return "CN" },
+	}
+	ctrl.InitWAF()
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+rules:
+  - id: block-cn
+    expression: request.country == "CN"
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+
+	r := httptest.NewRequest(http.MethodGet, "http://app/", nil)
+	w := httptest.NewRecorder()
+	ctrl.GlobalWAF().ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})).ServeHTTP(w, r)
+	assert.Equal(t, http.StatusForbidden, w.Code, "request.country resolver blocks via the global WAF")
 }
 
 func TestReloadWAF(t *testing.T) {

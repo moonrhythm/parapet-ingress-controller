@@ -18,6 +18,7 @@ controller.go                     # Controller struct — watch/reload logic (ge
 controller_waf.go                 # WAF wiring: global instance + zone registry, ConfigMap watch
 retry.go                          # retryMiddleware — retries idempotent requests on upstream failure
 wafrule/                          # WAF rule YAML DTO + parser (-> []waf.Rule)
+geoip/                            # IPLocate ip-to-country/ip-to-asn .mmdb -> request.country/asn (WAF_GEOIP_DB/WAF_ASN_DB)
 plugin/                           # annotation-driven middleware plugins
   plugin.go                       # core plugin type + built-in plugins
   auth.go                         # BasicAuth, ForwardAuth
@@ -79,6 +80,10 @@ A CEL-rule firewall on top of `parapet/pkg/waf`. **Full design in [`../WAF.md`](
 - **Zones** (`zones atomic.Pointer[map[string]*waf.WAF]`, key `<namespace>/<name>`) — tenant rulesets an ingress binds via `parapet.moonrhythm.io/waf-zone`; `plugin.WAFZone` resolves the key (namespace-local, or `ns/id` cross-ref) and looks up the live registry per request.
 
 Global runs first and is authoritative. **WAF reload is decoupled from the mux**: ConfigMap changes call `reloadWAFDebounced` (recompile + atomic swap) and never rebuild routes; `SetRules` is all-or-nothing so a bad ruleset keeps the last-good one. Rules parse via `wafrule/`; matches count `parapet_waf_matches{rule_id,action,scope}` (`metric/waf.go`). Code: `controller_waf.go`, `plugin/waf.go`, `wafrule/`.
+
+**GeoIP** (`request.country`): `WAF_GEOIP_DB` defaults to the baked `/geoip/ip-to-country.mmdb` (set `""` to disable; a missing file at the default path is a quiet no-op, a missing explicit path logs an error). `main.go` opens it (`geoip/`, `maxminddb-golang`, flat `country_code` schema, not MaxMind's nested `country.iso_code`) and sets `WAFConfig.Country` to a resolver (client IP via `geoip.ClientIP`, parapet precedence → ISO code, else `"XX"`). `newWAF` assigns it to every WAF's `waf.WAF.Country` (the parapet hook added in v0.15.1), so `request.country` is set on the global and zone rulesets. nil resolver (no DB) → `request.country == ""`.
+
+**ASN** (`request.asn`): the same pattern with `WAF_ASN_DB` (defaults to the baked `/geoip/ip-to-asn.mmdb`; `""` disables) → `geoip.OpenASN`/`(*ASNDB).ASN` (IPLocate stores `asn` as a string; parsed to `int64`) → `WAFConfig.ASN` → every WAF's `waf.WAF.ASN` (the parapet hook added in **v0.15.2**). nil resolver (no DB) or unplaceable IP → `request.asn == 0`.
 
 ## Annotation & configuration reference
 
