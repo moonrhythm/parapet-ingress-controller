@@ -18,7 +18,7 @@ jobs:
   # features — no pingora/kube, so no native deps and no OpenSSL needed).
   lint-test:
     name: fmt + clippy + test (default features)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -36,7 +36,7 @@ jobs:
   # (cluster) features, which pull native deps and OpenSSL.
   proxy:
     name: clippy + test + build (proxy,cluster)
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - name: Install native build deps
