@@ -21,9 +21,10 @@ vars, and metric names.
 SPEC.md  WAF.md  README.md  CLAUDE.md  LICENSE  SKILL.md
 deploy/                 # shared Kubernetes manifests + RBAC (image-agnostic)
 conformance/            # shared cross-impl fixtures (waf-cel-corpus.md, …)
-.github/workflows/      # go-{test,build,release}.yaml + rust-{test,build}.yaml
-                        #   each path-filtered (go/** vs rust/**) so a change to
-                        #   one implementation never runs the other's CI
+.github/workflows/      # go-{test,build,release}.yaml + rust-{test,build,release}.yaml
+                        #   test/build are path-filtered (go/** vs rust/**) so a
+                        #   change to one impl never runs the other's CI; the
+                        #   tag-triggered *-release builds both
 go/                     # Go implementation — module .../parapet-ingress-controller/go
   CLAUDE.md             #   Go-specific architecture guide
   go.mod  cmd/  controller*.go  plugin/  proxy/  route/  cert/  k8s/
