@@ -147,8 +147,10 @@ rules:
 
 `request.country` is always present — `""` when GeoIP is off, `"XX"` when the IP
 can't be placed, otherwise the ISO code — so a rule never fails open on a missing
-key. The bundled data is from [IPLocate.io](https://www.iplocate.io) under
-CC BY-SA 4.0 (keep the attribution); see [WAF.md](WAF.md) to swap or update it.
+key. The resolved country is also forwarded **upstream** as `X-Forwarded-Country`
+(overwriting any client value), so backends can read it without their own lookup.
+The bundled data is from [IPLocate.io](https://www.iplocate.io) under CC BY-SA 4.0
+(keep the attribution); see [WAF.md](WAF.md) to swap or update it.
 
 ### ASN filtering (`request.asn`)
 
@@ -164,9 +166,10 @@ rules:
 ```
 
 `request.asn` is always present — `0` when ASN lookup is off or the IP can't be
-placed (so `request.asn == 0` is a usable "unknown AS" predicate). The ip-to-asn DB
-is large (~74 MB), so pass `--build-arg ASN_DB_URL=` (empty) to skip baking it, or
-set `WAF_ASN_DB=""` to disable the lookup. See [WAF.md](WAF.md).
+placed (so `request.asn == 0` is a usable "unknown AS" predicate). It is also
+forwarded **upstream** as `X-Forwarded-ASN`. The ip-to-asn DB is large (~74 MB), so
+pass `--build-arg ASN_DB_URL=` (empty) to skip baking it, or set `WAF_ASN_DB=""` to
+disable the lookup. See [WAF.md](WAF.md).
 
 ### Global ruleset
 

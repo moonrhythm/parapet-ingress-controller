@@ -292,6 +292,22 @@ impl ProxyHttp for Proxy {
         // trust-proxy / X-Forwarded-* (parapet proxy middleware)
         self.apply_forwarded_headers(session, remote_ip, scheme);
 
+        // X-Forwarded-Country / X-Forwarded-ASN: hand the upstream the GeoIP result
+        // for the same client IP the WAF uses (x-real-ip after trust handling). Each
+        // header is set only when its DB is loaded, overwriting any client-supplied
+        // value so it can't be spoofed; an unplaceable IP yields "XX" / 0.
+        let client_ip = header_str(session, "x-real-ip").and_then(|s| s.parse::<IpAddr>().ok());
+        if let Some(cc) = self.shared.waf.forwarded_country(client_ip) {
+            let _ = session
+                .req_header_mut()
+                .insert_header("x-forwarded-country", cc);
+        }
+        if let Some(asn) = self.shared.waf.forwarded_asn(client_ip) {
+            let _ = session
+                .req_header_mut()
+                .insert_header("x-forwarded-asn", asn.to_string());
+        }
+
         let host = req_host(session);
         let path = session.req_header().uri.path().to_string();
 

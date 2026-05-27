@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -196,6 +197,12 @@ func main() {
 		// runs inside the per-ingress chain (plugin.WAFZone).
 		m.Use(ctrl.GlobalWAF())
 	}
+	// Forward the resolved GeoIP country/ASN to upstreams. Mounted only when a DB
+	// is loaded (resolver non-nil); runs just before routing so the headers reach
+	// the proxied request.
+	if wafConfig.Country != nil || wafConfig.ASN != nil {
+		m.Use(forwardGeoHeaders(wafConfig.Country, wafConfig.ASN))
+	}
 	m.Use(ctrl)
 
 	var trustProxy parapet.Conditional
@@ -305,6 +312,26 @@ func configTransport(tr *http.Transport) {
 		"TR_MAX_CONNS_PER_HOST", tr.MaxConnsPerHost)
 	tr.MaxIdleConnsPerHost = config.IntDefault(
 		"TR_MAX_IDLE_CONNS_PER_HOST", tr.MaxIdleConnsPerHost)
+}
+
+// forwardGeoHeaders sets X-Forwarded-Country / X-Forwarded-ASN on each request
+// from the GeoIP resolvers, so upstreams get the proxy's authoritative GeoIP
+// values for the same client IP the WAF uses. Each header is set — overwriting
+// any client-supplied value, so it can't be spoofed — only when its resolver is
+// non-nil (the DB is loaded); an unplaceable IP yields "XX" / 0. A nil resolver
+// leaves the corresponding header untouched.
+func forwardGeoHeaders(country func(*http.Request) string, asn func(*http.Request) int64) parapet.Middleware {
+	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if country != nil {
+				r.Header.Set("X-Forwarded-Country", country(r))
+			}
+			if asn != nil {
+				r.Header.Set("X-Forwarded-ASN", strconv.FormatInt(asn(r), 10))
+			}
+			h.ServeHTTP(w, r)
+		})
+	})
 }
 
 // hostRateLimit protects from unresponsive upstreams by limit concurrent requests to the same host.

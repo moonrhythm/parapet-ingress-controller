@@ -466,29 +466,38 @@ impl WafRegistry {
         self.asndb.store(Some(Arc::new(asndb)));
     }
 
-    /// Resolve a client IP to its ISO country code for `request.country`.
-    /// Returns "" when GeoIP is disabled (no DB) — matching the Go controller's
-    /// nil resolver — and "XX" when the DB is loaded but the IP can't be
-    /// resolved (private range, missing, parse failure), so a rule can treat
-    /// "unknown" explicitly without ever seeing a missing key.
-    pub fn country_of(&self, ip: Option<IpAddr>) -> String {
-        match self.geoip.load_full() {
-            None => String::new(),
-            Some(g) => ip
-                .and_then(|ip| g.country(ip))
-                .unwrap_or_else(|| "XX".to_string()),
-        }
+    /// The country to forward as `X-Forwarded-Country`: `Some` iff a GeoIP DB is
+    /// loaded — the ISO code, or "XX" when the DB can't place the IP — else `None`
+    /// (lookup disabled, so the proxy leaves the header untouched).
+    pub fn forwarded_country(&self, ip: Option<IpAddr>) -> Option<String> {
+        self.geoip.load_full().map(|g| {
+            ip.and_then(|ip| g.country(ip))
+                .unwrap_or_else(|| "XX".to_string())
+        })
     }
 
-    /// Resolve a client IP to its AS number for `request.asn`. Returns 0 when
-    /// ASN lookup is disabled (no DB) or the IP can't be placed — matching the
-    /// Go controller's nil resolver. 0 is RFC 7607-reserved, so a rule can treat
-    /// "unknown" explicitly (`request.asn == 0`) without ever seeing a missing key.
+    /// The ASN to forward as `X-Forwarded-ASN`: `Some` iff an ASN DB is loaded —
+    /// the AS number, or 0 (RFC 7607 reserved) when the DB can't place the IP —
+    /// else `None` (lookup disabled, so the proxy leaves the header untouched).
+    pub fn forwarded_asn(&self, ip: Option<IpAddr>) -> Option<i64> {
+        self.asndb
+            .load_full()
+            .map(|db| ip.map(|ip| db.asn(ip)).unwrap_or(0))
+    }
+
+    /// Resolve a client IP to its ISO country code for `request.country`: the
+    /// [`Self::forwarded_country`] value, or "" when GeoIP is disabled (matching
+    /// the Go controller's nil resolver). The field is always present, so a rule
+    /// referencing it never errors on a missing key.
+    pub fn country_of(&self, ip: Option<IpAddr>) -> String {
+        self.forwarded_country(ip).unwrap_or_default()
+    }
+
+    /// Resolve a client IP to its AS number for `request.asn`: the
+    /// [`Self::forwarded_asn`] value, or 0 when ASN lookup is disabled. The field
+    /// is always present (0 is RFC 7607-reserved, a usable "unknown" predicate).
     pub fn asn_of(&self, ip: Option<IpAddr>) -> i64 {
-        match self.asndb.load_full() {
-            None => 0,
-            Some(db) => ip.map(|ip| db.asn(ip)).unwrap_or(0),
-        }
+        self.forwarded_asn(ip).unwrap_or(0)
     }
 
     /// Replace the global ruleset (all-or-nothing).
@@ -1183,5 +1192,27 @@ mod tests {
         assert_eq!(reg.asn_of("1.1.1.1".parse().ok()), 13335);
         assert_eq!(reg.asn_of("192.0.2.1".parse().ok()), 0); // unmapped
         assert_eq!(reg.asn_of(None), 0); // DB present, but no IP
+    }
+
+    #[test]
+    fn forwarded_headers_present_only_with_db() {
+        // No DB -> None: the proxy leaves X-Forwarded-Country/ASN untouched.
+        let reg = WafRegistry::new();
+        assert_eq!(reg.forwarded_country("8.8.8.8".parse().ok()), None);
+        assert_eq!(reg.forwarded_asn("8.8.8.8".parse().ok()), None);
+        // DB loaded -> Some(value), overwriting any client value; an unplaceable
+        // IP still yields Some("XX") / Some(0) (authoritative, never the client's).
+        reg.set_geoip(GeoIp::open(TEST_DB).expect("open fixture"));
+        reg.set_asndb(AsnDb::open(ASN_TEST_DB).expect("open fixture"));
+        assert_eq!(
+            reg.forwarded_country("8.8.8.8".parse().ok()).as_deref(),
+            Some("US")
+        );
+        assert_eq!(
+            reg.forwarded_country("192.0.2.1".parse().ok()).as_deref(),
+            Some("XX")
+        );
+        assert_eq!(reg.forwarded_asn("1.1.1.1".parse().ok()), Some(13335));
+        assert_eq!(reg.forwarded_asn("192.0.2.1".parse().ok()), Some(0));
     }
 }

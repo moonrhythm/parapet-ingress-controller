@@ -72,13 +72,19 @@ the image (set `""` to disable), and rules can filter on `request.country`
 `containsAny(request.country, ["CN", "RU"])`. The field is **always present**: `""`
 when GeoIP is off, `"XX"` when the DB can't place the IP — so it never fails open on
 a missing key. (Go exposes it via the `parapet/pkg/waf` `Country` resolver hook.)
+When the DB is loaded, the resolved value is also sent **upstream** as the
+`X-Forwarded-Country` header (overwriting any client-supplied value, so it can't be
+spoofed); when GeoIP is off the header is left untouched.
 
 **ASN**: `WAF_ASN_DB` defaults to the IPLocate ip-to-asn `.mmdb` baked into the
 image (set `""` to disable), and rules can filter on `request.asn` (the autonomous
 system number, an **int**, from the client IP), e.g. `request.asn == 13335`. Always
 present: `0` when ASN lookup is off or the IP can't be placed (RFC 7607 reserved, so
 `request.asn == 0` is a usable predicate and the field never fails open). Go exposes
-it via the `parapet/pkg/waf` `ASN` resolver hook (parapet ≥ v0.15.2).
+it via the `parapet/pkg/waf` `ASN` resolver hook (parapet ≥ v0.15.2). When the DB is
+loaded, the resolved value is also sent **upstream** as the `X-Forwarded-ASN` header
+(overwriting any client-supplied value); when ASN lookup is off the header is left
+untouched.
 
 ## Configuration (environment variables)
 

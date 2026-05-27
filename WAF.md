@@ -106,6 +106,11 @@ So `request.country != "TH"` blocks unknowns too — the safe default for an
 allow-list. The client IP is the same one used for `request.remote_ip`
 (X-Real-IP → X-Forwarded-For → peer), so it honors `TRUST_PROXY`.
 
+Whenever the DB is loaded, the resolved country is also forwarded **upstream** as
+the `X-Forwarded-Country` header — overwriting any client-supplied value so a
+backend can trust it (`"XX"` for an unplaceable IP). With GeoIP off the header is
+left untouched.
+
 The DB is the [IPLocate ip-to-country](https://github.com/iplocate/ip-address-databases)
 MMDB. Its records are **flat** — `country_code` at the top level — unlike MaxMind
 GeoIP2, which nests it under `country.iso_code`; both implementations read the
@@ -164,6 +169,10 @@ It is exposed as a CEL **int** (not uint), so rules use plain integer literals
 (`request.asn == 13335`, not `13335u`). The client IP is resolved the same way as
 `request.country`, so it honors `TRUST_PROXY`. IPLocate's ip-to-asn records are
 flat, with `asn` stored as a *string* that the resolver parses to an integer.
+
+Whenever the DB is loaded, the resolved ASN is also forwarded **upstream** as the
+`X-Forwarded-ASN` header (overwriting any client-supplied value; `0` for an
+unplaceable IP). With ASN lookup off the header is left untouched.
 
 **Implementation.** Go exposes it through the `parapet/pkg/waf` `ASN` resolver
 hook (added in parapet v0.15.2); Rust builds `request.asn` directly. Both load the
