@@ -53,15 +53,32 @@ func main() {
 		InspectBody:   int64(config.Int("WAF_INSPECT_BODY")),
 		DisableMacros: config.Bool("WAF_DISABLE_MACROS"),
 	}
-	// GeoIP (request.country): load the IPLocate ip-to-country .mmdb when WAF is
-	// on and a path is set. A load failure is non-fatal — request.country stays empty.
+	// GeoIP databases for the WAF. WAF_GEOIP_DB (request.country) and WAF_ASN_DB
+	// (request.asn) default to the paths baked into the image; set either to a
+	// custom path, or to "" to disable. A missing file at an explicitly-set path
+	// is logged as an error; a missing file at the default path is a quiet no-op
+	// (the DB just wasn't baked). Loading is always non-fatal.
 	if wafConfig.Enabled {
-		if dbPath := config.String("WAF_GEOIP_DB"); dbPath != "" {
-			if db, err := geoip.Open(dbPath); err != nil {
+		// dbPath returns (path, explicit): the env value when set ("" disables),
+		// else the baked default (a missing default file is not an error).
+		dbPath := func(env, def string) (string, bool) {
+			if v, ok := os.LookupEnv(env); ok {
+				return v, true
+			}
+			return def, false
+		}
+
+		if path, explicit := dbPath("WAF_GEOIP_DB", "/geoip/ip-to-country.mmdb"); path != "" {
+			db, err := geoip.Open(path)
+			switch {
+			case err != nil && explicit:
 				slog.Error("waf: can not open geoip database; request.country will be empty",
-					"path", dbPath, "error", err)
-			} else {
-				slog.Info("waf: geoip database loaded", "path", dbPath)
+					"path", path, "error", err)
+			case err != nil:
+				slog.Debug("waf: no geoip database at default path; request.country disabled",
+					"path", path)
+			default:
+				slog.Info("waf: geoip database loaded", "path", path)
 				wafConfig.Country = func(r *http.Request) string {
 					if cc := db.Country(geoip.ClientIP(r)); cc != "" {
 						return cc
@@ -70,14 +87,18 @@ func main() {
 				}
 			}
 		}
-		// ASN (request.asn): load the IPLocate ip-to-asn .mmdb. A load failure is
-		// non-fatal — request.asn stays 0. Unresolved IPs also resolve to 0.
-		if dbPath := config.String("WAF_ASN_DB"); dbPath != "" {
-			if db, err := geoip.OpenASN(dbPath); err != nil {
+
+		if path, explicit := dbPath("WAF_ASN_DB", "/geoip/ip-to-asn.mmdb"); path != "" {
+			db, err := geoip.OpenASN(path)
+			switch {
+			case err != nil && explicit:
 				slog.Error("waf: can not open asn database; request.asn will be 0",
-					"path", dbPath, "error", err)
-			} else {
-				slog.Info("waf: asn database loaded", "path", dbPath)
+					"path", path, "error", err)
+			case err != nil:
+				slog.Debug("waf: no asn database at default path; request.asn disabled",
+					"path", path)
+			default:
+				slog.Info("waf: asn database loaded", "path", path)
 				wafConfig.ASN = func(r *http.Request) int64 {
 					return db.ASN(geoip.ClientIP(r))
 				}

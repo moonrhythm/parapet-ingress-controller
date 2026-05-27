@@ -131,15 +131,12 @@ and functions (`ipInCidr`, `regexMatch`, `containsAny`, `hasPrefixAny`, `lower`,
 
 ### GeoIP country filtering (`request.country`)
 
-Rules can filter on `request.country` (ISO 3166-1 alpha-2) once a GeoIP database
-is loaded. The controller images **bake one in by default** — the free
-[IPLocate ip-to-country](https://github.com/iplocate/ip-address-databases) `.mmdb`
-at `/geoip/ip-to-country.mmdb` — so you only need to point `WAF_GEOIP_DB` at it:
-
-```yaml
-- name: WAF_GEOIP_DB
-  value: /geoip/ip-to-country.mmdb
-```
+Rules can filter on `request.country` (ISO 3166-1 alpha-2) with no extra config:
+the controller images **bake in** the free
+[IPLocate ip-to-country](https://github.com/iplocate/ip-address-databases) `.mmdb`,
+and `WAF_GEOIP_DB` **defaults** to it (`/geoip/ip-to-country.mmdb`). Just enable the
+WAF and write rules — point `WAF_GEOIP_DB` elsewhere for a custom DB, or set it to
+`""` to disable:
 
 ```yaml
 rules:
@@ -155,8 +152,9 @@ CC BY-SA 4.0 (keep the attribution); see [WAF.md](WAF.md) to swap or update it.
 
 ### ASN filtering (`request.asn`)
 
-Point `WAF_ASN_DB` at an [IPLocate ip-to-asn](https://github.com/iplocate/ip-address-databases)
-`.mmdb` to filter on `request.asn` (the autonomous system number, an integer):
+Filter on `request.asn` (the autonomous system number, an integer) the same way —
+the [IPLocate ip-to-asn](https://github.com/iplocate/ip-address-databases) `.mmdb`
+is baked in and `WAF_ASN_DB` **defaults** to it (`/geoip/ip-to-asn.mmdb`):
 
 ```yaml
 rules:
@@ -166,10 +164,9 @@ rules:
 ```
 
 `request.asn` is always present — `0` when ASN lookup is off or the IP can't be
-placed (so `request.asn == 0` is a usable "unknown AS" predicate). The ip-to-asn
-DB is baked into the images by default at `/geoip/ip-to-asn.mmdb` — just point
-`WAF_ASN_DB` at it. It is large (~74 MB), so pass `--build-arg ASN_DB_URL=` (empty)
-to skip baking it if you don't need `request.asn`. See [WAF.md](WAF.md).
+placed (so `request.asn == 0` is a usable "unknown AS" predicate). The ip-to-asn DB
+is large (~74 MB), so pass `--build-arg ASN_DB_URL=` (empty) to skip baking it, or
+set `WAF_ASN_DB=""` to disable the lookup. See [WAF.md](WAF.md).
 
 ### Global ruleset
 

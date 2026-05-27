@@ -80,9 +80,10 @@ yourself so `?q=1+UNION+SELECT` is normalized before a regex sees it.
 
 ## GeoIP (`request.country`)
 
-Set `WAF_GEOIP_DB` to the path of an **IPLocate ip-to-country** `.mmdb`
-to resolve the client IP to an ISO 3166-1 alpha-2 country, exposed to rules as
-`request.country`:
+`WAF_GEOIP_DB` defaults to the **IPLocate ip-to-country** `.mmdb` baked into the
+image (`/geoip/ip-to-country.mmdb`); point it at a custom path, or set `""` to
+disable. It resolves the client IP to an ISO 3166-1 alpha-2 country, exposed to
+rules as `request.country`:
 
 ```yaml
 rules:
@@ -97,7 +98,7 @@ rules:
 `request.country` is **always present** in the request map, so a rule referencing
 it never errors on a missing key (no fail-open):
 
-- `""` — GeoIP disabled (`WAF_GEOIP_DB` unset / DB failed to load).
+- `""` — GeoIP disabled (`WAF_GEOIP_DB` set to `""`, or no DB at the path).
 - `"XX"` — DB loaded but the IP couldn't be placed (private range, not in DB).
 - an ISO code (e.g. `"TH"`) otherwise.
 
@@ -140,8 +141,10 @@ key is required.
 
 ## ASN (`request.asn`)
 
-Set `WAF_ASN_DB` to the path of an **IPLocate ip-to-asn** `.mmdb` to resolve the
-client IP to its autonomous system number, exposed to rules as `request.asn`:
+`WAF_ASN_DB` defaults to the **IPLocate ip-to-asn** `.mmdb` baked into the image
+(`/geoip/ip-to-asn.mmdb`); point it at a custom path, or set `""` to disable. It
+resolves the client IP to its autonomous system number, exposed to rules as
+`request.asn`:
 
 ```yaml
 rules:
@@ -152,8 +155,8 @@ rules:
 
 `request.asn` is an **integer, always present**:
 
-- `0` — ASN lookup disabled (`WAF_ASN_DB` unset / DB failed to load) **or** the IP
-  couldn't be placed. `0` is reserved by RFC 7607, so `request.asn == 0` is a
+- `0` — ASN lookup disabled (`WAF_ASN_DB` set to `""`, or no DB at the path) **or**
+  the IP couldn't be placed. `0` is reserved by RFC 7607, so `request.asn == 0` is a
   usable "unknown AS" predicate and a rule referencing the field never fails open.
 - the AS number otherwise.
 

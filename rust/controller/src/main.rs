@@ -149,27 +149,45 @@ fn main() {
 
     let shared = Shared::new(ingress_class, load_all_certs);
     shared.waf.configure(waf_config);
-    // GeoIP (request.country): load the IPLocate ip-to-country .mmdb when WAF is
-    // on and a path is configured. A load failure is non-fatal — request.country stays empty.
+    // GeoIP databases. WAF_GEOIP_DB (request.country) and WAF_ASN_DB (request.asn)
+    // default to the paths baked into the image; set either to a custom path, or to
+    // "" to disable. A missing file at an explicitly-set path is logged; a missing
+    // file at the default path is a quiet no-op. Loading is always non-fatal.
     if waf_enabled {
-        if let Some(db) = std::env::var("WAF_GEOIP_DB").ok().filter(|s| !s.is_empty()) {
-            match controller::waf::GeoIp::open(&db) {
+        // db_path returns (path, explicit): the env value when set ("" disables),
+        // else the baked default (a missing default file is not an error).
+        let db_path = |env: &str, default: &str| -> (String, bool) {
+            match std::env::var(env) {
+                Ok(v) => (v, true),
+                Err(_) => (default.to_string(), false),
+            }
+        };
+
+        let (path, explicit) = db_path("WAF_GEOIP_DB", "/geoip/ip-to-country.mmdb");
+        if !path.is_empty() {
+            match controller::waf::GeoIp::open(&path) {
                 Ok(g) => {
                     shared.waf.set_geoip(g);
-                    eprintln!("[waf] geoip database loaded: {db}");
+                    eprintln!("[waf] geoip database loaded: {path}");
                 }
-                Err(e) => eprintln!("[waf] geoip load failed ({e}); request.country will be empty"),
+                Err(e) if explicit => {
+                    eprintln!("[waf] geoip load failed ({e}); request.country will be empty")
+                }
+                Err(_) => {} // default path absent -> quiet no-op
             }
         }
-        // ASN (request.asn): load the IPLocate ip-to-asn .mmdb. Non-fatal on
-        // failure — request.asn stays 0.
-        if let Some(db) = std::env::var("WAF_ASN_DB").ok().filter(|s| !s.is_empty()) {
-            match controller::waf::AsnDb::open(&db) {
+
+        let (path, explicit) = db_path("WAF_ASN_DB", "/geoip/ip-to-asn.mmdb");
+        if !path.is_empty() {
+            match controller::waf::AsnDb::open(&path) {
                 Ok(a) => {
                     shared.waf.set_asndb(a);
-                    eprintln!("[waf] asn database loaded: {db}");
+                    eprintln!("[waf] asn database loaded: {path}");
                 }
-                Err(e) => eprintln!("[waf] asn load failed ({e}); request.asn will be 0"),
+                Err(e) if explicit => {
+                    eprintln!("[waf] asn load failed ({e}); request.asn will be 0")
+                }
+                Err(_) => {} // default path absent -> quiet no-op
             }
         }
     }
