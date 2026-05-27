@@ -166,10 +166,10 @@ rules:
 ```
 
 `request.asn` is always present — `0` when ASN lookup is off or the IP can't be
-placed (so `request.asn == 0` is a usable "unknown AS" predicate). Unlike the
-country DB, the ip-to-asn DB (~74 MB) is **not** baked into the images by default;
-bake it with `--build-arg ASN_DB_URL=<url>` or mount it at runtime. See
-[WAF.md](WAF.md).
+placed (so `request.asn == 0` is a usable "unknown AS" predicate). The ip-to-asn
+DB is baked into the images by default at `/geoip/ip-to-asn.mmdb` — just point
+`WAF_ASN_DB` at it. It is large (~74 MB), so pass `--build-arg ASN_DB_URL=` (empty)
+to skip baking it if you don't need `request.asn`. See [WAF.md](WAF.md).
 
 ### Global ruleset
 

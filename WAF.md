@@ -166,11 +166,11 @@ flat, with `asn` stored as a *string* that the resolver parses to an integer.
 hook (added in parapet v0.15.2); Rust builds `request.asn` directly. Both load the
 DB once at startup; a load failure is non-fatal (`request.asn` stays 0).
 
-**Providing the DB** mirrors GeoIP but with its own `WAF_ASN_DB` env var, and the
-ip-to-asn DB is much larger (~74 MB) so the Dockerfiles **do not** bake it by
-default. Pass `--build-arg ASN_DB_URL=<url>` (e.g. IPLocate's `ip-to-asn.mmdb`) to
-bake it to `/geoip/ip-to-asn.mmdb`, or mount it at runtime and point `WAF_ASN_DB`
-at the mount.
+**Providing the DB** mirrors GeoIP, with its own `WAF_ASN_DB` env var. Both
+Dockerfiles bake the ip-to-asn `.mmdb` to `/geoip/ip-to-asn.mmdb` by default
+(`ASN_DB_URL`). It is much larger than the country DB (~74 MB), so pass
+`--build-arg ASN_DB_URL=` (empty) to skip baking it if you don't need
+`request.asn`, or override the URL / mount it at runtime instead.
 
 ## Delivery: ConfigMaps, one marker label
 
