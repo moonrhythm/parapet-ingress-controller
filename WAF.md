@@ -61,7 +61,21 @@ rules:
 
 ## CEL surface
 
-Top-level `request` map (snake_case, ModSecurity-style):
+A rule `expression` is a [CEL](https://github.com/google/cel-spec) expression
+that **must evaluate to `bool`** (Go rejects a non-bool expression at compile
+time; Rust treats a non-bool result as a runtime error → fail-open). There is
+exactly **one variable** — `request` — no protobuf message types, and no other
+bindings. The engine is cel-go's standard library (via `parapet/pkg/waf`) in Go
+and [cel-rust](https://github.com/cel-rust/cel-rust) `0.13` in Rust. **A rule
+must compile and behave identically in both**, so author against the portable
+surface below; the [conformance corpus](conformance/waf-cel-corpus.md) guards it.
+
+Not every function in the [CEL language definition](https://github.com/google/cel-spec/blob/master/doc/langdef.md)
+is available — the two list it spells out as *engine-specific* below, and CEL
+**extension libraries are off in both** (no string-ext `split`/`join`/`format`,
+no math/encoder/sets/lists ext). Use the custom functions for those needs.
+
+### The `request` map (snake_case, ModSecurity-style)
 
 ```
 request.method  host  path  query  uri  proto  scheme  remote_ip  country  asn
@@ -69,14 +83,68 @@ request.method  host  path  query  uri  proto  scheme  remote_ip  country  asn
 ```
 
 `headers`/`args`/`cookies` are single-valued maps; header keys are lowercased.
+`content_length` and `asn` are ints; everything else is a string.
 `body` is empty unless body inspection is enabled (off by default).
 `country` is the GeoIP country code — see [GeoIP](#geoip-requestcountry).
 `asn` is the GeoIP autonomous system number (an int) — see [ASN](#asn-requestasn).
 
-Custom functions: `ipInCidr(ip,cidr)`, `regexMatch(s,pattern)` (RE2, cached),
-`containsAny(s,list)`, `hasPrefixAny(s,list)`, `lower(s)`, `upper(s)`,
-`urlDecode(s)`. Query strings are **not** auto-decoded — apply `urlDecode`
-yourself so `?q=1+UNION+SELECT` is normalized before a regex sees it.
+### Custom functions (the WAF primitives)
+
+Added by the WAF itself, identical names in both engines — these cover almost
+every rule you'll write:
+
+| Function | Result | Notes |
+|---|---|---|
+| `ipInCidr(ip, cidr)` | bool | string args; an unparseable `ip` → `false` (a bad `cidr` errors) |
+| `regexMatch(s, pattern)` | bool | RE2 (linear, no catastrophic backtracking), compiled-pattern cache |
+| `containsAny(s, list)` | bool | `s` contains any non-empty substring in `list` |
+| `hasPrefixAny(s, list)` | bool | `s` starts with any non-empty prefix in `list` |
+| `lower(s)` / `upper(s)` | string | case fold |
+| `urlDecode(s)` | string | = Go `url.QueryUnescape`: `+`→space, `%XX`→byte, malformed→`""` |
+
+Query strings are **not** auto-decoded — apply `urlDecode` yourself so
+`?q=1+UNION+SELECT` is normalized before a regex sees it.
+
+### Standard CEL (portable — works in both engines)
+
+**Operators** — logical `!` `&&` `||` and the ternary `cond ? a : b`; comparison
+`==` `!=` `<` `<=` `>` `>=`; arithmetic `+` `-` `*` `/` `%` and unary `-`;
+membership `x in list` / `x in map`; indexing `list[i]` / `map["key"]`.
+
+**Macros** — `has(request.headers.foo)`, plus the comprehensions
+`list.all(x, p)`, `list.exists(x, p)`, `list.exists_one(x, p)`,
+`list.map(x, e)`, `list.filter(x, p)`. **Go can switch these off** with
+`WAF_DISABLE_MACROS=true` (Rust cannot), so don't rely on a macro in a rule that
+must keep working under a hardened global config.
+
+**Functions** —
+
+| Function | Result | Notes |
+|---|---|---|
+| `s.contains(sub)` | bool | substring test |
+| `s.startsWith(p)` / `s.endsWith(p)` | bool | |
+| `s.matches(re)` | bool | RE2; the stdlib twin of `regexMatch(s, re)` |
+| `size(x)` / `x.size()` | int | string (codepoints), bytes, list, or map |
+| `int` `uint` `double` `string` `bytes` | conv | numeric/string conversions |
+| `timestamp(s)` / `duration(s)` | ts / dur | RFC3339 / Go-duration string |
+| `getFullYear` `getMonth` `getDate` `getDayOfMonth` `getDayOfWeek` `getDayOfYear` `getHours` `getMinutes` `getSeconds` `getMilliseconds` | int | timestamp/duration accessors, **UTC** (`getMonth` is 0-based) |
+
+The timestamp/duration helpers are listed for completeness; the `request` map has
+no time field, so rules rarely need them.
+
+### Not portable / not available
+
+- **Go-only** (cel-rust lacks them — don't use in shared rules): the `bool()`,
+  `type()`, and `dyn()` conversions, and the timezone-string overload of the
+  timestamp accessors (e.g. `ts.getHours("America/New_York")`; cel-rust is
+  UTC-only).
+- **Rust-only** (cel-rust extras absent from cel-go's standard library): `max()`,
+  `min()`, and the `optional.*` helpers (`optional.of`, `hasValue`, `orValue`, …).
+- **Off in both** — CEL extension libraries (string `split`/`join`/`format`/
+  `replace`/`substring`/`indexOf`/`charAt`/`trim`/`lowerAscii`/`upperAscii`,
+  and math/encoder/sets/lists ext), protobuf message construction / struct
+  literals, and any variable other than `request`. Reach for the custom
+  functions instead (e.g. `lower(s)` for `lowerAscii(s)`).
 
 ## GeoIP (`request.country`)
 
