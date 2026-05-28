@@ -106,8 +106,8 @@ untouched.
 | `LOAD_ALL_CERTS` | `false` | both | Index every TLS secret, not just `spec.tls`-referenced |
 | `TRUST_PROXY` | `""` | both | `true`/`false`/CIDRs (+ `cloudflare`/`google`/`bunny`) |
 | `WAIT_BEFORE_SHUTDOWN` | `30s` | both | Drain delay on SIGTERM |
-| `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host in-flight cap / queue size |
-| `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host+country cap / queue |
+| `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host in-flight cap / queue size. Slot is released when upstream response headers arrive (or on a 101 upgrade), not at end-of-body — so SSE / WebSocket / long-poll streams don't pin a slot for the stream lifetime. The cap exists to shed load while upstreams are *unresponsive*. |
+| `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host+country cap / queue (same release semantics as `HOST_CONCURRENT_CAPACITY`) |
 | `HOST_COUNTRY_HEADER` | `""` | both | Header(s) carrying the country code |
 | `TR_MAX_IDLE_CONNS_PER_HOST` | stdlib / 128 | both | Upstream idle pool (Rust: process-global) |
 | `DISABLE_LOG` | `false` | both | Suppress the access log |
