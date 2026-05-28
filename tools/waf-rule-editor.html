@@ -1,0 +1,1126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>parapet WAF rule editor</title>
+<!--
+  Standalone WAF firewall-rule editor for parapet-ingress-controller.
+
+  A single, dependency-free HTML file (open it in any browser — no server, no
+  network). It is a port of the deploys-app console firewall editor: the same
+  visual condition builder and the same CEL generator (the buildExpression /
+  parseExpression logic is copied verbatim so a rule authored here is byte-for-
+  byte what the console would emit), but instead of calling an API it generates
+  the WAF ConfigMap YAML you apply to a cluster.
+
+  Output matches WAF.md: rules map 1:1 onto waf.Rule, wrapped in a ConfigMap
+  carrying the `parapet.moonrhythm.io/waf: global|zone` marker label.
+-->
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --panel: #ffffff;
+    --panel-2: #fbfcfd;
+    --line: #e3e6ea;
+    --line-2: #eceff2;
+    --ink: #1c2430;
+    --ink-2: #5b6675;
+    --ink-3: #8a93a0;
+    --accent: #2d6cdf;
+    --accent-weak: #eaf1fd;
+    --block: #d8413a;
+    --allow: #1f9d57;
+    --log: #b07d12;
+    --radius: 10px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1318; --panel: #171c23; --panel-2: #1b212a; --line: #2a313b;
+      --line-2: #232a33; --ink: #e6eaef; --ink-2: #a6b0bd; --ink-3: #6f7986;
+      --accent: #5b9bff; --accent-weak: #1b2738; --block: #ff6b63; --allow: #36c177; --log: #e0a73a;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--sans);
+    font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 80px; }
+  header.top { margin-bottom: 22px; }
+  header.top h1 { font-size: 20px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  header.top p { margin: 0; color: var(--ink-2); }
+  header.top a { color: var(--accent); text-decoration: none; }
+  header.top a:hover { text-decoration: underline; }
+
+  /* minmax(0,…) lets the wide CEL output scroll inside its <pre> instead of
+     stretching the column and giving the whole page a horizontal scrollbar. */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  .col-main, .col-side { min-width: 0; }
+  @media (min-width: 1000px) {
+    .layout { grid-template-columns: minmax(0, 1fr) 430px; align-items: start; }
+    .out-panel { position: sticky; top: 18px; }   /* sticky only when side-by-side */
+  }
+
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; }
+  .panel + .panel { margin-top: 18px; }
+  .panel > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); margin: 0 0 14px; }
+
+  .grid2 { display: grid; gap: 12px; }
+  @media (min-width: 560px) { .grid2.cols { grid-template-columns: 1fr 1fr; } }
+
+  label.fld { display: block; }
+  label.fld > span { display: block; font-size: 12px; color: var(--ink-2); margin-bottom: 5px; }
+  label.fld .hint { color: var(--ink-3); font-weight: 400; }
+
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; font-family: var(--sans); font-size: 13.5px; color: var(--ink);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; outline: none; transition: border-color .12s, box-shadow .12s;
+  }
+  input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+  textarea { resize: vertical; min-height: 64px; }
+  .mono { font-family: var(--mono); }
+  select { appearance: none; background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%238a93a0'/></svg>"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
+    font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--ink);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 12px;
+    transition: background .12s, border-color .12s; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--ink-3); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.primary:hover { filter: brightness(1.05); }
+  .btn.sm { padding: 5px 9px; font-size: 12px; }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+  .btn.ghost:hover { background: var(--line-2); color: var(--ink); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.danger:hover { border-color: var(--block); color: var(--block); }
+
+  .tabs { display: inline-flex; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
+  .tabs button { border: 0; background: transparent; color: var(--ink-2); cursor: pointer; font: inherit; font-size: 12.5px; padding: 5px 11px; border-radius: 6px; }
+  .tabs button.active { background: var(--accent); color: #fff; }
+  .tabs button:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* rule card */
+  .rule { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); margin-bottom: 14px; overflow: hidden; }
+  .rule-head { display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; padding: 11px 14px; border-bottom: 1px solid var(--line-2); }
+  .rule-head .idx { font-family: var(--mono); font-size: 12px; color: var(--ink-3); flex-shrink: 0; }
+  .rule-head .rid { font-family: var(--mono); font-size: 12px; color: var(--ink-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rule-actions { margin-left: auto; display: flex; gap: 4px; flex-shrink: 0; }
+  .badge { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; }
+  .badge.block { color: var(--block); background: color-mix(in srgb, var(--block) 14%, transparent); }
+  .badge.allow { color: var(--allow); background: color-mix(in srgb, var(--allow) 14%, transparent); }
+  .badge.log { color: var(--log); background: color-mix(in srgb, var(--log) 16%, transparent); }
+  .rule-body { padding: 14px; display: grid; gap: 14px; }
+  .rule-body hr { border: 0; border-top: 1px solid var(--line-2); margin: 0; }
+  .section-h { font-size: 13px; font-weight: 600; }
+  .section-sub { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+
+  /* condition rows */
+  .cond { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--panel); display: flex; gap: 10px; align-items: flex-start; }
+  .cond .ctrls { flex: 1; min-width: 0; display: grid; gap: 10px; }
+  .joiner { font-family: var(--mono); font-size: 11px; color: var(--ink-3); letter-spacing: .08em; padding-left: 4px; }
+  .combine { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .combine .lbl { font-size: 12px; color: var(--ink-2); }
+  .empty { color: var(--ink-3); font-size: 13px; }
+  .checkbox { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+
+  /* chips */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+  .chips:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
+  .chip { display: inline-flex; align-items: center; gap: 5px; background: var(--accent-weak); color: var(--accent); border-radius: 6px; padding: 2px 4px 2px 8px; font-size: 12.5px; font-family: var(--mono); }
+  .chip button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 4px; }
+  .chip button:hover { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+  .chips input { border: 0; background: transparent; box-shadow: none !important; flex: 1; min-width: 90px; padding: 4px; }
+  .chips input:focus { box-shadow: none; }
+
+  /* output */
+  .out-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .out-head .spacer { flex: 1; }
+  pre.out { margin: 0; background: #0d1117; color: #d6dde6; border-radius: 8px; padding: 14px; font-family: var(--mono); font-size: 12.5px; line-height: 1.55; overflow: auto; max-height: 62vh; white-space: pre; }
+  @media (prefers-color-scheme: light) { pre.out { background: #11161d; } }
+  .notes { margin-top: 12px; display: grid; gap: 6px; }
+  .note { font-size: 12px; padding: 7px 10px; border-radius: 7px; display: flex; gap: 7px; align-items: flex-start; }
+  .note.warn { background: color-mix(in srgb, var(--log) 14%, transparent); color: var(--log); }
+  .note.err { background: color-mix(in srgb, var(--block) 13%, transparent); color: var(--block); }
+  .note.ok { background: color-mix(in srgb, var(--allow) 12%, transparent); color: var(--allow); }
+  .copied { font-size: 12px; color: var(--allow); }
+
+  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 4px; }
+  .helper { font-size: 12px; color: var(--ink-3); }
+  code.k { font-family: var(--mono); background: var(--line-2); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+
+  /* phones — tighten chrome and lift form-control text to 16px so iOS Safari
+     doesn't auto-zoom the page when an input gains focus. */
+  @media (max-width: 600px) {
+    .wrap { padding: 16px 12px 56px; }
+    .panel { padding: 14px; }
+    .cond { padding: 10px; }
+    header.top h1 { font-size: 18px; }
+    input[type=text], input[type=number], select, textarea, .chips input { font-size: 16px; }
+    pre.out { font-size: 12px; padding: 12px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>parapet WAF rule editor</h1>
+    <p>Build firewall rules visually and generate a WAF <code class="k">ConfigMap</code> for
+      <a href="https://github.com/moonrhythm/parapet-ingress-controller" target="_blank" rel="noopener">parapet-ingress-controller</a>.
+      See <a href="../WAF.md" target="_blank" rel="noopener">WAF.md</a> for the contract. Everything runs locally — nothing is sent anywhere.</p>
+  </header>
+
+  <div class="layout">
+    <div class="col-main">
+      <!-- ConfigMap settings -->
+      <div class="panel">
+        <h2>ConfigMap</h2>
+        <div class="grid2 cols">
+          <label class="fld">
+            <span>Scope</span>
+            <select id="cfg-scope">
+              <option value="zone">zone — tenant ruleset (bound by ingress annotation)</option>
+              <option value="global">global — platform baseline (always-on)</option>
+            </select>
+          </label>
+          <label class="fld">
+            <span id="name-label">Name <span class="hint">(zone id)</span></span>
+            <input type="text" id="cfg-name" class="mono" placeholder="acme">
+          </label>
+        </div>
+        <div class="grid2 cols" style="margin-top:12px">
+          <label class="fld">
+            <span>Namespace</span>
+            <input type="text" id="cfg-namespace" class="mono" placeholder="default">
+          </label>
+          <div class="fld">
+            <span style="display:block;font-size:12px;color:var(--ink-2);margin-bottom:5px">Marker label</span>
+            <div class="helper mono" id="label-preview" style="padding-top:8px"></div>
+          </div>
+        </div>
+        <p class="helper" id="scope-help" style="margin:12px 0 0"></p>
+      </div>
+
+      <!-- Rules -->
+      <div class="panel">
+        <h2>Rules</h2>
+        <div id="rules"></div>
+        <div class="toolbar">
+          <button class="btn primary" id="add-rule">+ Add rule</button>
+          <button class="btn" id="load-examples">Load examples</button>
+          <span class="helper">Rules run top→bottom (<code class="k">priority</code> = order). Global runs before any zone.</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Output -->
+    <div class="col-side">
+      <div class="panel out-panel">
+        <div class="out-head">
+          <h2 style="margin:0">Output</h2>
+          <div class="spacer"></div>
+          <div class="tabs" id="wrap-tabs">
+            <button data-wrap="1" class="active">ConfigMap</button>
+            <button data-wrap="0">rules only</button>
+          </div>
+        </div>
+        <pre class="out" id="output"></pre>
+        <div class="toolbar">
+          <button class="btn primary" id="copy-btn">Copy</button>
+          <button class="btn" id="download-btn">Download .yaml</button>
+          <span class="copied" id="copied" hidden>Copied ✓</span>
+        </div>
+        <div class="notes" id="notes"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================================
+ * countries.js  (ISO 3166-1 alpha-2, ported from the console verbatim)
+ * ==========================================================================*/
+const countries = [
+  {code:'AD',name:'Andorra'},{code:'AE',name:'United Arab Emirates'},{code:'AF',name:'Afghanistan'},{code:'AG',name:'Antigua and Barbuda'},{code:'AI',name:'Anguilla'},{code:'AL',name:'Albania'},{code:'AM',name:'Armenia'},{code:'AO',name:'Angola'},{code:'AQ',name:'Antarctica'},{code:'AR',name:'Argentina'},{code:'AS',name:'American Samoa'},{code:'AT',name:'Austria'},{code:'AU',name:'Australia'},{code:'AW',name:'Aruba'},{code:'AX',name:'Åland Islands'},{code:'AZ',name:'Azerbaijan'},{code:'BA',name:'Bosnia and Herzegovina'},{code:'BB',name:'Barbados'},{code:'BD',name:'Bangladesh'},{code:'BE',name:'Belgium'},{code:'BF',name:'Burkina Faso'},{code:'BG',name:'Bulgaria'},{code:'BH',name:'Bahrain'},{code:'BI',name:'Burundi'},{code:'BJ',name:'Benin'},{code:'BL',name:'Saint Barthélemy'},{code:'BM',name:'Bermuda'},{code:'BN',name:'Brunei Darussalam'},{code:'BO',name:'Bolivia'},{code:'BQ',name:'Bonaire, Sint Eustatius and Saba'},{code:'BR',name:'Brazil'},{code:'BS',name:'Bahamas'},{code:'BT',name:'Bhutan'},{code:'BV',name:'Bouvet Island'},{code:'BW',name:'Botswana'},{code:'BY',name:'Belarus'},{code:'BZ',name:'Belize'},{code:'CA',name:'Canada'},{code:'CC',name:'Cocos (Keeling) Islands'},{code:'CD',name:'Congo (Democratic Republic)'},{code:'CF',name:'Central African Republic'},{code:'CG',name:'Congo'},{code:'CH',name:'Switzerland'},{code:'CI',name:"Côte d'Ivoire"},{code:'CK',name:'Cook Islands'},{code:'CL',name:'Chile'},{code:'CM',name:'Cameroon'},{code:'CN',name:'China'},{code:'CO',name:'Colombia'},{code:'CR',name:'Costa Rica'},{code:'CU',name:'Cuba'},{code:'CV',name:'Cabo Verde'},{code:'CW',name:'Curaçao'},{code:'CX',name:'Christmas Island'},{code:'CY',name:'Cyprus'},{code:'CZ',name:'Czechia'},{code:'DE',name:'Germany'},{code:'DJ',name:'Djibouti'},{code:'DK',name:'Denmark'},{code:'DM',name:'Dominica'},{code:'DO',name:'Dominican Republic'},{code:'DZ',name:'Algeria'},{code:'EC',name:'Ecuador'},{code:'EE',name:'Estonia'},{code:'EG',name:'Egypt'},{code:'EH',name:'Western Sahara'},{code:'ER',name:'Eritrea'},{code:'ES',name:'Spain'},{code:'ET',name:'Ethiopia'},{code:'FI',name:'Finland'},{code:'FJ',name:'Fiji'},{code:'FK',name:'Falkland Islands'},{code:'FM',name:'Micronesia'},{code:'FO',name:'Faroe Islands'},{code:'FR',name:'France'},{code:'GA',name:'Gabon'},{code:'GB',name:'United Kingdom'},{code:'GD',name:'Grenada'},{code:'GE',name:'Georgia'},{code:'GF',name:'French Guiana'},{code:'GG',name:'Guernsey'},{code:'GH',name:'Ghana'},{code:'GI',name:'Gibraltar'},{code:'GL',name:'Greenland'},{code:'GM',name:'Gambia'},{code:'GN',name:'Guinea'},{code:'GP',name:'Guadeloupe'},{code:'GQ',name:'Equatorial Guinea'},{code:'GR',name:'Greece'},{code:'GS',name:'South Georgia and the South Sandwich Islands'},{code:'GT',name:'Guatemala'},{code:'GU',name:'Guam'},{code:'GW',name:'Guinea-Bissau'},{code:'GY',name:'Guyana'},{code:'HK',name:'Hong Kong'},{code:'HM',name:'Heard Island and McDonald Islands'},{code:'HN',name:'Honduras'},{code:'HR',name:'Croatia'},{code:'HT',name:'Haiti'},{code:'HU',name:'Hungary'},{code:'ID',name:'Indonesia'},{code:'IE',name:'Ireland'},{code:'IL',name:'Israel'},{code:'IM',name:'Isle of Man'},{code:'IN',name:'India'},{code:'IO',name:'British Indian Ocean Territory'},{code:'IQ',name:'Iraq'},{code:'IR',name:'Iran'},{code:'IS',name:'Iceland'},{code:'IT',name:'Italy'},{code:'JE',name:'Jersey'},{code:'JM',name:'Jamaica'},{code:'JO',name:'Jordan'},{code:'JP',name:'Japan'},{code:'KE',name:'Kenya'},{code:'KG',name:'Kyrgyzstan'},{code:'KH',name:'Cambodia'},{code:'KI',name:'Kiribati'},{code:'KM',name:'Comoros'},{code:'KN',name:'Saint Kitts and Nevis'},{code:'KP',name:'North Korea'},{code:'KR',name:'South Korea'},{code:'KW',name:'Kuwait'},{code:'KY',name:'Cayman Islands'},{code:'KZ',name:'Kazakhstan'},{code:'LA',name:'Laos'},{code:'LB',name:'Lebanon'},{code:'LC',name:'Saint Lucia'},{code:'LI',name:'Liechtenstein'},{code:'LK',name:'Sri Lanka'},{code:'LR',name:'Liberia'},{code:'LS',name:'Lesotho'},{code:'LT',name:'Lithuania'},{code:'LU',name:'Luxembourg'},{code:'LV',name:'Latvia'},{code:'LY',name:'Libya'},{code:'MA',name:'Morocco'},{code:'MC',name:'Monaco'},{code:'MD',name:'Moldova'},{code:'ME',name:'Montenegro'},{code:'MF',name:'Saint Martin (French part)'},{code:'MG',name:'Madagascar'},{code:'MH',name:'Marshall Islands'},{code:'MK',name:'North Macedonia'},{code:'ML',name:'Mali'},{code:'MM',name:'Myanmar'},{code:'MN',name:'Mongolia'},{code:'MO',name:'Macao'},{code:'MP',name:'Northern Mariana Islands'},{code:'MQ',name:'Martinique'},{code:'MR',name:'Mauritania'},{code:'MS',name:'Montserrat'},{code:'MT',name:'Malta'},{code:'MU',name:'Mauritius'},{code:'MV',name:'Maldives'},{code:'MW',name:'Malawi'},{code:'MX',name:'Mexico'},{code:'MY',name:'Malaysia'},{code:'MZ',name:'Mozambique'},{code:'NA',name:'Namibia'},{code:'NC',name:'New Caledonia'},{code:'NE',name:'Niger'},{code:'NF',name:'Norfolk Island'},{code:'NG',name:'Nigeria'},{code:'NI',name:'Nicaragua'},{code:'NL',name:'Netherlands'},{code:'NO',name:'Norway'},{code:'NP',name:'Nepal'},{code:'NR',name:'Nauru'},{code:'NU',name:'Niue'},{code:'NZ',name:'New Zealand'},{code:'OM',name:'Oman'},{code:'PA',name:'Panama'},{code:'PE',name:'Peru'},{code:'PF',name:'French Polynesia'},{code:'PG',name:'Papua New Guinea'},{code:'PH',name:'Philippines'},{code:'PK',name:'Pakistan'},{code:'PL',name:'Poland'},{code:'PM',name:'Saint Pierre and Miquelon'},{code:'PN',name:'Pitcairn'},{code:'PR',name:'Puerto Rico'},{code:'PS',name:'Palestine'},{code:'PT',name:'Portugal'},{code:'PW',name:'Palau'},{code:'PY',name:'Paraguay'},{code:'QA',name:'Qatar'},{code:'RE',name:'Réunion'},{code:'RO',name:'Romania'},{code:'RS',name:'Serbia'},{code:'RU',name:'Russia'},{code:'RW',name:'Rwanda'},{code:'SA',name:'Saudi Arabia'},{code:'SB',name:'Solomon Islands'},{code:'SC',name:'Seychelles'},{code:'SD',name:'Sudan'},{code:'SE',name:'Sweden'},{code:'SG',name:'Singapore'},{code:'SH',name:'Saint Helena, Ascension and Tristan da Cunha'},{code:'SI',name:'Slovenia'},{code:'SJ',name:'Svalbard and Jan Mayen'},{code:'SK',name:'Slovakia'},{code:'SL',name:'Sierra Leone'},{code:'SM',name:'San Marino'},{code:'SN',name:'Senegal'},{code:'SO',name:'Somalia'},{code:'SR',name:'Suriname'},{code:'SS',name:'South Sudan'},{code:'ST',name:'Sao Tome and Principe'},{code:'SV',name:'El Salvador'},{code:'SX',name:'Sint Maarten (Dutch part)'},{code:'SY',name:'Syria'},{code:'SZ',name:'Eswatini'},{code:'TC',name:'Turks and Caicos Islands'},{code:'TD',name:'Chad'},{code:'TF',name:'French Southern Territories'},{code:'TG',name:'Togo'},{code:'TH',name:'Thailand'},{code:'TJ',name:'Tajikistan'},{code:'TK',name:'Tokelau'},{code:'TL',name:'Timor-Leste'},{code:'TM',name:'Turkmenistan'},{code:'TN',name:'Tunisia'},{code:'TO',name:'Tonga'},{code:'TR',name:'Türkiye'},{code:'TT',name:'Trinidad and Tobago'},{code:'TV',name:'Tuvalu'},{code:'TW',name:'Taiwan'},{code:'TZ',name:'Tanzania'},{code:'UA',name:'Ukraine'},{code:'UG',name:'Uganda'},{code:'UM',name:'United States Minor Outlying Islands'},{code:'US',name:'United States'},{code:'UY',name:'Uruguay'},{code:'UZ',name:'Uzbekistan'},{code:'VA',name:'Holy See (Vatican City State)'},{code:'VC',name:'Saint Vincent and the Grenadines'},{code:'VE',name:'Venezuela'},{code:'VG',name:'Virgin Islands (British)'},{code:'VI',name:'Virgin Islands (U.S.)'},{code:'VN',name:'Vietnam'},{code:'VU',name:'Vanuatu'},{code:'WF',name:'Wallis and Futuna'},{code:'WS',name:'Samoa'},{code:'YE',name:'Yemen'},{code:'YT',name:'Mayotte'},{code:'ZA',name:'South Africa'},{code:'ZM',name:'Zambia'},{code:'ZW',name:'Zimbabwe'}
+];
+const nameByCode = Object.fromEntries(countries.map((c) => [c.code, c.name]));
+function countryLabel (code) {
+  const c = String(code ?? '').toUpperCase();
+  const name = nameByCode[c];
+  return name ? `${c} — ${name}` : code;
+}
+
+/* ============================================================================
+ * expression.js  (CEL builder + inverse parser — ported verbatim from the
+ * console so a rule built here is byte-identical to what the console emits)
+ * ==========================================================================*/
+function celString (v) {
+  return String(v ?? '')
+    .replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+}
+function quote (v) { return `"${celString(v)}"`; }
+
+const fields = [
+  { value: 'method', label: 'Method', type: 'string', accessor: 'request.method', suggestions: ['GET','POST','PUT','PATCH','DELETE','HEAD','OPTIONS'] },
+  { value: 'path', label: 'Path', type: 'string', accessor: 'request.path' },
+  { value: 'host', label: 'Host', type: 'string', accessor: 'request.host' },
+  { value: 'query', label: 'Query string', type: 'string', accessor: 'request.query' },
+  { value: 'uri', label: 'URI', type: 'string', accessor: 'request.uri' },
+  { value: 'scheme', label: 'Scheme', type: 'tls', accessor: 'request.scheme' },
+  { value: 'user_agent', label: 'User-Agent', type: 'string', accessor: 'request.user_agent' },
+  { value: 'referer', label: 'Referer', type: 'string', accessor: 'request.referer' },
+  { value: 'remote_ip', label: 'Remote IP', type: 'ip', accessor: 'request.remote_ip' },
+  { value: 'country', label: 'Country', type: 'country', accessor: 'request.country' },
+  { value: 'asn', label: 'ASN', type: 'asn', accessor: 'request.asn' },
+  { value: 'content_length', label: 'Content-Length', type: 'numeric', accessor: 'request.content_length' },
+  { value: 'header', label: 'Header', type: 'string', hasName: true, accessorMap: 'request.headers["<name>"]' },
+  { value: 'arg', label: 'Query arg', type: 'string', hasName: true, accessorMap: 'request.args["<name>"]' },
+  { value: 'cookie', label: 'Cookie', type: 'string', hasName: true, accessorMap: 'request.cookies["<name>"]' }
+];
+const fieldByValue = Object.fromEntries(fields.map((f) => [f.value, f]));
+function getField (value) { return fieldByValue[value]; }
+
+const stringOperators = [
+  { value: 'equals', label: 'equals' },
+  { value: 'not_equals', label: 'not equals' },
+  { value: 'in_list', label: 'is in', multi: true },
+  { value: 'not_in_list', label: 'is not in', multi: true },
+  { value: 'contains_any', label: 'contains any of', multi: true },
+  { value: 'starts_with', label: 'starts with' },
+  { value: 'not_starts_with', label: 'not starts with' },
+  { value: 'ends_with', label: 'ends with' },
+  { value: 'not_ends_with', label: 'not ends with' },
+  { value: 'matches_regex', label: 'matches regex' }
+];
+const methodOperators = {
+  starts_with: { method: 'startsWith', negate: false },
+  not_starts_with: { method: 'startsWith', negate: true },
+  ends_with: { method: 'endsWith', negate: false },
+  not_ends_with: { method: 'endsWith', negate: true }
+};
+const operatorByMethod = Object.fromEntries(
+  Object.entries(methodOperators).map(([op, m]) => [`${m.method}:${m.negate}`, op])
+);
+const ipOperators = [
+  { value: 'in_cidr', label: 'in CIDR' },
+  { value: 'ip_equals', label: 'equals' }
+];
+const membershipOperators = [
+  { value: 'equals', label: 'equals' },
+  { value: 'not_equals', label: 'not equals' },
+  { value: 'in_list', label: 'is in', multi: true },
+  { value: 'not_in_list', label: 'is not in', multi: true }
+];
+const numericOperators = [
+  { value: 'num_eq', label: '==' }, { value: 'num_ne', label: '!=' },
+  { value: 'num_lt', label: '<' }, { value: 'num_gt', label: '>' },
+  { value: 'num_le', label: '<=' }, { value: 'num_ge', label: '>=' }
+];
+const numericOps = { num_eq: '==', num_ne: '!=', num_lt: '<', num_gt: '>', num_le: '<=', num_ge: '>=' };
+
+function operatorsForType (type) {
+  switch (type) {
+  case 'ip': return ipOperators;
+  case 'numeric': return numericOperators;
+  case 'country': return membershipOperators;
+  case 'asn': return membershipOperators;
+  case 'tls': return [];
+  default: return stringOperators;
+  }
+}
+function operatorsForField (field) {
+  if (!field) return stringOperators;
+  if (field.value === 'method') return membershipOperators;
+  return operatorsForType(field.type);
+}
+function isMultiOperator (op) { return op === 'contains_any' || op === 'in_list' || op === 'not_in_list'; }
+function parseList (raw) {
+  return String(raw ?? '').split(/[\n,]/).map((s) => s.trim()).filter((s) => s.length > 0);
+}
+function resolveAccessor (spec) {
+  const f = fieldByValue[spec.field];
+  if (!f) return '';
+  if (f.hasName) return (f.accessorMap ?? '').replace('<name>', celString((spec.name ?? '').toLowerCase()));
+  return f.accessor ?? '';
+}
+function buildExpression (spec) {
+  const f = fieldByValue[spec.field];
+  if (!f) return '';
+  if (f.hasName && !(spec.name ?? '').trim()) return '';
+  const accessor = resolveAccessor(spec);
+  if (!accessor) return '';
+  let snippet;
+  if (f.type === 'tls') {
+    snippet = `${accessor} == ${quote(spec.tls === false ? 'http' : 'https')}`;
+  } else if (f.type === 'numeric') {
+    const op = numericOps[spec.operator];
+    const raw = (spec.value ?? '').trim();
+    if (!op || raw === '' || !/^-?\d+$/.test(raw)) return '';
+    snippet = `${accessor} ${op} ${raw}`;
+  } else if (f.type === 'ip') {
+    const v = (spec.value ?? '').trim();
+    if (!v) return '';
+    if (spec.operator === 'in_cidr') snippet = `ipInCidr(${accessor}, ${quote(v)})`;
+    else if (spec.operator === 'ip_equals') snippet = `${accessor} == ${quote(v)}`;
+    else return '';
+  } else if (f.type === 'country') {
+    if (spec.operator === 'in_list' || spec.operator === 'not_in_list') {
+      const list = parseList(spec.values ?? '');
+      if (list.length === 0) return '';
+      const items = list.map((v) => quote(v)).join(', ');
+      const inExpr = `${accessor} in [${items}]`;
+      snippet = spec.operator === 'not_in_list' ? `!(${inExpr})` : inExpr;
+    } else {
+      const v = (spec.value ?? '').trim();
+      if (v === '') return '';
+      const op = spec.operator === 'not_equals' ? '!=' : '==';
+      snippet = `${accessor} ${op} ${quote(v)}`;
+    }
+  } else if (f.type === 'asn') {
+    if (spec.operator === 'in_list' || spec.operator === 'not_in_list') {
+      const list = parseList(spec.values ?? '').filter((v) => /^\d+$/.test(v));
+      if (list.length === 0) return '';
+      const inExpr = `${accessor} in [${list.join(', ')}]`;
+      snippet = spec.operator === 'not_in_list' ? `!(${inExpr})` : inExpr;
+    } else {
+      const raw = (spec.value ?? '').trim();
+      if (!/^\d+$/.test(raw)) return '';
+      const op = spec.operator === 'not_equals' ? '!=' : '==';
+      snippet = `${accessor} ${op} ${raw}`;
+    }
+  } else {
+    if (isMultiOperator(spec.operator)) {
+      const list = parseList(spec.values ?? '');
+      if (list.length === 0) return '';
+      const items = list.map((v) => quote(v)).join(', ');
+      if (spec.operator === 'contains_any') snippet = `containsAny(${accessor}, [${items}])`;
+      else {
+        const inExpr = `${accessor} in [${items}]`;
+        snippet = spec.operator === 'not_in_list' ? `!(${inExpr})` : inExpr;
+      }
+    } else if (methodOperators[spec.operator]) {
+      const v = spec.value ?? '';
+      if (v === '') return '';
+      const { method, negate } = methodOperators[spec.operator];
+      snippet = `${negate ? '!' : ''}${accessor}.${method}(${quote(v)})`;
+    } else if (spec.operator === 'matches_regex') {
+      const pattern = spec.value ?? '';
+      if (pattern === '') return '';
+      snippet = `regexMatch(${accessor}, ${quote(pattern)})`;
+    } else {
+      const v = spec.value ?? '';
+      if (v === '') return '';
+      const op = spec.operator === 'not_equals' ? '!=' : '==';
+      snippet = `${accessor} ${op} ${quote(v)}`;
+    }
+  }
+  if (!snippet) return '';
+  return snippet;
+}
+function buildGroup (combinator, conditions) {
+  return (conditions ?? []).map(buildExpression).filter(Boolean).join(combinator === 'or' ? ' || ' : ' && ');
+}
+
+/* --- inverse parser (raw CEL -> structured conditions) --- */
+function unescapeCelString (inner) {
+  let out = '';
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i];
+    if (c !== '\\') { out += c; continue; }
+    const next = inner[i + 1];
+    switch (next) {
+    case '\\': out += '\\'; break;
+    case '"': out += '"'; break;
+    case 'n': out += '\n'; break;
+    case 'r': out += '\r'; break;
+    case 't': out += '\t'; break;
+    default: out += next ?? '';
+    }
+    i++;
+  }
+  return out;
+}
+function matchStringLiteral (s) {
+  if (s[0] !== '"') return null;
+  let i = 1, inner = '';
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '\\') { if (i + 1 >= s.length) return null; inner += c + s[i + 1]; i += 2; continue; }
+    if (c === '"') return { value: unescapeCelString(inner), end: i + 1 };
+    inner += c; i++;
+  }
+  return null;
+}
+function splitTopLevel (s) {
+  const parts = []; let op = null, depth = 0, start = 0, i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '"') { const m = matchStringLiteral(s.slice(i)); if (!m) return null; i += m.end; continue; }
+    if (c === '[' || c === '(') { depth++; i++; continue; }
+    if (c === ']' || c === ')') { depth--; if (depth < 0) return null; i++; continue; }
+    if (depth === 0 && (c === '&' || c === '|')) {
+      const two = s.slice(i, i + 2);
+      if ((two === '&&' || two === '||') && s[i - 1] === ' ' && s[i + 2] === ' ') {
+        const here = two === '&&' ? 'and' : 'or';
+        if (op && op !== here) return null;
+        op = here; parts.push(s.slice(start, i - 1)); i += 3; start = i; continue;
+      }
+    }
+    i++;
+  }
+  if (depth !== 0) return null;
+  parts.push(s.slice(start));
+  return { parts, op };
+}
+const fieldByAccessor = Object.fromEntries(fields.filter((f) => f.accessor).map((f) => [f.accessor, f.value]));
+const nameFieldByPrefix = Object.fromEntries(
+  fields.filter((f) => f.hasName && f.accessorMap).map((f) => [(f.accessorMap ?? '').split('["<name>"]')[0], f.value])
+);
+function matchAccessor (s) {
+  for (const prefix of Object.keys(nameFieldByPrefix)) {
+    if (!s.startsWith(prefix + '["')) continue;
+    const lit = matchStringLiteral(s.slice(prefix.length + 1));
+    if (!lit) return null;
+    const afterName = prefix.length + 1 + lit.end;
+    if (s[afterName] !== ']') return null;
+    return { field: nameFieldByPrefix[prefix], name: lit.value, end: afterName + 1 };
+  }
+  let best = null;
+  for (const accessor of Object.keys(fieldByAccessor)) {
+    if (s.startsWith(accessor) && (!best || accessor.length > best.length)) best = accessor;
+  }
+  if (!best) return null;
+  const next = s[best.length];
+  if (next !== undefined && next !== ' ' && next !== ')' && next !== ',' && next !== '.') return null;
+  return { field: fieldByAccessor[best], end: best.length };
+}
+function matchListLit (s) {
+  if (s[0] !== '[') return null;
+  let i = 1; const items = [];
+  while (true) {
+    const lit = matchStringLiteral(s.slice(i));
+    if (!lit) return null;
+    items.push(lit.value); i += lit.end;
+    if (s[i] === ']') return items.length ? { items, end: i + 1 } : null;
+    if (s.slice(i, i + 2) !== ', ') return null;
+    i += 2;
+  }
+}
+function matchIntList (s) {
+  if (s[0] !== '[') return null;
+  let i = 1; const items = [];
+  while (true) {
+    const m = /^\d+/.exec(s.slice(i));
+    if (!m) return null;
+    items.push(m[0]); i += m[0].length;
+    if (s[i] === ']') return items.length ? { items, end: i + 1 } : null;
+    if (s.slice(i, i + 2) !== ', ') return null;
+    i += 2;
+  }
+}
+function parseMethodCall (s) {
+  let negate = false, body = s;
+  if (body.startsWith('!')) { negate = true; body = body.slice(1); }
+  const acc = matchAccessor(body);
+  if (!acc) return null;
+  const field = getField(acc.field);
+  if (!field || field.type !== 'string') return null;
+  const rest = body.slice(acc.end);
+  let method = null;
+  if (rest.startsWith('.startsWith(')) method = 'startsWith';
+  else if (rest.startsWith('.endsWith(')) method = 'endsWith';
+  if (!method) return null;
+  const inner = rest.slice(method.length + 2);
+  const lit = matchStringLiteral(inner);
+  if (!lit || inner.slice(lit.end) !== ')') return null;
+  const operator = operatorByMethod[`${method}:${negate}`];
+  if (!operator) return null;
+  return { field: acc.field, ...(acc.name !== undefined ? { name: acc.name } : {}), operator, value: lit.value };
+}
+function parseCondition (part) {
+  const s = part.trim();
+  if (!s) return null;
+  const method = parseMethodCall(s);
+  if (method) return method;
+  if (s.startsWith('!(') && s.endsWith(')')) {
+    const inner = parseCondition(s.slice(2, -1));
+    if (inner && inner.operator === 'in_list') return { ...inner, operator: 'not_in_list' };
+    return null;
+  }
+  const fnMatch = /^(containsAny|regexMatch|ipInCidr)\(/.exec(s);
+  if (fnMatch) {
+    const fn = fnMatch[1];
+    const acc = matchAccessor(s.slice(fn.length + 1));
+    if (!acc) return null;
+    let i = fn.length + 1 + acc.end;
+    if (s.slice(i, i + 2) !== ', ') return null;
+    i += 2;
+    if (fn === 'containsAny') {
+      const list = matchListLit(s.slice(i));
+      if (!list) return null;
+      i += list.end;
+      if (s.slice(i) !== ')') return null;
+      return { field: acc.field, ...(acc.name !== undefined ? { name: acc.name } : {}), operator: 'contains_any', values: list.items.join('\n') };
+    }
+    const lit = matchStringLiteral(s.slice(i));
+    if (!lit) return null;
+    i += lit.end;
+    if (s.slice(i) !== ')') return null;
+    if (fn === 'regexMatch') {
+      return { field: acc.field, ...(acc.name !== undefined ? { name: acc.name } : {}), operator: 'matches_regex', value: lit.value };
+    }
+    if (acc.field !== 'remote_ip') return null;
+    return { field: 'remote_ip', operator: 'in_cidr', value: lit.value };
+  }
+  const acc = matchAccessor(s);
+  if (!acc) return null;
+  let rest = s.slice(acc.end);
+  const field = getField(acc.field);
+  if (!field) return null;
+  if (field.type === 'numeric') {
+    const m = /^ (==|!=|<=|>=|<|>) (-?\d+)$/.exec(rest);
+    if (!m) return null;
+    const opKey = Object.keys(numericOps).find((k) => numericOps[k] === m[1]);
+    if (!opKey) return null;
+    return { field: acc.field, operator: opKey, value: m[2] };
+  }
+  if (field.type === 'country') {
+    if (rest.startsWith(' in ')) {
+      const list = matchListLit(rest.slice(4));
+      if (!list || 4 + list.end !== rest.length) return null;
+      return { field: acc.field, operator: 'in_list', values: list.items.join('\n') };
+    }
+    const m = /^ (==|!=) /.exec(rest);
+    if (!m) return null;
+    const lit = matchStringLiteral(rest.slice(m[0].length));
+    if (!lit || lit.end !== rest.length - m[0].length) return null;
+    return { field: acc.field, operator: m[1] === '!=' ? 'not_equals' : 'equals', value: lit.value };
+  }
+  if (field.type === 'asn') {
+    if (rest.startsWith(' in ')) {
+      const list = matchIntList(rest.slice(4));
+      if (!list || 4 + list.end !== rest.length) return null;
+      return { field: acc.field, operator: 'in_list', values: list.items.join('\n') };
+    }
+    const m = /^ (==|!=) (\d+)$/.exec(rest);
+    if (!m) return null;
+    return { field: acc.field, operator: m[1] === '!=' ? 'not_equals' : 'equals', value: m[2] };
+  }
+  if (field.type === 'tls') {
+    if (!rest.startsWith(' == ')) return null;
+    const lit = matchStringLiteral(rest.slice(4));
+    if (!lit || lit.end !== rest.length - 4) return null;
+    if (lit.value === 'https') return { field: 'scheme', operator: 'equals', tls: true };
+    if (lit.value === 'http') return { field: 'scheme', operator: 'equals', tls: false };
+    return null;
+  }
+  if (field.type === 'ip') {
+    if (!rest.startsWith(' == ')) return null;
+    const lit = matchStringLiteral(rest.slice(4));
+    if (!lit || lit.end !== rest.length - 4) return null;
+    return { field: 'remote_ip', operator: 'ip_equals', value: lit.value };
+  }
+  if (rest.startsWith(' in ')) {
+    const list = matchListLit(rest.slice(4));
+    if (!list || 4 + list.end !== rest.length) return null;
+    return { field: acc.field, ...(acc.name !== undefined ? { name: acc.name } : {}), operator: 'in_list', values: list.items.join('\n') };
+  }
+  const opMatch = /^ (==|!=) /.exec(rest);
+  if (!opMatch) return null;
+  rest = rest.slice(opMatch[0].length);
+  const lit = matchStringLiteral(rest);
+  if (!lit || lit.end !== rest.length) return null;
+  return { field: acc.field, ...(acc.name !== undefined ? { name: acc.name } : {}), operator: opMatch[1] === '!=' ? 'not_equals' : 'equals', value: lit.value };
+}
+function parseExpression (cel) {
+  const trimmed = String(cel ?? '').trim();
+  if (trimmed === '') return { combinator: 'and', conditions: [] };
+  const split = splitTopLevel(trimmed);
+  if (!split) return null;
+  const conditions = [];
+  for (const part of split.parts) {
+    const spec = parseCondition(part);
+    if (!spec) return null;
+    conditions.push(spec);
+  }
+  return { combinator: split.op ?? 'and', conditions };
+}
+
+/* ============================================================================
+ * rules.js  (rule-form helpers)
+ * ==========================================================================*/
+const DEFAULT_STATUS = 403;
+const DEFAULT_MESSAGE = 'Forbidden';
+function genId (taken) {
+  let id;
+  do { id = 'rule-' + Math.random().toString(36).slice(2, 8); } while (taken.includes(id));
+  return id;
+}
+
+/* ============================================================================
+ * YAML generation  (waf.Rule + ConfigMap, per WAF.md)
+ * ==========================================================================*/
+// Single-quoted YAML preserves backslashes and double quotes literally — exactly
+// what CEL strings need (CEL uses double quotes); only a literal ' is escaped.
+function yamlScalar (s) {
+  s = String(s ?? '');
+  if (s === '') return "''";
+  const plainSafe =
+    /^[A-Za-z0-9][A-Za-z0-9 _.\/-]*$/.test(s) &&   // safe charset, safe first char
+    !/: /.test(s) && !/:$/.test(s) && !/ #/.test(s) && // no YAML "key: val" / comment cues
+    !/\s$/.test(s) &&                              // no trailing space
+    !/^(true|false|null|yes|no|on|off|~)$/i.test(s) && // not a bare keyword
+    !/^[-+]?[0-9.]+$/.test(s);                     // not a bare number
+  if (plainSafe) return s;
+  return "'" + s.replace(/'/g, "''") + "'";
+}
+// The inner `rules:` document (no leading indent).
+function buildRulesYaml (rules) {
+  const lines = ['rules:'];
+  rules.forEach((r, i) => {
+    lines.push('  - id: ' + yamlScalar(r.id));
+    const desc = (r.description ?? '').trim();
+    if (desc) lines.push('    description: ' + yamlScalar(desc));
+    lines.push('    expression: ' + yamlScalar(r.expression ?? ''));
+    lines.push('    action: ' + (r.action || 'log'));
+    if (r.action === 'block') {
+      const st = parseInt(r.status, 10);
+      lines.push('    status: ' + (Number.isFinite(st) && st > 0 ? st : DEFAULT_STATUS));
+      const msg = (r.message ?? '').trim() || DEFAULT_MESSAGE;
+      lines.push('    message: ' + yamlScalar(msg));
+    }
+    lines.push('    priority: ' + i);
+  });
+  return lines.join('\n');
+}
+function buildConfigMap (cfg, rules) {
+  const inner = buildRulesYaml(rules);
+  const indented = inner.split('\n').map((l) => (l ? '    ' + l : '')).join('\n');
+  const name = (cfg.name || '').trim() || (cfg.scope === 'global' ? 'waf-global' : 'waf-zone');
+  const ns = (cfg.namespace || '').trim() || 'default';
+  return [
+    'apiVersion: v1',
+    'kind: ConfigMap',
+    'metadata:',
+    '  name: ' + yamlScalar(name),
+    '  namespace: ' + yamlScalar(ns),
+    '  labels:',
+    '    parapet.moonrhythm.io/waf: ' + cfg.scope,
+    'data:',
+    '  rules.yaml: |',
+    indented
+  ].join('\n') + '\n';
+}
+
+/* ============================================================================
+ * UI state + rendering
+ * ==========================================================================*/
+const state = {
+  cfg: { scope: 'zone', name: 'acme', namespace: 'default' },
+  wrap: true,
+  rules: []
+};
+const $ = (sel) => document.querySelector(sel);
+function el (tag, props, ...kids) {
+  const n = document.createElement(tag);
+  if (props) for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') n.className = v;
+    else if (k === 'text') n.textContent = v;
+    else if (k === 'html') n.innerHTML = v;
+    else if (k.startsWith('on') && typeof v === 'function') n.addEventListener(k.slice(2), v);
+    else if (v === true) n.setAttribute(k, '');
+    else if (v === false || v == null) { /* skip */ }
+    else n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) { if (kid == null) continue; n.append(kid.nodeType ? kid : document.createTextNode(String(kid))); }
+  return n;
+}
+function takenIds () { return state.rules.map((r) => r.id); }
+function newRule () {
+  return { id: genId(takenIds()), description: '', expression: '', action: 'log',
+    status: DEFAULT_STATUS, message: DEFAULT_MESSAGE, mode: 'visual', combinator: 'and', conditions: [] };
+}
+function canUseVisual (rule) { return parseExpression(rule.expression ?? '') !== null; }
+function syncFromVisual (rule) { rule.expression = buildGroup(rule.combinator, rule.conditions); }
+function reseedVisual (rule) {
+  const parsed = parseExpression(rule.expression ?? '');
+  if (!parsed) return false;
+  rule.combinator = parsed.combinator;
+  rule.conditions = parsed.conditions;
+  return true;
+}
+
+/* ---- chips widget (multi-value operands) ---- */
+function chipsWidget (list, onchange, opts) {
+  opts = opts || {};
+  const wrap = el('div', { class: 'chips' });
+  const add = (raw) => {
+    const parts = parseList(raw);
+    if (!parts.length) return false;
+    let changed = false;
+    for (const p of parts) { if (!list.includes(p)) { list.push(p); changed = true; } }
+    if (changed) onchange(list);
+    return changed;
+  };
+  for (const v of list) {
+    const chip = el('span', { class: 'chip' }, opts.label ? opts.label(v) : v,
+      el('button', { type: 'button', 'aria-label': 'remove', onclick: () => { const i = list.indexOf(v); if (i >= 0) { list.splice(i, 1); onchange(list); } } }, '×'));
+    wrap.append(chip);
+  }
+  const input = el('input', { type: 'text', placeholder: opts.placeholder || 'Type, Enter to add', autocomplete: 'off' });
+  if (opts.datalistId) input.setAttribute('list', opts.datalistId);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); if (add(input.value)) input.value = ''; }
+    else if (e.key === 'Backspace' && input.value === '' && list.length) { list.pop(); onchange(list); }
+  });
+  input.addEventListener('blur', () => { if (add(input.value)) input.value = ''; });
+  wrap.append(input);
+  return wrap;
+}
+
+let COUNTRY_DATALIST_ID = 'dl-country';
+let METHOD_DATALIST_ID = 'dl-method';
+function ensureDatalists () {
+  if (!document.getElementById(COUNTRY_DATALIST_ID)) {
+    const dl = el('datalist', { id: COUNTRY_DATALIST_ID });
+    for (const c of countries) dl.append(el('option', { value: c.code }, `${c.code} — ${c.name}`));
+    document.body.append(dl);
+  }
+  if (!document.getElementById(METHOD_DATALIST_ID)) {
+    const dl = el('datalist', { id: METHOD_DATALIST_ID });
+    for (const m of fieldByValue.method.suggestions) dl.append(el('option', { value: m }));
+    document.body.append(dl);
+  }
+}
+
+function selectEl (value, options, onchange, attrs) {
+  const s = el('select', attrs || {});
+  for (const o of options) {
+    const opt = el('option', { value: o.value }, o.label);
+    if (o.value === value) opt.selected = true;
+    s.append(opt);
+  }
+  s.addEventListener('change', () => onchange(s.value));
+  return s;
+}
+
+/* ---- one condition row ---- */
+function renderConditionRow (rule, ci) {
+  const cond = rule.conditions[ci];
+  const fieldMeta = getField(cond.field);
+  const fieldType = fieldMeta?.type ?? 'string';
+  const needsName = !!fieldMeta?.hasName;
+  const operators = operatorsForField(fieldMeta);
+  const multi = isMultiOperator(cond.operator);
+  const isTls = fieldType === 'tls';
+  const isMethod = fieldMeta?.value === 'method';
+  const useCombobox = !!fieldMeta?.suggestions && (cond.operator === 'equals' || cond.operator === 'not_equals');
+
+  const onVisualChange = () => { syncFromVisual(rule); updateOutput(); };
+  const onStructural = () => { syncFromVisual(rule); renderRules(); };
+
+  const ctrls = el('div', { class: 'ctrls' });
+
+  // field (+ name)
+  const fieldRow = el('div', { class: 'grid2 cols' });
+  const fieldOptions = fields.map((f) => ({ value: f.value, label: f.label }));
+  fieldRow.append(el('label', { class: 'fld' }, el('span', {}, 'Field'),
+    selectEl(cond.field, fieldOptions, (v) => {
+      cond.field = v;
+      cond.value = ''; cond.values = ''; // clear stale operand on field change
+      const ops = operatorsForField(getField(v));
+      if (!ops.some((o) => o.value === cond.operator)) cond.operator = ops[0]?.value ?? '';
+      onStructural();
+    })));
+  if (needsName) {
+    const nameInput = el('input', { type: 'text', value: cond.name ?? '', class: 'mono',
+      placeholder: cond.field === 'header' ? 'e.g. user-agent' : cond.field === 'cookie' ? 'e.g. session' : 'e.g. token' });
+    nameInput.addEventListener('input', () => { cond.name = nameInput.value; onVisualChange(); });
+    fieldRow.append(el('label', { class: 'fld' }, el('span', {}, 'Name'), nameInput));
+  }
+  ctrls.append(fieldRow);
+
+  if (isTls) {
+    const cb = el('input', { type: 'checkbox' });
+    cb.checked = cond.tls !== false;
+    cb.addEventListener('change', () => { cond.tls = cb.checked; onVisualChange(); });
+    ctrls.append(el('div', { class: 'fld' },
+      el('label', { class: 'checkbox' }, cb, el('span', {}, 'TLS (request served over HTTPS)'))));
+  } else {
+    // operator
+    const opOptions = operators.map((o) => ({ value: o.value, label: o.label }));
+    ctrls.append(el('div', { class: 'grid2 cols' },
+      el('label', { class: 'fld' }, el('span', {}, 'Operator'),
+        selectEl(cond.operator, opOptions, (v) => { cond.operator = v; onStructural(); }))));
+
+    // value widget
+    if (fieldType === 'country' && !multi) {
+      const opts = [{ value: '', label: '— select country —' }].concat(countries.map((c) => ({ value: c.code, label: countryLabel(c.code) })));
+      ctrls.append(el('label', { class: 'fld' }, el('span', {}, 'Country'),
+        selectEl(cond.value ?? '', opts, (v) => { cond.value = v; onVisualChange(); })));
+    } else if (multi) {
+      // chips for in_list / not_in_list / contains_any
+      let list = parseList(cond.values ?? '');
+      const onchange = (lst) => { cond.values = lst.join('\n'); onStructural(); };
+      const widget = el('div', { class: 'fld' });
+      const lbl = fieldType === 'country' ? 'Countries' : isMethod ? 'Methods' : fieldType === 'asn' ? 'ASNs' : 'Values';
+      widget.append(el('span', { style: 'display:block;font-size:12px;color:var(--ink-2);margin-bottom:5px' }, lbl));
+      if (fieldType === 'country') {
+        // quick-add via a select guarantees valid ISO codes
+        const adder = selectEl('', [{ value: '', label: '+ add country…' }].concat(countries.map((c) => ({ value: c.code, label: countryLabel(c.code) }))),
+          (v) => { if (v && !list.includes(v)) { list.push(v); onchange(list); } });
+        widget.append(adder, el('div', { style: 'height:6px' }));
+        widget.append(chipsWidget(list, onchange, { placeholder: 'or type a code, Enter to add', datalistId: COUNTRY_DATALIST_ID, label: (v) => v }));
+      } else {
+        widget.append(chipsWidget(list, onchange, {
+          placeholder: isMethod ? 'Select or type a method, Enter to add' : fieldType === 'asn' ? 'e.g. 13335, Enter to add' : 'Type a value, Enter to add',
+          datalistId: isMethod ? METHOD_DATALIST_ID : undefined
+        }));
+      }
+      ctrls.append(widget);
+    } else if (useCombobox) {
+      // method single value: free text with datalist suggestions
+      const inp = el('input', { type: 'text', class: 'mono', value: cond.value ?? '', list: METHOD_DATALIST_ID, placeholder: 'e.g. GET', autocomplete: 'off' });
+      inp.addEventListener('input', () => { cond.value = inp.value; onVisualChange(); });
+      ctrls.append(el('label', { class: 'fld' }, el('span', {}, 'Value'), inp));
+    } else {
+      const numeric = fieldType === 'numeric' || fieldType === 'asn';
+      const lbl = numeric ? 'Number'
+        : (fieldType === 'ip' && cond.operator === 'in_cidr') ? 'CIDR'
+        : cond.operator === 'matches_regex' ? 'Pattern' : 'Value';
+      const ph = fieldType === 'asn' ? 'e.g. 13335'
+        : fieldType === 'numeric' ? 'e.g. 1048576'
+        : (fieldType === 'ip' && cond.operator === 'in_cidr') ? 'e.g. 10.0.0.0/8'
+        : cond.operator === 'matches_regex' ? 'e.g. (?i)(union\\s+select|or\\s+1=1)'
+        : (cond.operator === 'starts_with' || cond.operator === 'not_starts_with') ? 'e.g. /admin'
+        : (cond.operator === 'ends_with' || cond.operator === 'not_ends_with') ? 'e.g. .php' : 'Value';
+      const inp = el('input', { type: 'text', class: 'mono', value: cond.value ?? '', placeholder: ph, inputmode: numeric ? 'numeric' : undefined });
+      inp.addEventListener('input', () => { cond.value = inp.value; onVisualChange(); });
+      ctrls.append(el('label', { class: 'fld' }, el('span', {}, lbl), inp));
+    }
+  }
+
+  const remove = el('button', { class: 'btn ghost sm', type: 'button', 'aria-label': 'Remove condition', title: 'Remove condition',
+    onclick: () => { rule.conditions.splice(ci, 1); syncFromVisual(rule); renderRules(); } }, '✕');
+  return el('div', { class: 'cond' }, ctrls, remove);
+}
+
+/* ---- one rule card ---- */
+function renderRuleCard (rule, index) {
+  const card = el('div', { class: 'rule' });
+
+  // header
+  const head = el('div', { class: 'rule-head' });
+  head.append(el('span', { class: 'idx' }, '#' + (index + 1)));
+  head.append(el('span', { class: 'rid' }, rule.id));
+  head.append(el('span', { class: 'badge ' + rule.action }, rule.action));
+  const actions = el('div', { class: 'rule-actions' });
+  actions.append(el('button', { class: 'btn ghost sm', type: 'button', title: 'Move up', disabled: index === 0,
+    onclick: () => { if (index > 0) { [state.rules[index - 1], state.rules[index]] = [state.rules[index], state.rules[index - 1]]; renderRules(); } } }, '↑'));
+  actions.append(el('button', { class: 'btn ghost sm', type: 'button', title: 'Move down', disabled: index === state.rules.length - 1,
+    onclick: () => { if (index < state.rules.length - 1) { [state.rules[index + 1], state.rules[index]] = [state.rules[index], state.rules[index + 1]]; renderRules(); } } }, '↓'));
+  actions.append(el('button', { class: 'btn ghost sm danger', type: 'button', title: 'Delete rule',
+    onclick: () => { state.rules.splice(index, 1); renderRules(); } }, '🗑'));
+  head.append(actions);
+  card.append(head);
+
+  const body = el('div', { class: 'rule-body' });
+
+  // description
+  const descInput = el('input', { type: 'text', value: rule.description ?? '', placeholder: 'Optional description' });
+  descInput.addEventListener('input', () => { rule.description = descInput.value; updateOutput(); });
+  body.append(el('label', { class: 'fld' }, el('span', {}, 'Description'), descInput));
+
+  body.append(el('hr'));
+
+  // condition section header + mode tabs
+  const visualOk = canUseVisual(rule);
+  if (rule.mode === 'visual' && !visualOk) rule.mode = 'raw';
+
+  const secHead = el('div', { style: 'display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap' });
+  secHead.append(el('div', {}, el('div', { class: 'section-h' }, 'When incoming requests match'),
+    el('div', { class: 'section-sub' }, 'Compose visually, or switch to Expression for raw CEL.')));
+  const tabs = el('div', { class: 'tabs' });
+  const vBtn = el('button', { type: 'button', class: rule.mode === 'visual' ? 'active' : '', disabled: !visualOk,
+    title: visualOk ? '' : 'This expression can’t be shown in the visual editor',
+    onclick: () => { if (visualOk) { reseedVisual(rule); rule.mode = 'visual'; renderRules(); } } }, 'Visual');
+  const rBtn = el('button', { type: 'button', class: rule.mode === 'raw' ? 'active' : '',
+    onclick: () => { rule.mode = 'raw'; renderRules(); } }, 'Expression');
+  tabs.append(vBtn, rBtn);
+  const clearBtn = el('button', { class: 'btn sm', type: 'button', disabled: !(rule.expression || '').trim(),
+    onclick: () => { rule.expression = ''; rule.conditions = []; rule.combinator = 'and'; if (!canUseVisual(rule)) rule.mode = 'raw'; renderRules(); } }, 'Clear');
+  secHead.append(el('div', { style: 'display:flex;gap:8px;align-items:center' }, tabs, clearBtn));
+  body.append(secHead);
+
+  if (rule.mode === 'visual') {
+    const builder = el('div', { class: 'grid2' });
+    if (rule.conditions.length >= 2) {
+      const combine = el('div', { class: 'combine' });
+      combine.append(el('span', { class: 'lbl' }, 'Match when'));
+      const ct = el('div', { class: 'tabs' });
+      ct.append(el('button', { type: 'button', class: rule.combinator === 'and' ? 'active' : '',
+        onclick: () => { rule.combinator = 'and'; syncFromVisual(rule); renderRules(); } }, 'ALL (AND)'));
+      ct.append(el('button', { type: 'button', class: rule.combinator === 'or' ? 'active' : '',
+        onclick: () => { rule.combinator = 'or'; syncFromVisual(rule); renderRules(); } }, 'ANY (OR)'));
+      combine.append(ct, el('span', { class: 'lbl' }, 'of the conditions match'));
+      builder.append(combine);
+    }
+    if (rule.conditions.length === 0) {
+      builder.append(el('p', { class: 'empty' }, 'No conditions yet. Add one to start matching requests.'));
+    } else {
+      rule.conditions.forEach((_, ci) => {
+        if (ci > 0) builder.append(el('div', { class: 'joiner' }, rule.combinator === 'or' ? 'OR' : 'AND'));
+        builder.append(renderConditionRow(rule, ci));
+      });
+    }
+    builder.append(el('div', {},
+      el('button', { class: 'btn sm', type: 'button',
+        onclick: () => { rule.conditions.push({ field: 'path', operator: 'equals', value: '' }); syncFromVisual(rule); renderRules(); } }, '+ Add condition')));
+    body.append(builder);
+  } else {
+    const ta = el('textarea', { class: 'mono', rows: '4', placeholder: 'e.g. request.path.startsWith("/admin") && request.method == "POST"' });
+    ta.value = rule.expression ?? '';
+    ta.addEventListener('input', () => { rule.expression = ta.value; updateOutput(); });
+    // reseed visual availability on blur so the Visual tab re-enables when valid
+    ta.addEventListener('blur', () => renderRules());
+    body.append(el('label', { class: 'fld' }, el('span', {}, 'Expression (CEL)'), ta));
+  }
+
+  body.append(el('hr'));
+
+  // action
+  const actHead = el('div', {}, el('div', { class: 'section-h' }, 'Then take action'),
+    el('div', { class: 'section-sub' }, 'What happens to requests that match.'));
+  body.append(actHead);
+  const actRow = el('div', { class: 'grid2 cols' });
+  actRow.append(el('label', { class: 'fld' }, el('span', {}, 'Action'),
+    selectEl(rule.action, [{ value: 'log', label: 'Log (shadow — record only)' }, { value: 'allow', label: 'Allow (short-circuit this ruleset)' }, { value: 'block', label: 'Block (terminate)' }],
+      (v) => { rule.action = v; renderRules(); })));
+  body.append(actRow);
+  if (rule.action === 'block') {
+    const blockRow = el('div', { class: 'grid2 cols' });
+    const statusInput = el('input', { type: 'number', value: rule.status ?? DEFAULT_STATUS, placeholder: String(DEFAULT_STATUS) });
+    statusInput.addEventListener('input', () => { rule.status = statusInput.value; head.querySelector('.badge'); updateOutput(); });
+    const msgInput = el('input', { type: 'text', value: rule.message ?? DEFAULT_MESSAGE, placeholder: DEFAULT_MESSAGE });
+    msgInput.addEventListener('input', () => { rule.message = msgInput.value; updateOutput(); });
+    blockRow.append(el('label', { class: 'fld' }, el('span', {}, 'Response status'), statusInput));
+    blockRow.append(el('label', { class: 'fld' }, el('span', {}, 'Response message'), msgInput));
+    body.append(blockRow);
+  }
+
+  card.append(body);
+  return card;
+}
+
+function renderRules () {
+  const container = $('#rules');
+  container.textContent = '';
+  if (state.rules.length === 0) {
+    container.append(el('p', { class: 'empty', style: 'margin:0 0 14px' }, 'No rules yet. Add a rule, or load the examples below.'));
+  } else {
+    state.rules.forEach((rule, i) => container.append(renderRuleCard(rule, i)));
+  }
+  updateOutput();
+}
+
+/* ---- output + validation ---- */
+function updateOutput () {
+  const yaml = state.wrap ? buildConfigMap(state.cfg, state.rules) : buildRulesYaml(state.rules) + '\n';
+  $('#output').textContent = yaml;
+
+  // contextual config helpers
+  const scope = state.cfg.scope;
+  $('#name-label').innerHTML = scope === 'global'
+    ? 'Name'
+    : 'Name <span class="hint">(zone id — what an ingress binds via parapet.moonrhythm.io/waf-zone)</span>';
+  $('#label-preview').textContent = 'parapet.moonrhythm.io/waf: ' + scope;
+  $('#scope-help').innerHTML = scope === 'global'
+    ? 'Global rules must live in the controller’s own namespace (<code class="k">POD_NAMESPACE</code>) and are always-on for every request. Platform-team only.'
+    : 'A zone is bound per-ingress with <code class="k">parapet.moonrhythm.io/waf-zone: ' + (escapeHtml((state.cfg.name || 'acme').trim()) || 'acme') + '</code>. Place it in the tenant’s namespace.';
+
+  // notes
+  const notes = $('#notes');
+  notes.textContent = '';
+  const add = (cls, msg) => notes.append(el('div', { class: 'note ' + cls }, msg));
+  if (!(state.cfg.name || '').trim()) add('warn', 'ConfigMap name is empty — using a placeholder. ' + (scope === 'zone' ? 'The name is the zone id.' : ''));
+  if (!(state.cfg.namespace || '').trim()) add('warn', 'Namespace is empty — defaulting to "default".');
+  const empties = state.rules.filter((r) => !(r.expression || '').trim());
+  if (empties.length) add('err', empties.length + ' rule(s) have an empty expression and will be dropped — add at least one complete condition.');
+  const ids = takenIds();
+  if (new Set(ids).size !== ids.length) add('err', 'Duplicate rule ids — each id must be unique within a ruleset.');
+  if (state.rules.length && !empties.length && new Set(ids).size === ids.length) add('ok', state.rules.length + ' rule(s) ready. Apply with: kubectl apply -f <file>.yaml');
+}
+function escapeHtml (s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+/* ============================================================================
+ * wiring
+ * ==========================================================================*/
+function loadExamples () {
+  state.cfg = { scope: 'zone', name: 'acme', namespace: 'acme-prod' };
+  $('#cfg-scope').value = 'zone';
+  $('#cfg-name').value = 'acme';
+  $('#cfg-namespace').value = 'acme-prod';
+  state.rules = [
+    { id: genId([]), description: 'allow office IP range (short-circuit the zone)', action: 'allow', status: DEFAULT_STATUS, message: DEFAULT_MESSAGE,
+      mode: 'visual', combinator: 'and', conditions: [{ field: 'remote_ip', operator: 'in_cidr', value: '203.0.113.0/24' }] },
+    { id: genId([]), description: 'block known scanners by User-Agent', action: 'block', status: 403, message: 'Forbidden',
+      mode: 'visual', combinator: 'and', conditions: [{ field: 'user_agent', operator: 'contains_any', values: 'sqlmap\nnikto\nacunetix' }] },
+    { id: genId([]), description: 'block admin paths from outside', action: 'block', status: 403, message: 'Forbidden',
+      mode: 'visual', combinator: 'and', conditions: [{ field: 'path', operator: 'starts_with', value: '/admin' }] }
+  ];
+  for (const r of state.rules) syncFromVisual(r);
+  // ensure unique ids (genId([]) could theoretically collide)
+  const seen = [];
+  for (const r of state.rules) { if (seen.includes(r.id)) r.id = genId(seen); seen.push(r.id); }
+  renderRules();
+}
+
+function init () {
+  ensureDatalists();
+  // config inputs
+  $('#cfg-scope').value = state.cfg.scope;
+  $('#cfg-name').value = state.cfg.name;
+  $('#cfg-namespace').value = state.cfg.namespace;
+  $('#cfg-scope').addEventListener('change', (e) => { state.cfg.scope = e.target.value; updateOutput(); });
+  $('#cfg-name').addEventListener('input', (e) => { state.cfg.name = e.target.value; updateOutput(); });
+  $('#cfg-namespace').addEventListener('input', (e) => { state.cfg.namespace = e.target.value; updateOutput(); });
+
+  $('#add-rule').addEventListener('click', () => { state.rules.push(newRule()); renderRules(); });
+  $('#load-examples').addEventListener('click', loadExamples);
+
+  // output wrap tabs
+  $('#wrap-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.wrap = b.dataset.wrap === '1';
+    for (const x of $('#wrap-tabs').children) x.classList.toggle('active', x === b);
+    updateOutput();
+  });
+
+  $('#copy-btn').addEventListener('click', async () => {
+    const text = $('#output').textContent;
+    try { await navigator.clipboard.writeText(text); }
+    catch { const ta = document.createElement('textarea'); ta.value = text; document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+    const c = $('#copied'); c.hidden = false; setTimeout(() => (c.hidden = true), 1600);
+  });
+  $('#download-btn').addEventListener('click', () => {
+    const name = ((state.cfg.name || '').trim() || (state.cfg.scope === 'global' ? 'waf-global' : 'waf-zone'));
+    const blob = new Blob([$('#output').textContent], { type: 'text/yaml' });
+    const a = el('a', { href: URL.createObjectURL(blob), download: name + '.yaml' });
+    document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
+  });
+
+  // start with one example-laden state so the tool is immediately legible
+  loadExamples();
+}
+init();
+</script>
+</body>
+</html>
