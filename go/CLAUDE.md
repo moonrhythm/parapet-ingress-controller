@@ -121,7 +121,7 @@ go build -o parapet-ingress-controller \
 
 All path-filtered to `go/**` so they never fire on Rust-only changes:
 - **Push & PR touching `go/**`** → `go-test.yaml`: `go vet` + `go test -race` with coverage → Codecov
-- **Push to `master`** → `go-build.yaml`: pushes two images tagged with `$GITHUB_SHA` (`:$sha` GOAMD64=v3, `:$sha-amd64v1` GOAMD64=v1). Docker build context is `go/`.
+- **Push to `main`** → `go-build.yaml`: pushes two images tagged with `$GITHUB_SHA` (`:$sha` GOAMD64=v3, `:$sha-amd64v1` GOAMD64=v1). Docker build context is `go/`.
 - **Push a tag** → `go-release.yaml`: same plus `:latest` and `:{tag}`
 - Registries: `us-docker.pkg.dev/moonrhythm-containers/gcr.io/` and `asia-southeast3-docker.pkg.dev/moonrhythm-core/public/`
 

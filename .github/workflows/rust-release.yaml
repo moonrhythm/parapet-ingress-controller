@@ -30,7 +30,7 @@ jobs:
           version: latest
           platforms: linux/amd64
       # default GOAMD64-equivalent: x86-64-v3. Reuses the rust-build cache scope
-      # so a tagged commit already built on master hits the layer cache.
+      # so a tagged commit already built on main hits the layer cache.
       - uses: docker/build-push-action@v6
         with:
           context: rust
