@@ -246,7 +246,7 @@ docker build --build-arg TARGET_CPU=x86-64-v3 -t ...:rust rust/
 
 - `.github/workflows/rust-test.yaml` — fmt + clippy + test on push/PR.
 - `.github/workflows/rust-build.yaml` — builds and pushes `rust-<sha>` images
-  on `master`.
+  on `main`.
 - `.github/workflows/rust-release.yaml` — on a tag push, builds and pushes
   `rust-<tag>` and `rust-latest` (plus the `-amd64v1` compatibility variants).
 

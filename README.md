@@ -1,8 +1,8 @@
 # parapet-ingress-controller
 
-[![Go Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml/badge.svg?branch=master)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml)
-[![Rust Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/rust-test.yaml/badge.svg?branch=master)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/rust-test.yaml)
-[![codecov](https://codecov.io/gh/moonrhythm/parapet-ingress-controller/branch/master/graph/badge.svg)](https://codecov.io/gh/moonrhythm/parapet-ingress-controller)
+[![Go Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml/badge.svg?branch=main)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml)
+[![Rust Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/rust-test.yaml/badge.svg?branch=main)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/rust-test.yaml)
+[![codecov](https://codecov.io/gh/moonrhythm/parapet-ingress-controller/branch/main/graph/badge.svg)](https://codecov.io/gh/moonrhythm/parapet-ingress-controller)
 [![Go Report Card](https://goreportcard.com/badge/github.com/moonrhythm/parapet-ingress-controller)](https://goreportcard.com/report/github.com/moonrhythm/parapet-ingress-controller)
 
 A Kubernetes ingress controller. The page you're reading is the **usage**
@@ -26,7 +26,7 @@ Pick per deployment; they're interchangeable behind the same contract.
 
 ## Deploy
 
-See deploy config at [deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/master/deploy)
+See deploy config at [deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/main/deploy)
 directory.
 
 ## Usage
@@ -84,7 +84,7 @@ both implementations track); the Go plugins live in [`go/plugin`](go/plugin).
 ## Configuration
 
 The controller is configured through environment variables (see the
-[deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/master/deploy)
+[deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/main/deploy)
 manifests for the full set). Notable options:
 
 - `INGRESS_CLASS` (default `parapet`) — the `ingressClassName` to handle.
@@ -105,7 +105,7 @@ design and the complete CEL reference: [WAF.md](WAF.md).
 
 Set `WAF_ENABLED=true` on the controller (off by default; when off the WAF does no
 work). The controller's ServiceAccount needs `list`/`watch` on `configmaps` —
-already in the [deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/master/deploy)
+already in the [deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/main/deploy)
 role manifests.
 
 ### Write rules
