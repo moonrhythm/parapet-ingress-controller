@@ -259,7 +259,12 @@ pub struct Ctx {
     meta: RouteMeta,
     pattern: String,
     skip_log: bool,
-    // host concurrency
+    // host concurrency — host + country slots acquired in `request_filter`.
+    // Cleared in `response_filter` (i.e. when upstream response headers arrive),
+    // matching Go's `ReleaseOnWriteHeader` + `ReleaseOnHijacked` so that
+    // long-lived streaming responses (SSE `text/event-stream`, WebSocket-style
+    // 101 upgrades) don't hold a slot for the entire stream lifetime. Any
+    // guards still alive at end-of-request release on `Ctx` drop.
     limit_guards: Vec<Guard>,
     host_active: Option<(String, &'static str)>,
     // forward-auth response headers to copy upstream
@@ -610,6 +615,14 @@ impl ProxyHttp for Proxy {
         upstream_response: &mut ResponseHeader,
         ctx: &mut Ctx,
     ) -> Result<()> {
+        // Release host/country concurrency slots as soon as upstream response
+        // headers arrive. Matches Go's `ReleaseOnWriteHeader` + `ReleaseOnHijacked`
+        // (101 Switching Protocols hits this hook too): the cap exists to shed
+        // load while upstreams are unresponsive, not to count long-lived streams
+        // (SSE, WebSocket, long-poll) which would otherwise pin a slot for the
+        // whole stream lifetime.
+        ctx.limit_guards.clear();
+
         // Server-Sent Events: Pingora's compressor treats text/event-stream as
         // compressible (it matches the `text/*` allowlist) and buffers it instead
         // of flushing per event, which stalls the stream in the browser. Disable
