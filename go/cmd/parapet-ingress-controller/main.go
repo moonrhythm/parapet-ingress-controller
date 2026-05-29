@@ -81,7 +81,9 @@ func main() {
 			default:
 				slog.Info("waf: geoip database loaded", "path", path)
 				wafConfig.Country = func(r *http.Request) string {
-					if cc := db.Country(geoip.ClientIP(r)); cc != "" {
+					// CountryCached memoizes by client IP so repeat IPs skip the
+					// mmdb lookup; semantics are identical to db.Country.
+					if cc := db.CountryCached(geoip.ClientIP(r)); cc != "" {
 						return cc
 					}
 					return "XX" // DB loaded but IP unresolved
@@ -101,7 +103,10 @@ func main() {
 			default:
 				slog.Info("waf: asn database loaded", "path", path)
 				wafConfig.ASN = func(r *http.Request) int64 {
-					return db.ASN(geoip.ClientIP(r))
+					// ASNCached memoizes by client IP so repeat IPs skip the mmdb
+					// lookup and the per-call strconv.ParseInt; semantics are
+					// identical to db.ASN.
+					return db.ASNCached(geoip.ClientIP(r))
 				}
 			}
 		}
