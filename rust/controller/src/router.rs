@@ -48,7 +48,13 @@ impl<T> Router<T> {
     }
 
     pub fn lookup(&self, host: &str, path: &str) -> Match<'_, T> {
-        let full = format!("{host}{path}");
+        // Single pre-sized allocation for the combined `host + path` key. The
+        // common (matched) path costs exactly this one String; the rare
+        // redirect branch below reuses this same buffer instead of formatting
+        // fresh keys.
+        let mut full = String::with_capacity(host.len() + path.len() + 1);
+        full.push_str(host);
+        full.push_str(path);
 
         // 1. host-specific
         if let Some(v) = self.match_prefixed(&full) {
@@ -58,12 +64,18 @@ impl<T> Router<T> {
         if let Some(v) = self.match_prefixed(path) {
             return Match::Found(v);
         }
-        // 3. trailing-slash redirect
-        if !path.ends_with('/')
-            && (self.map.contains_key(&format!("{full}/"))
-                || self.map.contains_key(&format!("{path}/")))
-        {
-            return Match::Redirect(format!("{path}/"));
+        // 3. trailing-slash redirect. Reuse `full` for the "{full}/" probe (the
+        // capacity above reserved the extra '/'), and slice it for "{path}/"
+        // rather than allocating new keys.
+        if !path.ends_with('/') {
+            full.push('/');
+            let host_slash_matches = self.map.contains_key(&full);
+            // `full` is `host + path + "/"`; the `path + "/"` suffix is the
+            // trailing `path.len() + 1` bytes — a borrow, no allocation.
+            let path_slash = &full[host.len()..];
+            if host_slash_matches || self.map.contains_key(path_slash) {
+                return Match::Redirect(path_slash.to_string());
+            }
         }
         // 4.
         Match::NotFound
