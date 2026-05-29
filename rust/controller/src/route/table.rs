@@ -9,10 +9,19 @@ use super::rrlb::Rrlb;
 ///
 /// - `host_routes`: `service.ns.svc.cluster.local` -> round-robin pod IPs
 /// - `port_routes`: `service.ns.svc.cluster.local:servicePort` -> pod targetPort
+///
+/// Both maps live behind a single `RwLock` so a `lookup` takes one read lock and
+/// observes a consistent (host, port) snapshot — matching `route/table.go`, which
+/// reads both maps under one lock.
+#[derive(Default)]
+struct Data {
+    host_routes: HashMap<String, Rrlb>,
+    port_routes: HashMap<String, String>,
+}
+
 #[derive(Default)]
 pub struct Table {
-    host_routes: RwLock<HashMap<String, Rrlb>>,
-    port_routes: RwLock<HashMap<String, String>>,
+    data: RwLock<Data>,
     bad: BadAddrs,
 }
 
@@ -27,22 +36,19 @@ impl Table {
         let i = addr.rfind(':')?; // invalid format -> None
         let host = &addr[..i];
 
-        let target_port = {
-            let ports = self.port_routes.read().unwrap();
-            ports.get(addr)?.clone()
-        };
-
-        let hosts = self.host_routes.read().unwrap();
-        let ip = hosts.get(host)?.get(Some(&self.bad))?;
+        // single read lock: observe host_routes + port_routes as one consistent snapshot
+        let data = self.data.read().unwrap();
+        let target_port = data.port_routes.get(addr)?;
+        let ip = data.host_routes.get(host)?.get(Some(&self.bad))?;
         Some(format!("{ip}:{target_port}"))
     }
 
     pub fn set_host_routes(&self, routes: HashMap<String, Rrlb>) {
-        *self.host_routes.write().unwrap() = routes;
+        self.data.write().unwrap().host_routes = routes;
     }
 
     pub fn set_host_route(&self, host: &str, lb: Option<Rrlb>) {
-        let mut hosts = self.host_routes.write().unwrap();
+        let hosts = &mut self.data.write().unwrap().host_routes;
         match lb {
             Some(lb) => {
                 hosts.insert(host.to_string(), lb);
@@ -54,7 +60,7 @@ impl Table {
     }
 
     pub fn set_port_routes(&self, routes: HashMap<String, String>) {
-        *self.port_routes.write().unwrap() = routes;
+        self.data.write().unwrap().port_routes = routes;
     }
 
     pub fn mark_bad(&self, addr: &str) {
@@ -171,6 +177,19 @@ mod tests {
         assert_eq!(
             tb.lookup("about.service.svc.cluster.local:8000").as_deref(),
             Some("192.168.3.2:9003")
+        );
+    }
+
+    #[test]
+    fn lookup_reads_consistent_host_and_port() {
+        // a single lookup must see the host_routes IP and port_routes target_port
+        // from the same snapshot, joined into one ip:port result.
+        assert_eq!(
+            fixture()
+                .lookup("payment.service.svc.cluster.local:8000")
+                .as_deref(),
+            // first round-robin pick over a 2-IP set is index 1 (pre-increment)
+            Some("192.168.2.2:9002")
         );
     }
 }
