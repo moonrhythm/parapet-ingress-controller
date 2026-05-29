@@ -120,7 +120,7 @@ func (ctrl *Controller) watchConfigMaps(ctx context.Context) {
 	watchResource(ctx, ctrl.watchNamespace, "configmaps", watchFn,
 		&ctrl.watchedConfigMaps,
 		func(_ *v1.ConfigMap) { ctrl.reloadWAF() },
-		ctrl.reloadWAF,
+		func(_ *v1.ConfigMap) { ctrl.reloadWAF() },
 	)
 }
 

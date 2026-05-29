@@ -62,4 +62,99 @@ func TestTable(t *testing.T) {
 		res = tb.Lookup("about.service.svc.cluster.local:8000")
 		assert.Equal(t, "192.168.3.2:9003", res)
 	})
+
+	t.Run("SetHostRoute nil deletes", func(t *testing.T) {
+		tb.SetHostRoute("about.service.svc.cluster.local", &RRLB{IPs: []string{"192.168.3.9"}})
+		assert.Equal(t, "192.168.3.9:9003", tb.Lookup("about.service.svc.cluster.local:8000"))
+
+		// passing nil removes just that host; the lookup now misses
+		tb.SetHostRoute("about.service.svc.cluster.local", nil)
+		assert.Empty(t, tb.Lookup("about.service.svc.cluster.local:8000"))
+	})
+}
+
+// hostIPs reads back the IP set the table currently holds for each host so two
+// tables built different ways can be compared for equality.
+func hostIPs(t *Table) map[string][]string {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	out := make(map[string][]string, len(t.addrToTargetHost))
+	for host, lb := range t.addrToTargetHost {
+		out[host] = lb.IPs
+	}
+	return out
+}
+
+// TestTableIncrementalMatchesRebuild proves that driving the host table with
+// per-host SetHostRoute calls (the watch-event path) lands in exactly the same
+// state a full SetHostRoutes rebuild (the initial-sync path) would produce, for
+// adding a host, changing a host's IPs, deleting a host, and a no-op re-set.
+func TestTableIncrementalMatchesRebuild(t *testing.T) {
+	t.Parallel()
+
+	type set map[string][]string
+
+	// the sequence of desired states the table passes through
+	states := []set{
+		// initial set
+		{
+			"a.default.svc.cluster.local": {"10.0.0.1"},
+			"b.default.svc.cluster.local": {"10.0.1.1", "10.0.1.2"},
+		},
+		// add a host (c)
+		{
+			"a.default.svc.cluster.local": {"10.0.0.1"},
+			"b.default.svc.cluster.local": {"10.0.1.1", "10.0.1.2"},
+			"c.default.svc.cluster.local": {"10.0.2.1"},
+		},
+		// change a host's IPs (b scaled / pods replaced)
+		{
+			"a.default.svc.cluster.local": {"10.0.0.1"},
+			"b.default.svc.cluster.local": {"10.0.1.3"},
+			"c.default.svc.cluster.local": {"10.0.2.1"},
+		},
+		// no-op: identical to the previous state
+		{
+			"a.default.svc.cluster.local": {"10.0.0.1"},
+			"b.default.svc.cluster.local": {"10.0.1.3"},
+			"c.default.svc.cluster.local": {"10.0.2.1"},
+		},
+		// delete a host (c removed)
+		{
+			"a.default.svc.cluster.local": {"10.0.0.1"},
+			"b.default.svc.cluster.local": {"10.0.1.3"},
+		},
+	}
+
+	toRoutes := func(s set) map[string]*RRLB {
+		m := make(map[string]*RRLB, len(s))
+		for host, ips := range s {
+			m[host] = &RRLB{IPs: ips}
+		}
+		return m
+	}
+
+	// incremental: seed with the first state, then apply each subsequent state
+	// as per-host upserts/deletes, mirroring reloadSingleEndpoint /
+	// deleteSingleEndpoint.
+	var incr Table
+	incr.SetHostRoutes(toRoutes(states[0]))
+	for i := 1; i < len(states); i++ {
+		prev, cur := states[i-1], states[i]
+		for host, ips := range cur { // upserts
+			incr.SetHostRoute(host, &RRLB{IPs: ips})
+		}
+		for host := range prev { // deletes
+			if _, ok := cur[host]; !ok {
+				incr.SetHostRoute(host, nil)
+			}
+		}
+
+		// a full rebuild of the same desired state must match the incremental one
+		var full Table
+		full.SetHostRoutes(toRoutes(cur))
+
+		assert.Equal(t, hostIPs(&full), hostIPs(&incr),
+			"incremental state diverged from full rebuild at step %d", i)
+	}
 }
