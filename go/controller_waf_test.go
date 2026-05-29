@@ -128,6 +128,157 @@ rules:
 	assert.Equal(t, []string{"ok"}, zone.Rules(), "bad edit must not drop the live ruleset")
 }
 
+func TestReloadWAF_UnchangedZoneReusesInstance(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newWAFController()
+
+	const acmeRules = `
+rules:
+  - id: block-admin
+    expression: request.path.startsWith("/admin")
+    action: block
+`
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, acmeRules))
+	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", wafRoleZone, `
+rules:
+  - id: block-x
+    expression: request.path.startsWith("/x")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+
+	acme1 := ctrl.LookupZone("cust1/acme")
+	beta1 := ctrl.LookupZone("cust2/beta")
+	require.NotNil(t, acme1)
+	require.NotNil(t, beta1)
+
+	// Reload again with byte-for-byte identical ConfigMaps: every zone's compiled
+	// instance must be reused (same pointer), i.e. no recompile happened.
+	ctrl.reloadWAFDebounced()
+	assert.Same(t, acme1, ctrl.LookupZone("cust1/acme"),
+		"unchanged zone reuses its compiled instance across reloads")
+	assert.Same(t, beta1, ctrl.LookupZone("cust2/beta"),
+		"unchanged zone reuses its compiled instance across reloads")
+
+	// A reload triggered by an unrelated zone change must still reuse the
+	// untouched zone's instance.
+	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", wafRoleZone, `
+rules:
+  - id: block-y
+    expression: request.path.startsWith("/y")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	assert.Same(t, acme1, ctrl.LookupZone("cust1/acme"),
+		"a sibling zone's edit must not recompile an unchanged zone")
+	assert.Equal(t, []string{"block-y"}, ctrl.LookupZone("cust2/beta").Rules(),
+		"the edited zone is recompiled")
+}
+
+func TestReloadWAF_ChangedZoneRebuilt(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newWAFController()
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+rules:
+  - id: block-admin
+    expression: request.path.startsWith("/admin")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	require.Equal(t, []string{"block-admin"}, ctrl.LookupZone("cust1/acme").Rules())
+
+	// Change the rule input -> recompiled, new ruleset live (same reused instance).
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+rules:
+  - id: block-api
+    expression: request.path.startsWith("/api")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	assert.Equal(t, []string{"block-api"}, ctrl.LookupZone("cust1/acme").Rules(),
+		"changed zone is recompiled to the new ruleset")
+}
+
+func TestReloadWAF_AddRemoveZones(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newWAFController()
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+rules:
+  - id: block-admin
+    expression: request.path.startsWith("/admin")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	acme1 := ctrl.LookupZone("cust1/acme")
+	require.NotNil(t, acme1)
+
+	// Add a second zone; the first must remain (and reuse its instance).
+	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", wafRoleZone, `
+rules:
+  - id: block-x
+    expression: request.path.startsWith("/x")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	assert.Same(t, acme1, ctrl.LookupZone("cust1/acme"), "existing zone survives an add")
+	require.NotNil(t, ctrl.LookupZone("cust2/beta"), "added zone is compiled")
+
+	// Remove the first zone; it must drop out of the registry.
+	ctrl.watchedConfigMaps.Delete("cust1/acme")
+	ctrl.reloadWAFDebounced()
+	assert.Nil(t, ctrl.LookupZone("cust1/acme"), "removed zone drops from the registry")
+	require.NotNil(t, ctrl.LookupZone("cust2/beta"), "untouched zone remains")
+
+	// Re-add the first zone with the original rules; it gets a fresh instance and
+	// must be recompiled (its prior fingerprint was dropped with it).
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+rules:
+  - id: block-admin
+    expression: request.path.startsWith("/admin")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	readd := ctrl.LookupZone("cust1/acme")
+	require.NotNil(t, readd)
+	assert.NotSame(t, acme1, readd, "a re-added zone is a fresh compiled instance")
+	assert.Equal(t, []string{"block-admin"}, readd.Rules())
+}
+
+func TestReloadWAF_GlobalReusedAndRebuilt(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newWAFController()
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+rules:
+  - id: block-scanners
+    expression: request.user_agent.contains("sqlmap")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	require.Equal(t, []string{"block-scanners"}, ctrl.globalWAF.Rules())
+	fp1 := ctrl.globalWAFFingerprint
+	require.NotEmpty(t, fp1)
+
+	// Unchanged global input: fingerprint stays put (no recompile path taken).
+	ctrl.reloadWAFDebounced()
+	assert.Equal(t, fp1, ctrl.globalWAFFingerprint, "unchanged global input is not recompiled")
+	assert.Equal(t, []string{"block-scanners"}, ctrl.globalWAF.Rules())
+
+	// Changed global input: recompiled, fingerprint advances.
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+rules:
+  - id: block-bots
+    expression: request.user_agent.contains("bot")
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	assert.NotEqual(t, fp1, ctrl.globalWAFFingerprint, "changed global input advances the fingerprint")
+	assert.Equal(t, []string{"block-bots"}, ctrl.globalWAF.Rules())
+}
+
 func TestReloadWAF_DisabledIsNoop(t *testing.T) {
 	t.Parallel()
 

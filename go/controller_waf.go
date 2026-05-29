@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -54,6 +56,7 @@ func (ctrl *Controller) InitWAF() {
 	ctrl.globalWAF = ctrl.newWAF(wafRoleGlobal)
 	empty := map[string]*waf.WAF{}
 	ctrl.zones.Store(&empty)
+	ctrl.zoneFingerprints = map[string]string{}
 }
 
 // GlobalWAF returns the global WAF middleware to mount in the server chain, or
@@ -163,32 +166,81 @@ func (ctrl *Controller) reloadWAFDebounced() {
 		return true
 	})
 
-	// global
-	if rules, err := wafrule.Parse(globalDocs...); err != nil {
-		slog.Error("waf: invalid global ruleset, keeping previous", "error", err)
-	} else if err := ctrl.globalWAF.SetRules(rules); err != nil {
-		slog.Error("waf: global ruleset rejected, keeping previous", "error", err)
+	// global: recompile only when the rule input changed. The fingerprint is over
+	// the exact (sorted, deterministic) docs that feed SetRules, so an identical
+	// input skips the CEL compile and leaves the live ruleset untouched.
+	globalFP := fingerprintDocs(globalDocs)
+	if globalFP != ctrl.globalWAFFingerprint {
+		if rules, err := wafrule.Parse(globalDocs...); err != nil {
+			slog.Error("waf: invalid global ruleset, keeping previous", "error", err)
+		} else if err := ctrl.globalWAF.SetRules(rules); err != nil {
+			slog.Error("waf: global ruleset rejected, keeping previous", "error", err)
+		} else {
+			// Only advance the fingerprint once the new input compiled cleanly, so a
+			// rejected edit is retried (not skipped) on the next reload.
+			ctrl.globalWAFFingerprint = globalFP
+		}
 	}
 
-	// zones: reuse the existing *waf.WAF per zone so a bad edit keeps that zone's
-	// last-good ruleset (SetRules is all-or-nothing on the same instance).
+	// zones: reuse the existing *waf.WAF per zone. An unchanged zone keeps its
+	// compiled instance with no recompile (fingerprint match); a changed zone is
+	// rebuilt via SetRules on the same instance, which is all-or-nothing so a bad
+	// edit keeps that zone's last-good ruleset. Zones absent from zoneDocs are
+	// dropped, new zones get a fresh instance — the post-reload registry is
+	// identical to a full rebuild.
 	cur := ctrl.zones.Load()
 	newZones := make(map[string]*waf.WAF, len(zoneDocs))
+	newFingerprints := make(map[string]string, len(zoneDocs))
 	for key, docs := range zoneDocs {
-		w := ctrl.newWAF(wafRoleZone)
+		fp := fingerprintDocs(docs)
+		var w *waf.WAF
+		reused := false
 		if cur != nil {
 			if existing, ok := (*cur)[key]; ok {
 				w = existing
+				reused = true
 			}
+		}
+		// Skip the recompile only when we are reusing an instance whose loaded
+		// input fingerprint matches; a new/changed zone compiles below.
+		if reused && fp == ctrl.zoneFingerprints[key] {
+			newZones[key] = w
+			newFingerprints[key] = fp
+			continue
+		}
+		if !reused {
+			w = ctrl.newWAF(wafRoleZone)
 		}
 		if rules, err := wafrule.Parse(docs...); err != nil {
 			slog.Error("waf: invalid zone ruleset, keeping previous", "zone", key, "error", err)
+			// keep the prior fingerprint (if any) so the bad input is retried.
+			newFingerprints[key] = ctrl.zoneFingerprints[key]
 		} else if err := w.SetRules(rules); err != nil {
 			slog.Error("waf: zone ruleset rejected, keeping previous", "zone", key, "error", err)
+			newFingerprints[key] = ctrl.zoneFingerprints[key]
+		} else {
+			newFingerprints[key] = fp
 		}
 		newZones[key] = w
 	}
 	ctrl.zones.Store(&newZones)
+	ctrl.zoneFingerprints = newFingerprints
+}
+
+// fingerprintDocs returns a content fingerprint of the rule documents that feed
+// a single WAF. Callers pass the already-sorted, deterministic doc slice
+// (sortedDataValues), so equal effective input yields an equal fingerprint
+// regardless of ConfigMap map iteration order. The length prefix per doc keeps
+// concatenation unambiguous (so ["a","bc"] and ["ab","c"] differ).
+func fingerprintDocs(docs []string) string {
+	h := sha256.New()
+	var lenbuf [8]byte
+	for _, d := range docs {
+		binary.LittleEndian.PutUint64(lenbuf[:], uint64(len(d)))
+		h.Write(lenbuf[:])
+		h.Write([]byte(d))
+	}
+	return string(h.Sum(nil))
 }
 
 // sortedDataValues returns the ConfigMap data values ordered by key, so rule
