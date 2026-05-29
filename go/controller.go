@@ -73,6 +73,13 @@ type Controller struct {
 	globalWAF *waf.WAF
 	zones     atomic.Pointer[map[string]*waf.WAF]
 
+	// WAF rule-input fingerprints from the last reload, used to skip recompiling
+	// CEL rulesets whose effective input (the sorted concatenated rule YAML) is
+	// byte-for-byte unchanged. Only ever read/written from reloadWAFDebounced,
+	// which the debounce serializes, so they need no lock.
+	globalWAFFingerprint string
+	zoneFingerprints     map[string]string
+
 	// holds current k8s state
 	watchedIngresses  sync.Map
 	watchedServices   sync.Map
