@@ -162,6 +162,7 @@ impl Proxy {
         session: &Session,
         host: &str,
         method: &str,
+        ctx: &Ctx,
     ) -> crate::waf::RequestData {
         use std::collections::HashMap;
         let req = session.req_header();
@@ -184,12 +185,12 @@ impl Proxy {
         let remote_ip = header_str(session, "x-real-ip")
             .unwrap_or_default()
             .to_string();
-        // GeoIP: resolve the client IP once to a country for request.country ("" when
-        // GeoIP is off, "XX" when the DB can't place the IP) and an AS number for
-        // request.asn (0 when off or unplaceable). IpAddr is Copy.
-        let client_ip = remote_ip.parse().ok();
-        let country = self.shared.waf.country_of(client_ip);
-        let asn = self.shared.waf.asn_of(client_ip);
+        // GeoIP: reuse the single per-request lookup done in `request_filter`
+        // (cached on Ctx) instead of resolving the client IP again. `country` is
+        // "" when GeoIP is off, "XX" when the DB can't place the IP; `asn` is 0
+        // when off or unplaceable — exactly the `country_of` / `asn_of` mapping.
+        let country = ctx.geo_country.clone().unwrap_or_default();
+        let asn = ctx.geo_asn.unwrap_or(0);
         let content_length = content_length(session).map(|c| c as i64).unwrap_or(-1);
 
         let mut headers = HashMap::new();
@@ -256,6 +257,13 @@ pub struct Ctx {
     remote_ip: String,
     real_ip: String,
     forwarded_for: String,
+    // GeoIP resolved once per request from the (trust-handled) client IP, then
+    // shared by X-Forwarded-Country/ASN header injection and every WAF eval so
+    // the IP is looked up once, not per consumer. `Some` mirrors the
+    // `forwarded_country`/`forwarded_asn` "DB loaded" gating (`None` => DB off,
+    // header left untouched); WAF reads them as `unwrap_or_default()`/`(0)`.
+    geo_country: Option<String>,
+    geo_asn: Option<i64>,
     meta: RouteMeta,
     pattern: String,
     skip_log: bool,
@@ -297,17 +305,24 @@ impl ProxyHttp for Proxy {
         // trust-proxy / X-Forwarded-* (parapet proxy middleware)
         self.apply_forwarded_headers(session, remote_ip, scheme);
 
-        // X-Forwarded-Country / X-Forwarded-ASN: hand the upstream the GeoIP result
-        // for the same client IP the WAF uses (x-real-ip after trust handling). Each
-        // header is set only when its DB is loaded, overwriting any client-supplied
-        // value so it can't be spoofed; an unplaceable IP yields "XX" / 0.
-        let client_ip = header_str(session, "x-real-ip").and_then(|s| s.parse::<IpAddr>().ok());
-        if let Some(cc) = self.shared.waf.forwarded_country(client_ip) {
+        // GeoIP: resolve the client IP (x-real-ip after trust handling) exactly
+        // once per request, then reuse the result for both X-Forwarded-* header
+        // injection and every WAF eval (see `build_waf_request`). Each `Some`
+        // means the corresponding DB is loaded — the ISO code / AS number, or
+        // "XX" / 0 for an unplaceable IP; `None` means the DB is off.
+        let geo_ip = header_str(session, "x-real-ip").and_then(|s| s.parse::<IpAddr>().ok());
+        ctx.geo_country = self.shared.waf.forwarded_country(geo_ip);
+        ctx.geo_asn = self.shared.waf.forwarded_asn(geo_ip);
+
+        // X-Forwarded-Country / X-Forwarded-ASN: hand the upstream the GeoIP
+        // result. Each header is set only when its DB is loaded, overwriting any
+        // client-supplied value so it can't be spoofed.
+        if let Some(cc) = &ctx.geo_country {
             let _ = session
                 .req_header_mut()
-                .insert_header("x-forwarded-country", cc);
+                .insert_header("x-forwarded-country", cc.clone());
         }
-        if let Some(asn) = self.shared.waf.forwarded_asn(client_ip) {
+        if let Some(asn) = ctx.geo_asn {
             let _ = session
                 .req_header_mut()
                 .insert_header("x-forwarded-asn", asn.to_string());
@@ -424,7 +439,7 @@ impl ProxyHttp for Proxy {
         // platform block here can't be overridden by a tenant zone. Skipped when
         // disabled or no global rules are loaded (no per-request map built).
         if self.waf_enabled && self.shared.waf.global_has_rules() {
-            let req = self.build_waf_request(session, &host, &ctx.method);
+            let req = self.build_waf_request(session, &host, &ctx.method, ctx);
             let decision = self.shared.waf.evaluate_global(&req, |id, action| {
                 metrics::waf_match_inc(id, action.as_str(), "global")
             });
@@ -786,7 +801,7 @@ impl Proxy {
                 .and_then(|raw| resolve_zone_key(&ctx.meta.ingress_namespace, raw))
             {
                 if let Some(zone) = self.shared.waf.zone(&key) {
-                    let req = self.build_waf_request(session, host, &ctx.method);
+                    let req = self.build_waf_request(session, host, &ctx.method, ctx);
                     let decision = self.shared.waf.evaluate_zone(&zone, &req, |id, action| {
                         metrics::waf_match_inc(id, action.as_str(), "zone")
                     });
