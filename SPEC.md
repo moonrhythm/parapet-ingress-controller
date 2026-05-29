@@ -56,6 +56,7 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 | `basic-auth` | `user:pass` | HTTP Basic Auth |
 | `forward-auth` | YAML (`url`, `authRequestHeaders`, `authResponseHeaders`) | Delegate auth to an external service |
 | `waf-zone` | zone id, or `ns/id` | Bind the Ingress to a WAF zone (see [WAF.md](WAF.md)) |
+| `operations-trace` / `-project` / `-sampler` | `"true"` / project id / float ratio | **Go-only** Cloud Trace (no Rust SDK; see Profiler/Trace divergence) |
 
 ### Per-request order
 
@@ -101,6 +102,8 @@ untouched.
 | `HTTP_PORT` | `80` | both | HTTP (+ h2c) listener port |
 | `HTTPS_PORT` | `443` | both | TLS port; **empty** = HTTP-only; unset = 443 |
 | `INGRESS_CLASS` | `parapet` | both | IngressClassName to handle |
+| `KUBERNETES_BACKEND` | cluster | both | Source of K8s objects: in-cluster watch (default) or `fs` (one-shot load of static manifests, no watch — local dev/smoke tests). **Go-only** also accepts `local` (kubectl proxy at `127.0.0.1:8001`) |
+| `KUBERNETES_FS` | — | both | Directory of static manifests; **required** when `KUBERNETES_BACKEND=fs` |
 | `WATCH_NAMESPACE` | `""` (all) | both | Restrict the watch to one namespace |
 | `POD_NAMESPACE` | `""` | both | Controller's namespace (bounds global WAF rules) |
 | `LOAD_ALL_CERTS` | `false` | both | Index every TLS secret, not just `spec.tls`-referenced |
@@ -146,6 +149,12 @@ the metric exists in both.
 
 Host and HTTP-method labels are collapsed to `other` for values the router
 doesn't serve, to bound cardinality under a flood.
+
+The byte counters (`parapet_backend_network_*_bytes`, `parapet_network_*_bytes`)
+share names but **not magnitudes**: Go wraps the `net.Conn` so it counts wire
+bytes (headers + TLS framing included); Rust counts only body bytes seen in the
+filter phases (headers/framing excluded). Treat them as comparable in *shape*,
+not absolute value.
 
 ## Intentional Go↔Rust divergences
 
