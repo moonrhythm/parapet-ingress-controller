@@ -277,6 +277,11 @@ pub struct Ctx {
     host_active: Option<(String, &'static str)>,
     // forward-auth response headers to copy upstream
     auth_response_headers: Vec<(String, String)>,
+    // WAF request data, built lazily on the first eval that runs (global or
+    // zone) and reused by the other so the ~15 string allocs + header map +
+    // query parse happen at most once per request. Stays `None` when no WAF
+    // eval runs, preserving the no-rules short-circuit.
+    waf_request: Option<crate::waf::RequestData>,
 }
 
 enum Decision {
@@ -439,8 +444,9 @@ impl ProxyHttp for Proxy {
         // platform block here can't be overridden by a tenant zone. Skipped when
         // disabled or no global rules are loaded (no per-request map built).
         if self.waf_enabled && self.shared.waf.global_has_rules() {
-            let req = self.build_waf_request(session, &host, &ctx.method, ctx);
-            let decision = self.shared.waf.evaluate_global(&req, |id, action| {
+            let built = self.build_waf_request(session, &host, &ctx.method, ctx);
+            let req = ctx.waf_request.insert(built);
+            let decision = self.shared.waf.evaluate_global(req, |id, action| {
                 metrics::waf_match_inc(id, action.as_str(), "global")
             });
             if let WafDecision::Block { status, message } = decision {
@@ -801,8 +807,15 @@ impl Proxy {
                 .and_then(|raw| resolve_zone_key(&ctx.meta.ingress_namespace, raw))
             {
                 if let Some(zone) = self.shared.waf.zone(&key) {
-                    let req = self.build_waf_request(session, host, &ctx.method, ctx);
-                    let decision = self.shared.waf.evaluate_zone(&zone, &req, |id, action| {
+                    // Reuse the request data the global eval already built; only
+                    // build it here when the global WAF was disabled or had no
+                    // rules (so it never ran and the cache is still empty).
+                    if ctx.waf_request.is_none() {
+                        let built = self.build_waf_request(session, host, &ctx.method, ctx);
+                        ctx.waf_request = Some(built);
+                    }
+                    let req = ctx.waf_request.as_ref().unwrap();
+                    let decision = self.shared.waf.evaluate_zone(&zone, req, |id, action| {
                         metrics::waf_match_inc(id, action.as_str(), "zone")
                     });
                     if let WafDecision::Block { status, message } = decision {
