@@ -16,9 +16,9 @@ const cacheCap = 16384
 // resultCache is a tiny, bounded, concurrency-safe memo from a client-IP string
 // to a GeoIP lookup result of type V (a country string or an int64 ASN). It is
 // deliberately not a true LRU: GeoIP results are stable and cheap, so when the
-// map grows past cacheCap we simply clear it and start a fresh generation. That
-// keeps the hot path a single map read under an RWMutex with no per-entry
-// bookkeeping, and bounds memory at roughly cacheCap entries.
+// map grows past cacheCap we simply clear it in place and start a fresh
+// generation. That keeps the hot path a single map read under an RWMutex with no
+// per-entry bookkeeping, and bounds memory at roughly cacheCap entries.
 //
 // Negative results (an unplaceable IP -> "XX" or 0) are cached too: that matches
 // the underlying lookup's semantics exactly (it always returns a value, never an
@@ -35,8 +35,8 @@ func newResultCache[V any]() *resultCache[V] {
 // get returns the memoized result for key, computing it via compute on a miss.
 // compute is the existing uncached lookup; its output is stored verbatim, so the
 // cache is fully transparent (same value for every key as calling compute would
-// give). On a miss that would push the map past cacheCap, the map is cleared
-// before inserting, bounding it at cacheCap+1 entries momentarily and then
+// give). On a miss that would push the map past cacheCap, the map is cleared in
+// place before inserting, bounding it at cacheCap+1 entries momentarily and then
 // starting a fresh generation.
 func (c *resultCache[V]) get(key string, compute func() V) V {
 	c.mu.RLock()
@@ -54,7 +54,10 @@ func (c *resultCache[V]) get(key string, compute func() V) V {
 	if len(c.m) >= cacheCap {
 		// Bounded "clear when full": drop the whole generation rather than do
 		// per-entry eviction. Cheap, and GeoIP results are cheap to recompute.
-		c.m = make(map[string]V)
+		// clear() empties in place and keeps the backing array (already sized for
+		// cacheCap), so the next generation refills with no map regrowth/rehash;
+		// the retained capacity is bounded by cacheCap, the memory cap we accept.
+		clear(c.m)
 	}
 	c.m[key] = v
 	c.mu.Unlock()
