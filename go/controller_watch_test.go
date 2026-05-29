@@ -30,7 +30,7 @@ func TestWatchResource(t *testing.T) {
 		func(context.Context, string) (watch.Interface, error) { return w, nil },
 		&store,
 		func(_ *v1.Service) { upserts.Add(1) },
-		func() { deletes.Add(1) },
+		func(_ *v1.Service) { deletes.Add(1) },
 	)
 
 	svc := &v1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "web"}}

@@ -88,11 +88,10 @@ type Controller struct {
 	plugins []plugin.Plugin
 	health  *healthz.Healthz
 
-	reloadIngressDebounce  *debounce.Debounce
-	reloadServiceDebounce  *debounce.Debounce
-	reloadSecretDebounce   *debounce.Debounce
-	reloadEndpointDebounce *debounce.Debounce
-	reloadWAFDebounce      *debounce.Debounce
+	reloadIngressDebounce *debounce.Debounce
+	reloadServiceDebounce *debounce.Debounce
+	reloadSecretDebounce  *debounce.Debounce
+	reloadWAFDebounce     *debounce.Debounce
 }
 
 // New creates new ingress controller
@@ -104,7 +103,6 @@ func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl.reloadIngressDebounce = debounce.New(ctrl.reloadIngressDebounced, 300*time.Millisecond)
 	ctrl.reloadServiceDebounce = debounce.New(ctrl.reloadServiceDebounced, 300*time.Millisecond)
 	ctrl.reloadSecretDebounce = debounce.New(ctrl.reloadSecretDebounced, 300*time.Millisecond)
-	ctrl.reloadEndpointDebounce = debounce.New(ctrl.reloadEndpointDebounced, 300*time.Millisecond)
 	ctrl.reloadWAFDebounce = debounce.New(ctrl.reloadWAFDebounced, 300*time.Millisecond)
 	ctrl.proxy = proxy
 	ctrl.proxy.OnDialError = ctrl.routeTable.MarkBad
@@ -188,6 +186,8 @@ func (ctrl *Controller) firstReload() {
 // into store, and invokes onUpsert / onDelete so the caller triggers the right
 // reload. PT is the pointer type of T (e.g. *networking.Ingress); the
 // metav1.Object constraint gives access to the object's namespace and name.
+// onDelete receives the deleted object so a caller can reload incrementally
+// (e.g. drop just that one host) instead of rebuilding from the whole store.
 func watchResource[T any, PT interface {
 	*T
 	metav1.Object
@@ -197,7 +197,7 @@ func watchResource[T any, PT interface {
 	watchFn func(ctx context.Context, namespace string) (watch.Interface, error),
 	store *sync.Map,
 	onUpsert func(obj PT),
-	onDelete func(),
+	onDelete func(obj PT),
 ) {
 	for {
 		w, err := watchFn(ctx, namespace)
@@ -220,7 +220,7 @@ func watchResource[T any, PT interface {
 				onUpsert(obj)
 			case watch.Deleted:
 				store.Delete(key)
-				onDelete()
+				onDelete(obj)
 			default:
 				continue
 			}
@@ -235,7 +235,7 @@ func (ctrl *Controller) watchIngresses(ctx context.Context) {
 	watchResource(ctx, ctrl.watchNamespace, "ingresses", k8s.WatchIngresses,
 		&ctrl.watchedIngresses,
 		func(_ *networking.Ingress) { ctrl.reloadIngress() },
-		ctrl.reloadIngress,
+		func(_ *networking.Ingress) { ctrl.reloadIngress() },
 	)
 }
 
@@ -249,7 +249,7 @@ func (ctrl *Controller) watchServices(ctx context.Context) {
 	watchResource(ctx, ctrl.watchNamespace, "services", k8s.WatchServices,
 		&ctrl.watchedServices,
 		func(_ *v1.Service) { reload() },
-		reload,
+		func(_ *v1.Service) { reload() },
 	)
 }
 
@@ -257,17 +257,20 @@ func (ctrl *Controller) watchSecrets(ctx context.Context) {
 	watchResource(ctx, ctrl.watchNamespace, "secrets", k8s.WatchSecrets,
 		&ctrl.watchedSecrets,
 		func(_ *v1.Secret) { ctrl.reloadSecret() },
-		ctrl.reloadSecret,
+		func(_ *v1.Secret) { ctrl.reloadSecret() },
 	)
 }
 
 func (ctrl *Controller) watchEndpoints(ctx context.Context) {
-	// upserts only touch a single endpoint's backends, so reload just that one;
-	// a delete needs a full endpoint-table rebuild.
+	// a single endpoint event only touches its own service's host, so both
+	// upsert and delete update just that one host in place instead of rebuilding
+	// the whole endpoint table. The full rebuild (reloadEndpointDebounced) is
+	// reserved for the initial sync / resync in firstReload, where the entire
+	// set is (re)listed.
 	watchResource(ctx, ctrl.watchNamespace, "endpoints", k8s.WatchEndpoints,
 		&ctrl.watchedEndpoints,
 		ctrl.reloadSingleEndpoint,
-		ctrl.reloadEndpoint,
+		ctrl.deleteSingleEndpoint,
 	)
 }
 
@@ -518,10 +521,10 @@ func (ctrl *Controller) reloadSecretDebounced() {
 	ctrl.certTable.Set(certs)
 }
 
-func (ctrl *Controller) reloadEndpoint() {
-	ctrl.reloadEndpointDebounce.Call()
-}
-
+// reloadEndpointDebounced rebuilds the entire host -> pod-IP table from the
+// whole watched-endpoints store. It is the initial-sync / resync path (called
+// from firstReload); steady-state endpoint events are applied incrementally
+// per host by reloadSingleEndpoint / deleteSingleEndpoint and never come here.
 func (ctrl *Controller) reloadEndpointDebounced() {
 	slog.Info("reload endpoints")
 
@@ -547,6 +550,14 @@ func (ctrl *Controller) reloadSingleEndpoint(ep *v1.Endpoints) {
 	slog.Info("reload single endpoint", "namespace", ep.Namespace, "name", ep.Name)
 
 	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), endpointToRRLB(ep))
+}
+
+func (ctrl *Controller) deleteSingleEndpoint(ep *v1.Endpoints) {
+	slog.Info("delete single endpoint", "namespace", ep.Namespace, "name", ep.Name)
+
+	// the host is gone, so drop just that one entry; passing nil makes
+	// SetHostRoute delete it, leaving the rest of the table untouched.
+	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), nil)
 }
 
 func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
