@@ -1,0 +1,162 @@
+//! parapet edge — out-of-cluster Pingora proxy that terminates public TLS locally
+//! (cert+key fetched from the in-cluster control plane and cached in memory) and
+//! forwards to parapet. See ../../EDGE.md. Phase 1: cert distribution + TLS +
+//! forwarding. Phases 2–3 add edge WAF.
+
+mod certstore;
+mod cp;
+mod proxy;
+mod refresh;
+mod tls;
+mod waf;
+mod wafrefresh;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use pingora::listeners::tls::TlsSettings;
+use pingora::proxy::http_proxy_service;
+use pingora::server::Server;
+
+use crate::certstore::CertStore;
+use crate::cp::CpClient;
+use crate::proxy::EdgeProxy;
+use crate::tls::EdgeTls;
+
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+/// Open the GeoIP + ASN databases the same way the controller does: env path
+/// (`""` disables), else the baked default; a missing default is a quiet no-op,
+/// a missing explicit path is logged. Loading is always non-fatal.
+fn load_geo_dbs() -> (Option<controller::waf::GeoIp>, Option<controller::waf::AsnDb>) {
+    fn path_of(env: &str, default: &str) -> (String, bool) {
+        match std::env::var(env) {
+            Ok(v) => (v, true),
+            Err(_) => (default.to_string(), false),
+        }
+    }
+    let (gp, g_explicit) = path_of("WAF_GEOIP_DB", "/geoip/ip-to-country.mmdb");
+    let geoip = if gp.is_empty() {
+        None
+    } else {
+        match controller::waf::GeoIp::open(&gp) {
+            Ok(g) => {
+                tracing::info!(path = %gp, "edge: geoip database loaded");
+                Some(g)
+            }
+            Err(e) => {
+                if g_explicit {
+                    tracing::warn!(error = %e, "edge: geoip load failed; request.country will be empty");
+                }
+                None
+            }
+        }
+    };
+    let (ap, a_explicit) = path_of("WAF_ASN_DB", "/geoip/ip-to-asn.mmdb");
+    let asndb = if ap.is_empty() {
+        None
+    } else {
+        match controller::waf::AsnDb::open(&ap) {
+            Ok(a) => {
+                tracing::info!(path = %ap, "edge: asn database loaded");
+                Some(a)
+            }
+            Err(e) => {
+                if a_explicit {
+                    tracing::warn!(error = %e, "edge: asn load failed; request.asn will be 0");
+                }
+                None
+            }
+        }
+    };
+    (geoip, asndb)
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    let listen = env_or("EDGE_LISTEN", "0.0.0.0:443");
+    let cp_endpoint = env_or("EDGE_CP_ENDPOINT", "https://controlplane:8443");
+    let cp_token = std::env::var("EDGE_CP_TOKEN").map_err(|_| "EDGE_CP_TOKEN is required")?;
+    let cp_ca = std::env::var("EDGE_CP_CA").ok().and_then(|p| std::fs::read(p).ok());
+    let parapet_addr = env_or("EDGE_PARAPET_ADDR", "parapet:80");
+    let parapet_tls = env_or("EDGE_PARAPET_TLS", "false") == "true";
+    let parapet_sni = env_or("EDGE_PARAPET_SNI", "");
+    let refresh_secs: u64 = env_or("EDGE_REFRESH_INTERVAL", "300").parse().unwrap_or(300);
+    let waf_enabled = env_or("EDGE_WAF_ENABLED", "false") == "true";
+    let domains: Vec<String> = env_or("EDGE_DOMAINS", "")
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if domains.is_empty() {
+        return Err("EDGE_DOMAINS is required (comma-separated list of SNIs this edge serves)".into());
+    }
+
+    let cp = CpClient::new(cp_endpoint, cp_token, cp_ca)?;
+    let store = Arc::new(CertStore::new());
+
+    // A dedicated runtime owns the control-plane HTTP client. We block on the
+    // initial fetch so certs are present before we accept connections, then keep
+    // the runtime alive to drive the periodic refresh.
+    let cp_rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let loaded = cp_rt.block_on(refresh::refresh_all(&cp, &store, &domains));
+    tracing::info!(loaded, total = domains.len(), "edge: initial cert load");
+    cp_rt.spawn(refresh::run(
+        cp.clone(),
+        store.clone(),
+        domains,
+        Duration::from_secs(refresh_secs),
+    ));
+
+    // Phase 2: optional global WAF as an early-drop layer (parapet stays
+    // authoritative). Fetch the ruleset once before serving, then refresh on the
+    // same interval; a fetch/compile failure is fail-static (keeps last-good).
+    let waf = if waf_enabled {
+        // GeoIP/ASN: the edge is the first hop, so it resolves request.country /
+        // request.asn from the TRUE client IP. Same env contract as the
+        // controller (WAF_GEOIP_DB / WAF_ASN_DB; "" disables; baked default path;
+        // a missing default is a quiet no-op, a missing explicit path is logged).
+        let (geoip, asndb) = load_geo_dbs();
+        let w = Arc::new(waf::EdgeWaf::with_geo(geoip, asndb));
+        let has_rules = cp_rt.block_on(wafrefresh::refresh_initial(&cp, &w));
+        tracing::info!(has_rules, "edge: initial WAF ruleset load");
+        cp_rt.spawn(wafrefresh::run(
+            cp.clone(),
+            w.clone(),
+            Duration::from_secs(refresh_secs),
+        ));
+        Some(w)
+    } else {
+        None
+    };
+
+    let mut server = Server::new(None).map_err(|e| format!("server init: {e}"))?;
+    server.bootstrap();
+
+    let proxy = EdgeProxy {
+        parapet_addr,
+        parapet_tls,
+        parapet_sni,
+        waf,
+    };
+    let mut svc = http_proxy_service(&server.configuration, proxy);
+
+    let mut tls = TlsSettings::with_callbacks(Box::new(EdgeTls::new(store)))
+        .map_err(|e| format!("tls settings: {e}"))?;
+    tls.set_min_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))
+        .map_err(|e| format!("min tls version: {e}"))?;
+    tls.enable_h2();
+    svc.add_tls_with_settings(&listen, None, tls);
+
+    server.add_service(svc);
+    tracing::info!(%listen, "parapet edge listening (local TLS termination)");
+    let _cp_rt = cp_rt; // keep the refresh runtime alive
+    server.run_forever()
+}

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["spike", "controller"]
+members = ["spike", "controller", "edge"]
 
 # Release profile tuned for the production container image: a smaller binary
 # (~24M unstripped -> ~13M) and better runtime perf, which feeds the Phase 5

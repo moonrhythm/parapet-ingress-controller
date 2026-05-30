@@ -1,0 +1,70 @@
+name: edge-build
+
+# Builds the two edge images: the Go control plane (from go/) and the Rust edge
+# (from rust/). See EDGE.md. Triggered when either side — or the edge manifests —
+# change. Mirrors go-build / rust-build (GCP Workload Identity, two registries).
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'go/**'
+      - 'rust/**'
+      - 'deploy/edge/**'
+      - '.github/workflows/edge-build.yaml'
+
+jobs:
+  controlplane:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIP }}
+          service_account: ${{ secrets.GSA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker us-docker.pkg.dev,asia-southeast3-docker.pkg.dev
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push (control plane)
+        uses: docker/build-push-action@v6
+        with:
+          context: go
+          file: go/Dockerfile.edge-controlplane
+          push: true
+          build-args: |
+            VERSION=${{ github.sha }}
+            GOAMD64=v3
+          tags: |
+            us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-edge-controlplane:${{ github.sha }}
+            asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-edge-controlplane:${{ github.sha }}
+
+  edge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIP }}
+          service_account: ${{ secrets.GSA }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker us-docker.pkg.dev,asia-southeast3-docker.pkg.dev
+      - uses: docker/setup-buildx-action@v3
+      - name: Build and push (edge)
+        uses: docker/build-push-action@v6
+        with:
+          context: rust
+          file: rust/Dockerfile.edge
+          push: true
+          build-args: |
+            TARGET_CPU=x86-64-v3
+          tags: |
+            us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-edge:${{ github.sha }}
+            asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-edge:${{ github.sha }}

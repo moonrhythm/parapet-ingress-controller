@@ -9,6 +9,7 @@ vars, and metric names.
 - **[`rust/`](rust/)** — the Pingora (Rust) implementation. Guidance: [`rust/README.md`](rust/README.md).
 - **[`SPEC.md`](SPEC.md)** — the shared contract (annotations, env, metrics, per-request order, Go↔Rust divergences). **Source of truth: change behavior here first.**
 - **[`WAF.md`](WAF.md)** — the WAF design (shared across both).
+- **[`EDGE.md`](EDGE.md)** — the out-of-cluster edge proxy (Rust/Pingora) + in-cluster control plane (Go, REST cert+key + WAF distribution). Phase 1 implemented.
 - **[`conformance/`](conformance/)** — language-neutral fixtures both implementations must satisfy (e.g. the WAF CEL corpus).
 
 > Neither implementation is "the migration target" anymore — they are both
@@ -18,7 +19,7 @@ vars, and metric names.
 ## Layout
 
 ```
-SPEC.md  WAF.md  README.md  CLAUDE.md  LICENSE  SKILL.md
+SPEC.md  WAF.md  EDGE.md  README.md  CLAUDE.md  LICENSE  SKILL.md
 deploy/                 # shared Kubernetes manifests + RBAC (image-agnostic)
 conformance/            # shared cross-impl fixtures (waf-cel-corpus.md, …)
 .github/workflows/      # go-{test,build,release}.yaml + rust-{test,build,release}.yaml
@@ -29,9 +30,19 @@ go/                     # Go implementation — module .../parapet-ingress-contr
   CLAUDE.md             #   Go-specific architecture guide
   go.mod  cmd/  controller*.go  plugin/  proxy/  route/  cert/  k8s/
   metric/  state/  debounce/  wafrule/  retry.go  Dockerfile  Makefile
+  edgecp/               #   edge control-plane lib (cert store, authz, reload, REST server)
+  cmd/edge-controlplane/ #  edge control-plane binary (see EDGE.md)
 rust/                   # Rust implementation
   README.md  controller/  Dockerfile  PHASE*.md  bench/  spike/
+  edge/                 #   out-of-cluster Pingora edge proxy (openssl; workspace member)
 ```
+
+> **Edge control plane.** The control plane is **Go** (`go/cmd/edge-controlplane`
+> + `go/edgecp`), reusing `go/cert`/`go/k8s`/`go/wafrule`; it serves per-edge
+> cert+key (and, later, WAF rules) over an HTTPS REST + bearer-token API. The
+> **edge** (`rust/edge`) is a normal `rust/` workspace member on the openssl
+> backend. They share only the HTTP/JSON contract — no shared code. See
+> [`EDGE.md`](EDGE.md).
 
 ## Working in this repo
 
