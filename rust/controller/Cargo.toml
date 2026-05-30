@@ -63,7 +63,13 @@ maxminddb = { version = "0.28", optional = true }
 tikv-jemallocator = { version = "0.6", features = [
     "unprefixed_malloc_on_supported_platforms",
     "background_threads",
+    "stats",
 ], optional = true }
+# Reads jemalloc's internal stats (allocated/active/resident/retained) via
+# mallctl, exported as Prometheus gauges (proxy/allocmetrics.rs). `allocated`
+# (live bytes) vs `resident` (RSS) separates a true leak from allocator
+# retention — the diagnostic for unbounded RSS growth.
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"], optional = true }
 
 [features]
 cluster = ["dep:kube", "dep:tokio", "dep:futures", "dep:rustls", "waf"]
@@ -81,6 +87,7 @@ proxy = [
     "dep:env_logger",
     "dep:libc",
     "dep:tikv-jemallocator",
+    "dep:tikv-jemalloc-ctl",
     "waf",
 ]
 # The CEL WAF engine. Enabled by both `proxy` (evaluates) and `cluster`
