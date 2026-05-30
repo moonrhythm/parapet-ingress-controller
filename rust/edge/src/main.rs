@@ -30,7 +30,10 @@ fn env_or(key: &str, default: &str) -> String {
 /// Open the GeoIP + ASN databases the same way the controller does: env path
 /// (`""` disables), else the baked default; a missing default is a quiet no-op,
 /// a missing explicit path is logged. Loading is always non-fatal.
-fn load_geo_dbs() -> (Option<controller::waf::GeoIp>, Option<controller::waf::AsnDb>) {
+fn load_geo_dbs() -> (
+    Option<controller::waf::GeoIp>,
+    Option<controller::waf::AsnDb>,
+) {
     fn path_of(env: &str, default: &str) -> (String, bool) {
         match std::env::var(env) {
             Ok(v) => (v, true),
@@ -82,11 +85,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listen = env_or("EDGE_LISTEN", "0.0.0.0:443");
     let cp_endpoint = env_or("EDGE_CP_ENDPOINT", "https://controlplane:8443");
     let cp_token = std::env::var("EDGE_CP_TOKEN").map_err(|_| "EDGE_CP_TOKEN is required")?;
-    let cp_ca = std::env::var("EDGE_CP_CA").ok().and_then(|p| std::fs::read(p).ok());
+    let cp_ca = std::env::var("EDGE_CP_CA")
+        .ok()
+        .and_then(|p| std::fs::read(p).ok());
     let parapet_addr = env_or("EDGE_PARAPET_ADDR", "parapet:80");
     let parapet_tls = env_or("EDGE_PARAPET_TLS", "false") == "true";
     let parapet_sni = env_or("EDGE_PARAPET_SNI", "");
-    let refresh_secs: u64 = env_or("EDGE_REFRESH_INTERVAL", "300").parse().unwrap_or(300);
+    let refresh_secs: u64 = env_or("EDGE_REFRESH_INTERVAL", "300")
+        .parse()
+        .unwrap_or(300);
     let waf_enabled = env_or("EDGE_WAF_ENABLED", "false") == "true";
     let domains: Vec<String> = env_or("EDGE_DOMAINS", "")
         .split(',')
@@ -94,7 +101,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .filter(|s| !s.is_empty())
         .collect();
     if domains.is_empty() {
-        return Err("EDGE_DOMAINS is required (comma-separated list of SNIs this edge serves)".into());
+        return Err(
+            "EDGE_DOMAINS is required (comma-separated list of SNIs this edge serves)".into(),
+        );
     }
 
     let cp = CpClient::new(cp_endpoint, cp_token, cp_ca)?;

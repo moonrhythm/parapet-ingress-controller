@@ -39,13 +39,23 @@ impl CertStore {
 
     /// The ETag currently cached for a fetch key (sent as `If-None-Match`).
     pub fn etag(&self, key: &str) -> Option<String> {
-        self.cache.lock().unwrap().get(key).and_then(|c| c.etag.clone())
+        self.cache
+            .lock()
+            .unwrap()
+            .get(key)
+            .and_then(|c| c.etag.clone())
     }
 
     /// Install/replace the material for a fetch key and atomically rebuild the
     /// SNI index. Returns false if the PEM can't be parsed (caller keeps the old
     /// copy — fail static).
-    pub fn update(&self, key: &str, chain_pem: Vec<u8>, key_pem: Vec<u8>, etag: Option<String>) -> bool {
+    pub fn update(
+        &self,
+        key: &str,
+        chain_pem: Vec<u8>,
+        key_pem: Vec<u8>,
+        etag: Option<String>,
+    ) -> bool {
         let Some(loaded) = LoadedCert::from_pem(chain_pem, key_pem) else {
             return false;
         };
@@ -101,8 +111,14 @@ mod tests {
 
         assert!(s.get("acme.com").is_some(), "exact match");
         assert!(s.get("www.acme.com").is_some(), "single-label wildcard");
-        assert!(s.get("ACME.com.").is_some(), "case + trailing dot normalized");
-        assert!(s.get("a.b.acme.com").is_none(), "wildcard is one label only");
+        assert!(
+            s.get("ACME.com.").is_some(),
+            "case + trailing dot normalized"
+        );
+        assert!(
+            s.get("a.b.acme.com").is_none(),
+            "wildcard is one label only"
+        );
         assert!(s.get("other.com").is_none(), "no match");
         assert_eq!(s.len(), 2);
     }
@@ -122,9 +138,18 @@ mod tests {
         let (c, k) = pem(&["acme.com"]);
         assert!(s.update("acme.com", c, k, Some("\"v1\"".into())));
         // garbage PEM -> update returns false, store unchanged (fail static)
-        assert!(!s.update("acme.com", b"not a cert".to_vec(), b"nope".to_vec(), Some("\"v2\"".into())));
+        assert!(!s.update(
+            "acme.com",
+            b"not a cert".to_vec(),
+            b"nope".to_vec(),
+            Some("\"v2\"".into())
+        ));
         assert!(s.get("acme.com").is_some(), "old cert still served");
-        assert_eq!(s.etag("acme.com").as_deref(), Some("\"v1\""), "old etag retained");
+        assert_eq!(
+            s.etag("acme.com").as_deref(),
+            Some("\"v1\""),
+            "old etag retained"
+        );
     }
 
     #[test]
