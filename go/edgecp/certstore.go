@@ -29,11 +29,17 @@ type certEntry struct {
 type CertStore struct {
 	mu     sync.RWMutex
 	byName map[string]*certEntry // SAN (lowercased) -> entry
+	// loaded flips true after the first Set (the reloader's initial cluster list
+	// completed), so the control plane can report readiness via /healthz?ready=1.
+	loaded atomic.Bool
 }
 
 func NewCertStore() *CertStore {
 	return &CertStore{byName: map[string]*certEntry{}}
 }
+
+// Loaded reports whether the store has completed at least one load (readiness).
+func (s *CertStore) Loaded() bool { return s.loaded.Load() }
 
 // Set atomically rebuilds the index from (chainPEM, keyPEM) pairs. A pair whose
 // leaf can't be parsed, or that carries no SAN dNSNames, is skipped (the leaf is
