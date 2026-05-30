@@ -101,7 +101,7 @@ Full design in **[EDGE.md](EDGE.md)**. An optional out-of-cluster **edge** proxy
 (`rust/edge`, Pingora) terminates public TLS **locally** and runs the WAF. A
 **Go** in-cluster **control plane** (`go/cmd/edge-controlplane`) distributes, per
 edge, the cert+key and WAF rules for that edge's domains over an **HTTPS REST**
-API (`GET /v1/certs/{sni}`, `GET /v1/waf`) authenticated by a **per-edge bearer
+API (`GET /v1/certs?sni=…`, `GET /v1/waf`) authenticated by a **per-edge bearer
 token** → allowed domains/zones. Contract-relevant invariants:
 
 - **Cert+key distribution (not keyless)** — the edge holds the cert+key for its

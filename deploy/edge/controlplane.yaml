@@ -61,7 +61,7 @@ spec:
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /healthz?ready=1 # 503 until the cert store has loaded once
               port: https
               scheme: HTTPS
             initialDelaySeconds: 5

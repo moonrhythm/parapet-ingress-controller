@@ -8,7 +8,7 @@ import (
 
 // Server is the edge control-plane HTTP API. It authorizes each request by the
 // edge's bearer token (see Authz), then serves the cert+key for an allowed SNI.
-// WAF distribution (GET /v1/waf) lands in Phase 2. See ../../EDGE.md.
+// WAF distribution (GET /v1/waf) is added via WithWAF. See ../../EDGE.md.
 type Server struct {
 	certs *CertStore
 	authz *Authz
@@ -29,12 +29,68 @@ func (s *Server) WithWAF(waf *WafStore) *Server {
 // Handler returns the mux. Mount behind HTTPS (the API ships private keys).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/certs/{sni}", s.handleCert)
+	mux.HandleFunc("GET /v1/certs", s.handleCert)
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
+	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return mux
+}
+
+// handleHealthz is both the liveness and readiness probe. Plain `GET /healthz`
+// is liveness (always 200 while the process is up). `GET /healthz?ready=1` is
+// readiness: 200 only once the cert store has loaded at least once (the initial
+// list from the cluster succeeded), else 503 — so an edge isn't pointed at a
+// control plane that can't yet serve certs.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("ready") == "1" && !s.certs.Loaded() {
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+type certResponse struct {
+	ChainPEM string `json:"chain_pem"`
+	KeyPEM   string `json:"key_pem"`
+}
+
+// handleCert serves the cert+key for the `sni` query parameter
+// (GET /v1/certs?sni=<host>), authorized by the bearer token.
+func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	sni := r.URL.Query().Get("sni")
+	if sni == "" {
+		http.Error(w, "missing sni query parameter", http.StatusBadRequest)
+		return
+	}
+	if !s.authz.Allowed(token, sni) {
+		// Don't reveal whether the cert exists to an unauthorized caller.
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	entry, ok := s.certs.Get(sni)
+	if !ok {
+		http.Error(w, "no certificate for sni", http.StatusNotFound)
+		return
+	}
+
+	// ETag revalidation: the edge sends its cached validator; unchanged → 304.
+	w.Header().Set("ETag", entry.etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, entry.etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store") // a private key must not be cached by intermediaries
+	_ = json.NewEncoder(w).Encode(certResponse{
+		ChainPEM: string(entry.chainPEM),
+		KeyPEM:   string(entry.keyPEM),
+	})
 }
 
 type wafResponse struct {
@@ -47,7 +103,7 @@ type wafResponse struct {
 // handleWAF serves the WAF payload scoped to the edge's allowed domains: the
 // global baseline (identical for every edge) plus only the zones and host→zone
 // bindings for hosts this token may serve. ETag is computed over the *scoped*
-// payload, so revalidation is correct per edge. (Zones are Phase 3.)
+// payload, so revalidation is correct per edge.
 func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 	token, ok := bearer(r)
 	if !ok || !s.authz.Known(token) {
@@ -79,45 +135,6 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
-}
-
-type certResponse struct {
-	ChainPEM string `json:"chain_pem"`
-	KeyPEM   string `json:"key_pem"`
-}
-
-func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
-	token, ok := bearer(r)
-	if !ok || !s.authz.Known(token) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	sni := r.PathValue("sni")
-	if !s.authz.Allowed(token, sni) {
-		// Don't reveal whether the cert exists to an unauthorized caller.
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
-	entry, ok := s.certs.Get(sni)
-	if !ok {
-		http.Error(w, "no certificate for sni", http.StatusNotFound)
-		return
-	}
-
-	// ETag revalidation: the edge sends its cached validator; unchanged → 304.
-	w.Header().Set("ETag", entry.etag)
-	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, entry.etag) {
-		w.WriteHeader(http.StatusNotModified)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store") // a private key must not be cached by intermediaries
-	_ = json.NewEncoder(w).Encode(certResponse{
-		ChainPEM: string(entry.chainPEM),
-		KeyPEM:   string(entry.keyPEM),
-	})
 }
 
 // bearer extracts the token from an "Authorization: Bearer <token>" header.

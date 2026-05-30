@@ -81,8 +81,14 @@ impl CpClient {
         sni: &str,
         current_etag: Option<&str>,
     ) -> Result<CertFetch, String> {
-        let url = format!("{}/v1/certs/{}", self.base, sni);
-        let mut req = self.http.get(&url).bearer_auth(&self.token);
+        let url = format!("{}/v1/certs", self.base);
+        // `sni` goes in the query string (?sni=…); .query() percent-encodes it,
+        // so a wildcard SNI like `*.acme.com` is transmitted safely.
+        let mut req = self
+            .http
+            .get(&url)
+            .query(&[("sni", sni)])
+            .bearer_auth(&self.token);
         if let Some(etag) = current_etag {
             req = req.header(reqwest::header::IF_NONE_MATCH, etag);
         }
@@ -192,7 +198,7 @@ mod tests {
         }
 
         let req = captured.lock().unwrap().clone();
-        assert!(req.starts_with("GET /v1/certs/acme.com "), "path: {req}");
+        assert!(req.starts_with("GET /v1/certs?sni=acme.com "), "path: {req}");
         assert!(
             req.contains("authorization: Bearer tok-123")
                 || req.contains("Authorization: Bearer tok-123"),

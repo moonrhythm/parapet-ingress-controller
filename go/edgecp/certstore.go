@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // certEntry is the material served for one TLS secret: the raw PEM the edge
@@ -56,6 +57,7 @@ func (s *CertStore) Set(pairs []PEMPair) {
 	s.mu.Lock()
 	s.byName = byName
 	s.mu.Unlock()
+	s.loaded.Store(true)
 }
 
 // Get resolves an SNI to its cert material: exact, then single-label wildcard.

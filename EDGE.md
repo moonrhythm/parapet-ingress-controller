@@ -88,7 +88,7 @@ keys**, so it must never be on the public LoadBalancer. See
   controller). Reuses `controller::cert::{Table, LoadedCert}` for SNI resolution
   and the `TlsAccept::certificate_callback` pattern from
   `controller::proxy::cert` to install the matched cert+key locally. Maintains an
-  in-memory cert store refreshed from `GET /v1/certs/{sni}`, and (Phase 2+)
+  in-memory cert store refreshed from `GET /v1/certs?sni=…`, and (Phase 2+)
   `controller::waf` for CEL evaluation. Forwards to parapet with `X-Forwarded-*`.
 
 ## Authorization (bearer token, two endpoints)
@@ -128,10 +128,10 @@ All requests carry `Authorization: Bearer <token>` over HTTPS. Reads, so `GET`
 with ETag-based caching (`304` on a match):
 
 ```
-GET /v1/certs/{sni}   Authorization: Bearer <token>   [If-None-Match: "<etag>"]
+GET /v1/certs?sni=<host>   Authorization: Bearer <token>   [If-None-Match: "<etag>"]
   200 {"chain_pem": "<leaf+intermediates PEM>", "key_pem": "<PEM>"}   ETag: "<etag>"
   304 (If-None-Match matched the current etag — edge keeps its cached copy)
-  403 (sni ∉ allowed(token))   404 (no cert for sni)   401 (no/invalid token)
+  400 (missing sni)  401 (no/invalid token)  403 (sni ∉ allowed(token))  404 (no cert for sni)
 
 GET /v1/waf           Authorization: Bearer <token>   [If-None-Match: "<etag>"]
   200 {"generation": N, "global_rules":"…", "zones":{…}, "host_zone_map":{…}}
@@ -139,6 +139,11 @@ GET /v1/waf           Authorization: Bearer <token>   [If-None-Match: "<etag>"]
        zones         : zoneKey ("<ns>/<name>") → rules YAML, scoped to the edge's hosts
        host_zone_map : host → zoneKey, scoped to the edge's hosts
        (ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct)
+
+GET /healthz          (no auth)
+  200 always (liveness)
+GET /healthz?ready=1  (no auth)
+  200 once the cert store has loaded at least once; 503 until then (readiness)
 ```
 
 `chain_pem` is leaf-first (leaf + intermediates). `key_pem` is the private key —

@@ -57,7 +57,7 @@ func TestIntegrationCertFetchOverHTTP(t *testing.T) {
 	client := srv.Client()
 
 	get := func(sni, token, inm string) *http.Response {
-		req, err := http.NewRequest("GET", srv.URL+"/v1/certs/"+sni, nil)
+		req, err := http.NewRequest("GET", srv.URL+"/v1/certs?sni="+sni, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -122,7 +122,7 @@ func TestIntegrationCertFetchOverHTTP(t *testing.T) {
 	authz2 := NewAuthz(map[string][]string{"edge-eu": {"acme.com"}})
 	srv2 := httptest.NewServer(NewServer(store, authz2).Handler())
 	defer srv2.Close()
-	req, _ := http.NewRequest("GET", srv2.URL+"/v1/certs/notmine.com", nil)
+	req, _ := http.NewRequest("GET", srv2.URL+"/v1/certs?sni=notmine.com", nil)
 	req.Header.Set("Authorization", "Bearer edge-eu")
 	r, err := srv2.Client().Do(req)
 	if err != nil {
