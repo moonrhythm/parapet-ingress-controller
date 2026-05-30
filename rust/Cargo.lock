@@ -2076,6 +2076,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "serde",
+ "tikv-jemallocator",
  "tokio",
  "tracing",
  "tracing-subscriber",
