@@ -95,16 +95,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .parse()
         .unwrap_or(300);
     let waf_enabled = env_or("EDGE_WAF_ENABLED", "false") == "true";
+    // EDGE_DOMAINS is the set of SNIs to pre-fetch (its shard). Empty = serve ALL
+    // domains: certs are fetched on demand at handshake time (the CP's per-token
+    // authz still decides which SNIs resolve).
     let domains: Vec<String> = env_or("EDGE_DOMAINS", "")
         .split(',')
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    if domains.is_empty() {
-        return Err(
-            "EDGE_DOMAINS is required (comma-separated list of SNIs this edge serves)".into(),
-        );
-    }
+    let serve_all = domains.is_empty();
 
     let cp = CpClient::new(cp_endpoint, cp_token, cp_ca)?;
     let store = Arc::new(CertStore::new());
@@ -115,8 +114,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cp_rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let loaded = cp_rt.block_on(refresh::refresh_all(&cp, &store, &domains));
-    tracing::info!(loaded, total = domains.len(), "edge: initial cert load");
+    if serve_all {
+        tracing::info!("edge: EDGE_DOMAINS empty — serving ALL domains (certs fetched on demand)");
+    } else {
+        let loaded = cp_rt.block_on(refresh::refresh_all(&cp, &store, &domains));
+        tracing::info!(loaded, total = domains.len(), "edge: initial cert load");
+    }
     cp_rt.spawn(refresh::run(
         cp.clone(),
         store.clone(),
