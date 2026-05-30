@@ -18,6 +18,24 @@ use pingora::upstreams::peer::HttpPeer;
 
 use crate::waf::EdgeWaf;
 
+/// The client-facing scheme for this connection: `"https"` when TLS was
+/// terminated at this edge (the public TLS listener) and `"http"` when the
+/// request arrived on the plaintext `EDGE_HTTP_LISTEN` listener. Detected from
+/// the connection's TLS digest, so it's correct regardless of which listener the
+/// request came in on. The edge forwards this verbatim as `X-Forwarded-Proto`
+/// and does NOT redirect — parapet's `redirect-https` plugin decides http→https.
+fn downstream_scheme(session: &Session) -> &'static str {
+    let is_tls = session
+        .digest()
+        .and_then(|d| d.ssl_digest.as_ref())
+        .is_some();
+    if is_tls {
+        "https"
+    } else {
+        "http"
+    }
+}
+
 pub struct EdgeProxy {
     /// parapet data-plane address (host:port).
     pub parapet_addr: String,
@@ -61,8 +79,9 @@ impl EdgeProxy {
             .map(|p| p.as_str().to_string())
             .unwrap_or_else(|| path.clone());
         let proto = format!("{:?}", req.version);
-        // The edge always terminates public TLS, so the client-facing scheme is https.
-        let scheme = "https".to_string();
+        // https when TLS was terminated here, http on the plaintext listener — so
+        // an edge-evaluated rule on request.scheme sees what parapet will.
+        let scheme = downstream_scheme(session).to_string();
         let client_ip = session
             .client_addr()
             .and_then(|a| a.as_inet().map(|i| i.ip()));
@@ -172,7 +191,7 @@ impl ProxyHttp for EdgeProxy {
         upstream: &mut pingora::http::RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> Result<()> {
-        upstream.insert_header("x-forwarded-proto", "https")?;
+        upstream.insert_header("x-forwarded-proto", downstream_scheme(session))?;
         let client_ip = session
             .client_addr()
             .and_then(|a| a.as_inet().map(|i| i.ip()));

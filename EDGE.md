@@ -227,6 +227,8 @@ Because the edge sets `X-Forwarded-For` and parapet trusts it
 ## Ports & exposure
 
 ```
+edge           :443   public TLS (terminated locally)       EDGE_HTTPS_LISTEN
+               :80    public plaintext (on; ""=disable)     EDGE_HTTP_LISTEN
 parapet        :80    data (h2c from edge)                 unchanged role, now behind edge
                :443   data (re-encrypt from edge)
                :9187  metrics
@@ -235,6 +237,18 @@ controlplane   :8443  HTTPS GET (server-TLS + bearer)       NEW — Go, own Serv
                       distributes PRIVATE KEYS; NetworkPolicy: edge sources only;
                       NOT on the public LB
 ```
+
+### Plaintext HTTP listener (no redirect — the core decides)
+
+`EDGE_HTTP_LISTEN` (default `0.0.0.0:80`; set to `""` to disable) adds a second,
+plaintext listener to the same proxy service. The edge **does not** redirect
+http→https itself; it forwards the request to parapet with `X-Forwarded-Proto:
+http` (the scheme is detected per connection from the TLS digest, so the TLS
+listener still forwards `https`). parapet's per-ingress `redirect-https` plugin
+then makes the decision — 301 to https, or serve — exactly as it does without the
+edge. The global/zone WAF runs on this listener too. Keeping the redirect policy
+in the core means it stays a single source of truth (annotation-driven, with the
+`/.well-known/acme-challenge` carve-out) rather than being duplicated at the edge.
 
 ## The tradeoff
 

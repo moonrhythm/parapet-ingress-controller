@@ -33,8 +33,13 @@ spec:
           image: gcr.io/moonrhythm-containers/parapet-ingress-controller:edge-latest
           imagePullPolicy: IfNotPresent
           env:
-            - name: EDGE_LISTEN
+            - name: EDGE_HTTPS_LISTEN
               value: "0.0.0.0:443"
+            # Plaintext HTTP listener. The edge does NOT redirect http→https; it
+            # forwards with X-Forwarded-Proto: http so the core's per-ingress
+            # redirect-https plugin decides. Set "" to disable.
+            - name: EDGE_HTTP_LISTEN
+              value: "0.0.0.0:80"
             # The domains THIS edge serves (its shard) — pre-fetched, and the
             # bearer token must be authorized for them. Leave EMPTY to serve ALL
             # domains (certs fetched on demand per SNI; the token's authz still
@@ -78,6 +83,8 @@ spec:
           ports:
             - name: https
               containerPort: 443
+            - name: http
+              containerPort: 80
           volumeMounts:
             - name: cp-ca
               mountPath: /cp-ca
@@ -107,3 +114,6 @@ spec:
     - name: https
       port: 443
       targetPort: https
+    - name: http
+      port: 80
+      targetPort: http
