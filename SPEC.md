@@ -95,6 +95,34 @@ loaded, the resolved value is also sent **upstream** as the `X-Forwarded-ASN` he
 (overwriting any client-supplied value); when ASN lookup is off the header is left
 untouched.
 
+## Edge control plane (cert+key + WAF distribution)
+
+Full design in **[EDGE.md](EDGE.md)**. An optional out-of-cluster **edge** proxy
+(`rust/edge`, Pingora) terminates public TLS **locally** and runs the WAF. A
+**Go** in-cluster **control plane** (`go/cmd/edge-controlplane`) distributes, per
+edge, the cert+key and WAF rules for that edge's domains over an **HTTPS REST**
+API (`GET /v1/certs?sni=…`, `GET /v1/waf`) authenticated by a **per-edge bearer
+token** → allowed domains/zones. Contract-relevant invariants:
+
+- **Cert+key distribution (not keyless)** — the edge holds the cert+key for its
+  allowed domains and terminates TLS locally (no per-handshake round trip; certs
+  refreshed on a timer, cached in memory only). The private key leaves the
+  cluster; a compromised edge means **reissue/revoke those certs**. Bounded by
+  domain sharding + short lifetimes + revocable per-edge token.
+- **parapet stays authoritative** — the edge runs global + zone WAF as an
+  early-drop layer, but parapet **re-runs the full WAF** inside and resolves
+  zones from its own router. Edge-vs-parapet zone-resolution drift is non-fatal
+  (parapet corrects it). Never disable parapet's WAF for edge traffic.
+- **Same WAF contract** — the edge reuses the `rust/` CEL engine, so it's a third
+  consumer of the [`conformance/`](conformance/) corpus; rule semantics are
+  identical by construction. Rules ship as YAML over the wire.
+- **Separate channel** — control plane on its own port/Service (`:8443`), HTTPS +
+  bearer token, reachable only by edges over a private path, never on the public
+  LoadBalancer.
+- **Language split** — control plane is **Go** (reuses `go/cert`, `go/k8s`,
+  `go/wafrule`); edge is **Rust** (Pingora). They share only the HTTP/JSON
+  contract — no shared library.
+
 ## Configuration (environment variables)
 
 | Variable | Default | Scope | Description |

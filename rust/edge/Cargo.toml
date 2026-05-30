@@ -1,0 +1,35 @@
+# Member of the ../Cargo.toml workspace. On the openssl backend (same as the
+# controller), so pingora's TLS feature unifies cleanly — no boringssl, no
+# separate workspace (unlike the abandoned keyless design). See ../../EDGE.md.
+[package]
+name = "parapet-edge"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Out-of-cluster Pingora edge proxy. Terminates public TLS *locally* with cert+key
+# fetched from the in-cluster control plane (`GET /v1/certs/{sni}` over HTTPS +
+# bearer token), cached in memory and refreshed on a timer. Forwards to parapet.
+[dependencies]
+# openssl backend matches the controller, so controller's cert types unify cleanly.
+pingora = { version = "0.8", features = ["proxy", "openssl"] }
+# Reuse the controller's cert table + LoadedCert::parsed() (needs the `proxy` feature).
+controller = { path = "../controller", package = "parapet-ingress-controller", features = ["proxy"] }
+
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+arc-swap = "1"
+# HTTPS client to the control plane (rustls so it doesn't pull a second TLS lib).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+# Self-signed fallback cert for unknown SNI (mirrors controller proxy/cert.rs).
+rcgen = "0.13"
+# Response-body bytes for WAF block responses (pingora's write_response_body).
+bytes = "1"
+
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[[bin]]
+name = "parapet-edge"
+path = "src/main.rs"

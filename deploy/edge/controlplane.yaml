@@ -1,0 +1,127 @@
+# Edge control plane (Go) — in-cluster HTTPS REST service that distributes
+# per-edge TLS cert+key (and, later, WAF rules) to out-of-cluster edge proxies.
+# See ../../EDGE.md. Runs in the controller's namespace; reads TLS Secrets.
+#
+# SECURITY: this Service distributes PRIVATE KEYS. Keep it OFF the public
+# LoadBalancer and restrict it to edge source IPs (NetworkPolicy below).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: edge-controlplane
+  namespace: parapet-ingress-controller
+  labels:
+    app: edge-controlplane
+spec:
+  # ≥2 so an edge can always refresh; it's not on the request path, but a single
+  # replica makes cert rotation depend on one pod.
+  replicas: 2
+  selector:
+    matchLabels:
+      app: edge-controlplane
+  template:
+    metadata:
+      name: edge-controlplane
+      labels:
+        app: edge-controlplane
+    spec:
+      serviceAccountName: parapet-ingress-controller # reuses the controller's RBAC (get/list/watch secrets)
+      containers:
+        - name: edge-controlplane
+          # Same image as the controller, module-prefixed tag (see edge-build.yaml).
+          image: gcr.io/moonrhythm-containers/parapet-ingress-controller:controlplane-latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CP_LISTEN
+              value: ":8443"
+            # Restrict the watch to where TLS Secrets live (default: all namespaces).
+            - name: WATCH_NAMESPACE
+              value: ""
+            # Server TLS (the API ships private keys). Mount a cert the edges
+            # trust; e.g. an internal-CA-signed cert for this Service. To serve
+            # plaintext HTTP on a trusted private network instead, omit both
+            # CP_TLS_CERT and CP_TLS_KEY (and the server-tls volume below).
+            - name: CP_TLS_CERT
+              value: /tls/tls.crt
+            - name: CP_TLS_KEY
+              value: /tls/tls.key
+            # Per-edge bearer tokens → allowed domains. Mounted from a Secret so
+            # tokens never sit in the manifest. Format:
+            #   {"<token>": ["acme.com", "*.acme.com"], ...}
+            - name: CP_TOKENS_FILE
+              value: /tokens/tokens.json
+          ports:
+            - name: https
+              containerPort: 8443
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz?ready=1 # 503 until the cert store has loaded once
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: server-tls
+              mountPath: /tls
+              readOnly: true
+            - name: edge-tokens
+              mountPath: /tokens
+              readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+      volumes:
+        - name: server-tls
+          secret:
+            secretName: edge-controlplane-tls # kubernetes.io/tls Secret for this Service's hostname
+        - name: edge-tokens
+          secret:
+            secretName: edge-controlplane-tokens # Opaque Secret with key tokens.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: edge-controlplane
+  namespace: parapet-ingress-controller
+  labels:
+    app: edge-controlplane
+spec:
+  # ClusterIP, NOT LoadBalancer — reachable only from inside / via a private path
+  # (tunnel, VPC peering). Never expose this publicly: it distributes private keys.
+  type: ClusterIP
+  selector:
+    app: edge-controlplane
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+---
+# Lock the control plane to the edges' source ranges. Adjust the CIDRs to where
+# your edges actually connect from (tunnel egress IPs / peered VPC range).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: edge-controlplane
+  namespace: parapet-ingress-controller
+  labels:
+    app: edge-controlplane
+spec:
+  podSelector:
+    matchLabels:
+      app: edge-controlplane
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/8 # REPLACE: the edges' source CIDR(s) only
+      ports:
+        - protocol: TCP
+          port: 8443

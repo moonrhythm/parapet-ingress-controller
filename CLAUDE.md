@@ -9,6 +9,7 @@ vars, and metric names.
 - **[`rust/`](rust/)** — the Pingora (Rust) implementation. Guidance: [`rust/README.md`](rust/README.md).
 - **[`SPEC.md`](SPEC.md)** — the shared contract (annotations, env, metrics, per-request order, Go↔Rust divergences). **Source of truth: change behavior here first.**
 - **[`WAF.md`](WAF.md)** — the WAF design (shared across both).
+- **[`EDGE.md`](EDGE.md)** — the out-of-cluster edge proxy (Rust/Pingora) + in-cluster control plane (Go, REST cert+key + WAF distribution). Phase 1 implemented.
 - **[`conformance/`](conformance/)** — language-neutral fixtures both implementations must satisfy (e.g. the WAF CEL corpus).
 
 > Neither implementation is "the migration target" anymore — they are both
@@ -18,7 +19,7 @@ vars, and metric names.
 ## Layout
 
 ```
-SPEC.md  WAF.md  README.md  CLAUDE.md  LICENSE  SKILL.md
+SPEC.md  WAF.md  EDGE.md  README.md  CLAUDE.md  LICENSE  SKILL.md
 deploy/                 # shared Kubernetes manifests + RBAC (image-agnostic)
 conformance/            # shared cross-impl fixtures (waf-cel-corpus.md, …)
 .github/workflows/      # go-{test,build,release}.yaml + rust-{test,build,release}.yaml
@@ -29,9 +30,19 @@ go/                     # Go implementation — module .../parapet-ingress-contr
   CLAUDE.md             #   Go-specific architecture guide
   go.mod  cmd/  controller*.go  plugin/  proxy/  route/  cert/  k8s/
   metric/  state/  debounce/  wafrule/  retry.go  Dockerfile  Makefile
+  edgecp/               #   edge control-plane lib (cert store, authz, reload, REST server)
+  cmd/edge-controlplane/ #  edge control-plane binary (see EDGE.md)
 rust/                   # Rust implementation
   README.md  controller/  Dockerfile  PHASE*.md  bench/  spike/
+  edge/                 #   out-of-cluster Pingora edge proxy (openssl; workspace member)
 ```
+
+> **Edge control plane.** The control plane is **Go** (`go/cmd/edge-controlplane`
+> + `go/edgecp`), reusing `go/cert`/`go/k8s`/`go/wafrule`; it serves per-edge
+> cert+key (and, later, WAF rules) over an HTTPS REST + bearer-token API. The
+> **edge** (`rust/edge`) is a normal `rust/` workspace member on the openssl
+> backend. They share only the HTTP/JSON contract — no shared code. See
+> [`EDGE.md`](EDGE.md).
 
 ## Working in this repo
 
@@ -41,9 +52,11 @@ rust/                   # Rust implementation
   other should call out the divergence (and mark it in SPEC) or be a bug.
 - **Go work** → `cd go` (module root). See [`go/CLAUDE.md`](go/CLAUDE.md).
 - **Rust work** → `cd rust`. See [`rust/README.md`](rust/README.md).
-- **Images**: Go publishes `…/parapet-ingress-controller:<sha|tag>`; Rust publishes
-  `…/parapet-ingress-controller:rust-<sha>`. `deploy/` is image-agnostic — point it
-  at whichever stream a cluster runs.
+- **Images**: all under one `…/parapet-ingress-controller` repo, distinguished by
+  a tag prefix per module — Go controller `:<sha|tag>`, Rust controller
+  `:rust-<sha>`, edge control plane `:controlplane-<sha>`, edge proxy
+  `:edge-<sha>`. `deploy/` is image-agnostic — point it at whichever stream a
+  cluster runs.
 
 ## Quick commands
 
@@ -54,3 +67,11 @@ cd go && go test ./... && go vet ./...
 cd rust && cargo test -p parapet-ingress-controller
 cd rust && cargo test -p parapet-ingress-controller --features proxy,cluster
 ```
+
+## Before committing
+
+**Always run `cargo fmt --all --check` (in `rust/`) and `gofmt -l` (in `go/`)
+before committing — CI's lint job fails on any unformatted file.** Run
+`cargo fmt --all` / `gofmt -w .` to fix, then re-run the check until clean.
+Do not commit over a red build: run the relevant `cargo build`/`go build` and
+confirm it passes first — a green editor or a stale log is not proof.

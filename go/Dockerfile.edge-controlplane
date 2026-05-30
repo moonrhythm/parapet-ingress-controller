@@ -1,0 +1,34 @@
+# syntax=docker/dockerfile:1
+#
+# Edge control plane (Go). A pure-Go HTTP server (no CGO/brotli/GeoIP), so it
+# builds static and runs on distroless/static. Distributes per-edge TLS cert+key
+# over HTTPS REST. See ../EDGE.md. Build context is this `go/` directory:
+#
+#     docker build -f go/Dockerfile.edge-controlplane -t parapet-edge-controlplane go/
+FROM golang:1.26.3-trixie AS build
+
+ARG VERSION
+ARG GOAMD64
+
+ENV CGO_ENABLED=0
+ENV GOAMD64=$GOAMD64
+
+WORKDIR /workspace
+ADD go.mod go.sum ./
+RUN go mod download
+
+ADD . .
+RUN go build \
+		-o edge-controlplane \
+		-ldflags "-w -s -X main.version=$VERSION" \
+		./cmd/edge-controlplane
+
+# Static binary + CA roots only; no shell, no package manager.
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=build /workspace/edge-controlplane /usr/local/bin/edge-controlplane
+
+# HTTPS REST (distributes private keys — keep off the public LB; see EDGE.md).
+EXPOSE 8443
+
+ENTRYPOINT ["/usr/local/bin/edge-controlplane"]

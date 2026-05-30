@@ -1,0 +1,109 @@
+# Edge proxy (Rust/Pingora) — terminates public TLS locally with cert+key fetched
+# from the in-cluster control plane, and forwards to parapet. See ../../EDGE.md.
+#
+# The edge typically runs OUTSIDE the cluster (closer to clients). This manifest
+# is for the case where you run it in a *separate* edge cluster / node pool; adapt
+# the env to your environment. The defining requirement is that the edge can reach
+# the control-plane Service over a private path (tunnel / VPC peering).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: parapet-edge
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: parapet-edge
+  namespace: parapet-edge
+  labels:
+    app: parapet-edge
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: parapet-edge
+  template:
+    metadata:
+      name: parapet-edge
+      labels:
+        app: parapet-edge
+    spec:
+      containers:
+        - name: parapet-edge
+          image: gcr.io/moonrhythm-containers/parapet-ingress-controller:edge-latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: EDGE_LISTEN
+              value: "0.0.0.0:443"
+            # The domains THIS edge serves (its shard) — pre-fetched, and the
+            # bearer token must be authorized for them. Leave EMPTY to serve ALL
+            # domains (certs fetched on demand per SNI; the token's authz still
+            # bounds which resolve). See EDGE.md "Pinned vs serve-all".
+            - name: EDGE_DOMAINS
+              value: "acme.com,www.acme.com"
+            # Control-plane endpoint (private path) + the edge's bearer token.
+            - name: EDGE_CP_ENDPOINT
+              value: "https://edge-controlplane.parapet-ingress-controller.svc:8443"
+            - name: EDGE_CP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: parapet-edge-cp
+                  key: token
+            # Trust the control plane's server cert (internal CA). Optional if the
+            # cert chains to a public root.
+            - name: EDGE_CP_CA
+              value: /cp-ca/ca.crt
+            # Where to forward (the in-cluster parapet, reached via the same private
+            # path). Plaintext h2c by default; set EDGE_PARAPET_TLS=true to
+            # re-encrypt across an untrusted hop.
+            - name: EDGE_PARAPET_ADDR
+              value: "parapet-ingress-controller.parapet-ingress-controller.svc:80"
+            - name: EDGE_PARAPET_TLS
+              value: "false"
+            - name: EDGE_REFRESH_INTERVAL
+              value: "300"
+            # Phase 2: run the global WAF at the edge (early-drop; parapet stays
+            # authoritative). Fetched from the control plane's GET /v1/waf.
+            - name: EDGE_WAF_ENABLED
+              value: "true"
+            # GeoIP/ASN at the edge (request.country / request.asn) resolve from
+            # the TRUE client IP. Same env as the controller; the image bakes both
+            # IPLocate DBs at these default paths. Set "" to disable a lookup.
+            - name: WAF_GEOIP_DB
+              value: /geoip/ip-to-country.mmdb
+            - name: WAF_ASN_DB
+              value: /geoip/ip-to-asn.mmdb
+            - name: RUST_LOG
+              value: "info"
+          ports:
+            - name: https
+              containerPort: 443
+          volumeMounts:
+            - name: cp-ca
+              mountPath: /cp-ca
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: cp-ca
+          secret:
+            secretName: parapet-edge-cp-ca # ca.crt the edge uses to verify the control plane
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: parapet-edge
+  namespace: parapet-edge
+  labels:
+    app: parapet-edge
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local # preserve client source IP (edge is the first hop)
+  selector:
+    app: parapet-edge
+  ports:
+    - name: https
+      port: 443
+      targetPort: https

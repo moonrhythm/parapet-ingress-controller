@@ -1,0 +1,239 @@
+#!/usr/bin/env bash
+# Cross-language end-to-end smoke test for the edge + control plane, with NO
+# Kubernetes cluster. It wires the REAL binaries together:
+#
+#   client --TLS--> rust edge --(fetches cert+key + WAF rules)--> go control plane
+#                       │                                              (fs backend)
+#                       └--(forwards, if not WAF-blocked)--> dummy upstream ("parapet")
+#
+# It proves:
+#   Phase 1 — the edge fetches a cert+key it does NOT have locally from the
+#     control plane (bearer-authorized), terminates TLS with it, forwards upstream.
+#   Phase 2 — the edge fetches the GLOBAL WAF ruleset and blocks a matching
+#     request at the edge (early drop) before it reaches the upstream.
+#
+# The control plane reads cert + WAF ConfigMap from static manifests via
+# KUBERNETES_BACKEND=fs, so no cluster is needed.
+#
+# Usage:  deploy/edge/e2e/run.sh
+# Requires: openssl, curl, python3, nc, and a Go + Rust toolchain. Exit 0 = pass.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+WORK="$(mktemp -d)"
+CP_PORT=18443
+EDGE_PORT=18080
+UP_PORT=18090
+TOKEN="e2e-secret-token"
+DOMAIN="test.local"
+PIDS=()
+
+cleanup() {
+  for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+say() { printf '\n=== %s ===\n' "$*"; }
+fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
+
+wait_for_port() {
+  local port="$1" name="$2" i
+  for i in $(seq 1 50); do
+    if nc -z 127.0.0.1 "$port" 2>/dev/null; then return 0; fi
+    sleep 0.2
+  done
+  fail "$name did not come up on :$port"
+}
+
+# ---------------------------------------------------------------------------
+say "1. generate test PKI (CA, control-plane server cert, $DOMAIN leaf)"
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout "$WORK/ca.key" -out "$WORK/ca.crt" -days 1 -subj "/CN=e2e-ca" 2>/dev/null
+
+gen_cert() { # name CN  -> name.key/name.crt signed by the CA, SAN=CN
+  local name="$1" cn="$2"
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+    -keyout "$WORK/$name.key" -out "$WORK/$name.csr" -subj "/CN=$cn" 2>/dev/null
+  openssl x509 -req -in "$WORK/$name.csr" -CA "$WORK/ca.crt" -CAkey "$WORK/ca.key" \
+    -CAcreateserial -days 1 -extfile <(printf 'subjectAltName=DNS:%s' "$cn") \
+    -out "$WORK/$name.crt" 2>/dev/null
+}
+gen_cert cp localhost      # control-plane HTTPS server cert
+gen_cert leaf "$DOMAIN"    # the cert the edge will fetch + serve for $DOMAIN
+
+# ---------------------------------------------------------------------------
+say "2. write static manifests (TLS Secret + global WAF ConfigMap) + tokens.json"
+mkdir -p "$WORK/manifests"
+b64() { base64 < "$1" | tr -d '\n'; }
+cat > "$WORK/manifests/leaf-secret.yaml" <<EOF
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/tls
+metadata:
+  name: leaf-tls
+  namespace: default
+data:
+  tls.crt: $(b64 "$WORK/leaf.crt")
+  tls.key: $(b64 "$WORK/leaf.key")
+EOF
+# Global WAF baseline: block /blocked. Namespace "default" matches POD_NAMESPACE
+# below (the global-ruleset boundary); label marks it as the global role.
+cat > "$WORK/manifests/waf-global.yaml" <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: waf-global
+  namespace: default
+  labels:
+    parapet.moonrhythm.io/waf: global
+data:
+  rules.yaml: |
+    rules:
+      - id: block-test-path
+        expression: request.path == "/blocked"
+        action: block
+        status: 403
+        message: blocked-by-edge-waf
+      - id: block-geo-on-path
+        expression: request.path == "/geo" && request.country == "XX"
+        action: block
+        status: 403
+        message: blocked-by-geo
+EOF
+# A tenant ZONE (label=zone) in namespace "default" → zone key "default/myzone".
+cat > "$WORK/manifests/waf-zone.yaml" <<EOF
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: myzone
+  namespace: default
+  labels:
+    parapet.moonrhythm.io/waf: zone
+data:
+  rules.yaml: |
+    rules:
+      - id: zone-block-path
+        expression: request.path == "/zoneblocked"
+        action: block
+        status: 403
+        message: blocked-by-zone
+EOF
+# An Ingress binds $DOMAIN to that zone via the waf-zone annotation (bare id →
+# same-namespace zone "default/myzone"). The control plane derives host→zoneKey.
+cat > "$WORK/manifests/ingress.yaml" <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: default
+  annotations:
+    parapet.moonrhythm.io/waf-zone: myzone
+spec:
+  rules:
+    - host: $DOMAIN
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80
+EOF
+printf '{"%s":["%s"]}' "$TOKEN" "$DOMAIN" > "$WORK/tokens.json"
+
+# ---------------------------------------------------------------------------
+say "3. build binaries"
+( cd "$REPO/go" && go build -o "$WORK/edge-controlplane" ./cmd/edge-controlplane ) \
+  || fail "go build control plane"
+( cd "$REPO/rust" && cargo build --quiet -p parapet-edge --bin parapet-edge \
+  && cp "$REPO/rust/target/debug/parapet-edge" "$WORK/parapet-edge" ) \
+  || fail "cargo build edge"
+
+# ---------------------------------------------------------------------------
+say "4. start dummy upstream (stands in for parapet)"
+python3 -c "
+import http.server, socketserver
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        body=b'hello-from-upstream'
+        self.send_response(200); self.send_header('content-length',str(len(body))); self.end_headers()
+        self.wfile.write(body)
+    def log_message(self,*a): pass
+socketserver.TCPServer(('127.0.0.1',$UP_PORT),H).serve_forever()
+" & PIDS+=($!)
+wait_for_port "$UP_PORT" upstream
+
+say "5. start the Go control plane (fs backend, WAF enabled)"
+KUBERNETES_BACKEND=fs KUBERNETES_FS="$WORK/manifests" \
+  CP_LISTEN=":$CP_PORT" CP_TLS_CERT="$WORK/cp.crt" CP_TLS_KEY="$WORK/cp.key" \
+  CP_TOKENS_FILE="$WORK/tokens.json" WATCH_NAMESPACE="" \
+  POD_NAMESPACE=default CP_WAF_ENABLED=true \
+  "$WORK/edge-controlplane" > "$WORK/cp.log" 2>&1 & PIDS+=($!)
+wait_for_port "$CP_PORT" "control plane"
+
+say "6. start the Rust edge (fetches cert + WAF rules; GeoIP from fixture DB)"
+# Point the edge at the conformance GeoIP fixtures so request.country resolves at
+# the edge. Loopback (127.0.0.1) is unmapped in the country fixture → "XX".
+EDGE_LISTEN="127.0.0.1:$EDGE_PORT" \
+  EDGE_CP_ENDPOINT="https://localhost:$CP_PORT" EDGE_CP_TOKEN="$TOKEN" \
+  EDGE_CP_CA="$WORK/ca.crt" EDGE_DOMAINS="$DOMAIN" \
+  EDGE_PARAPET_ADDR="127.0.0.1:$UP_PORT" EDGE_PARAPET_TLS=false \
+  EDGE_WAF_ENABLED=true \
+  WAF_GEOIP_DB="$REPO/conformance/geoip/iplocate-country.mmdb" \
+  WAF_ASN_DB="$REPO/conformance/geoip/iplocate-asn.mmdb" \
+  RUST_LOG=info \
+  "$WORK/parapet-edge" > "$WORK/edge.log" 2>&1 & PIDS+=($!)
+wait_for_port "$EDGE_PORT" edge
+
+# ---------------------------------------------------------------------------
+say "7. assertions"
+# Phase 1: a normal request terminates TLS with the fetched cert and reaches upstream.
+OUT="$(curl -sS --cacert "$WORK/ca.crt" --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" \
+  "https://$DOMAIN:$EDGE_PORT/" 2>"$WORK/curl.err")" \
+  || { cat "$WORK/curl.err" "$WORK/edge.log" "$WORK/cp.log" >&2; fail "curl through edge failed"; }
+[ "$OUT" = "hello-from-upstream" ] || fail "unexpected body for /: $OUT"
+echo "  ✓ TLS terminated with control-plane-fetched cert; / forwarded to upstream"
+
+# Phase 2: the global WAF rule blocks /blocked AT THE EDGE with 403 (never upstream).
+CODE="$(curl -s -o "$WORK/blocked.body" -w '%{http_code}' --cacert "$WORK/ca.crt" \
+  --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" "https://$DOMAIN:$EDGE_PORT/blocked")" \
+  || fail "curl /blocked failed"
+[ "$CODE" = "403" ] || { cat "$WORK/edge.log" >&2; fail "/blocked: want 403, got $CODE"; }
+grep -q "blocked-by-edge-waf" "$WORK/blocked.body" || fail "/blocked: missing WAF message body"
+echo "  ✓ global WAF blocked /blocked at the edge (403, custom message)"
+
+# And a non-matching path is still allowed through.
+OUT2="$(curl -sS --cacert "$WORK/ca.crt" --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" \
+  "https://$DOMAIN:$EDGE_PORT/allowed")"
+[ "$OUT2" = "hello-from-upstream" ] || fail "non-matching path unexpectedly blocked: $OUT2"
+echo "  ✓ non-matching path still forwarded (WAF is selective)"
+
+# Phase 2 GeoIP: the edge resolves request.country from its own DB (loopback → XX),
+# so the country rule fires AT THE EDGE — proving GeoIP works edge-side.
+GEO="$(curl -s -o "$WORK/geo.body" -w '%{http_code}' --cacert "$WORK/ca.crt" \
+  --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" "https://$DOMAIN:$EDGE_PORT/geo")" \
+  || fail "curl /geo failed"
+[ "$GEO" = "403" ] || { cat "$WORK/edge.log" >&2; fail "/geo (country XX): want 403, got $GEO"; }
+grep -q "blocked-by-geo" "$WORK/geo.body" || fail "/geo: missing geo WAF message"
+echo "  ✓ edge GeoIP resolved request.country (XX) → country rule blocked /geo"
+
+# Phase 3: the zone bound to $DOMAIN (via the Ingress annotation) blocks
+# /zoneblocked AT THE EDGE — proving zone distribution + host→zone resolution.
+ZONE="$(curl -s -o "$WORK/zone.body" -w '%{http_code}' --cacert "$WORK/ca.crt" \
+  --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" "https://$DOMAIN:$EDGE_PORT/zoneblocked")" \
+  || fail "curl /zoneblocked failed"
+[ "$ZONE" = "403" ] || { cat "$WORK/edge.log" >&2; fail "/zoneblocked: want 403, got $ZONE"; }
+grep -q "blocked-by-zone" "$WORK/zone.body" || fail "/zoneblocked: missing zone WAF message"
+echo "  ✓ tenant zone (host→zone bound) blocked /zoneblocked at the edge"
+
+# Negative: unknown SNI serves the self-signed fallback (CA validation must fail).
+if curl -sf --cacert "$WORK/ca.crt" --resolve "other.local:$EDGE_PORT:127.0.0.1" \
+     "https://other.local:$EDGE_PORT/" >/dev/null 2>&1; then
+  fail "unknown SNI unexpectedly validated against our CA"
+fi
+echo "  ✓ unknown SNI falls back to self-signed (not served the real cert)"
+
+say "E2E PASSED"
