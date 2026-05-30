@@ -3,6 +3,7 @@
 //! / X-Forwarded-* handling, the JSON access log, and request metrics. Mirrors
 //! the Go controller's request path.
 
+pub mod allocmetrics;
 pub mod cert;
 pub mod limit;
 pub mod metrics;
