@@ -11,6 +11,19 @@ mod tls;
 mod waf;
 mod wafrefresh;
 
+// jemalloc as the global allocator — same reasoning as the controller (see
+// controller/src/main.rs): glibc keeps freed memory in per-thread arenas and
+// seldom returns it to the OS, so under Pingora's many-worker-thread HTTP/2 load
+// resident memory ratchets upward for the process lifetime. jemalloc fragments
+// far less and purges idle pages back to the OS on a decay timer (defaults:
+// dirty_decay_ms=10s, muzzy_decay_ms=0). `background_threads` runs that purge
+// off the request path on Linux; `unprefixed_malloc_on_supported_platforms`
+// routes the C deps (OpenSSL) through jemalloc too. Override decay at runtime
+// with `_RJEM_MALLOC_CONF`. msvc isn't a build target.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::sync::Arc;
 use std::time::Duration;
 

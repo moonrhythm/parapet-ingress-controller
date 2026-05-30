@@ -30,6 +30,18 @@ bytes = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# jemalloc as the global allocator (set in main.rs), same rationale as the
+# controller: glibc retains freed memory in per-thread arenas and seldom returns
+# it to the OS, so under Pingora's many-worker-thread H2 load RSS ratchets upward
+# for the process lifetime. jemalloc fragments less and purges idle pages back to
+# the OS on a decay timer. `unprefixed_malloc_on_supported_platforms` routes the
+# C deps (OpenSSL) through jemalloc too; `background_threads` runs the purge off
+# the request path. Built on Linux/macOS (gated to non-msvc in code).
+tikv-jemallocator = { version = "0.6", features = [
+    "unprefixed_malloc_on_supported_platforms",
+    "background_threads",
+] }
+
 [[bin]]
 name = "parapet-edge"
 path = "src/main.rs"
