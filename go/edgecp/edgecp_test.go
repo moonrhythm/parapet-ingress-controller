@@ -69,7 +69,8 @@ func TestCertStoreSNIMatch(t *testing.T) {
 
 func TestAuthz(t *testing.T) {
 	a := NewAuthz(map[string][]string{
-		"tok-eu": {"acme.com", "*.acme.com"},
+		"tok-eu":  {"acme.com", "*.acme.com"},
+		"tok-all": {"*"},
 	})
 	if !a.Allowed("tok-eu", "acme.com") {
 		t.Error("exact allow failed")
@@ -82,6 +83,17 @@ func TestAuthz(t *testing.T) {
 	}
 	if a.Allowed("unknown", "acme.com") {
 		t.Error("should deny unknown token")
+	}
+	// A bare "*" is the serve-all catch-all: any non-empty host, including
+	// an apex, a deep subdomain, and a domain no other token lists.
+	if !a.Allowed("tok-all", "acme.com") {
+		t.Error("catch-all should allow apex")
+	}
+	if !a.Allowed("tok-all", "a.b.evil.com") {
+		t.Error("catch-all should allow deep subdomain")
+	}
+	if a.Allowed("tok-all", "") {
+		t.Error("catch-all should still deny empty host")
 	}
 	if !a.Known("tok-eu") || a.Known("nope") {
 		t.Error("Known() wrong")
