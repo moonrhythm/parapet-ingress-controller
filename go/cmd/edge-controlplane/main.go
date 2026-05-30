@@ -28,15 +28,26 @@ func main() {
 	addr := envOr("CP_LISTEN", ":8443")
 	watchNamespace := os.Getenv("WATCH_NAMESPACE") // "" = all namespaces
 	podNamespace := os.Getenv("POD_NAMESPACE")     // bounds the global WAF ruleset
-	tlsCert := os.Getenv("CP_TLS_CERT")            // server cert (required)
-	tlsKey := os.Getenv("CP_TLS_KEY")              // server key (required)
+	tlsCert := os.Getenv("CP_TLS_CERT")            // server cert (with CP_TLS_KEY → HTTPS)
+	tlsKey := os.Getenv("CP_TLS_KEY")              // server key
 	tokensJSON := os.Getenv("CP_TOKENS")           // {"<token>":["acme.com","*.acme.com"]}
 	tokensFile := os.Getenv("CP_TOKENS_FILE")      // alternative: path to that JSON
 	wafEnabled := os.Getenv("CP_WAF_ENABLED") == "true"
 
-	if tlsCert == "" || tlsKey == "" {
-		slog.Error("CP_TLS_CERT and CP_TLS_KEY are required (the API distributes private keys; HTTPS is mandatory)")
+	// TLS is on when both cert+key are set, off when both are empty (plaintext
+	// HTTP, for a trusted private network — tunnel / mesh / VPC peering where the
+	// transport is already encrypted/authenticated). One-of-two is a config error.
+	tlsEnabled := tlsCert != "" || tlsKey != ""
+	if tlsEnabled && (tlsCert == "" || tlsKey == "") {
+		slog.Error("CP_TLS_CERT and CP_TLS_KEY must be set together (or both empty for plaintext on a private network)")
 		os.Exit(1)
+	}
+	if !tlsEnabled {
+		// The API distributes private keys + a bearer token in cleartext, so this
+		// is only safe behind a private, encrypted transport. Make that loud.
+		slog.Warn("edge control plane: TLS DISABLED — serving plaintext HTTP. " +
+			"Only run this on a trusted private network (tunnel/mesh/VPC); the API " +
+			"carries private keys and bearer tokens in the clear.")
 	}
 
 	tokens, err := loadTokens(tokensJSON, tokensFile)
@@ -90,10 +101,18 @@ func main() {
 		Addr:              addr,
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 	}
-	slog.Info("edge control plane listening", "addr", addr, "tokens", len(tokens), "waf", wafEnabled)
-	if err := srv.ListenAndServeTLS(tlsCert, tlsKey); err != nil && err != http.ErrServerClosed {
+	if tlsEnabled {
+		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
+	slog.Info("edge control plane listening", "addr", addr, "tokens", len(tokens), "waf", wafEnabled, "tls", tlsEnabled)
+
+	if tlsEnabled {
+		err = srv.ListenAndServeTLS(tlsCert, tlsKey)
+	} else {
+		err = srv.ListenAndServe()
+	}
+	if err != nil && err != http.ErrServerClosed {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
 	}

@@ -36,8 +36,10 @@ spec:
             # Restrict the watch to where TLS Secrets live (default: all namespaces).
             - name: WATCH_NAMESPACE
               value: ""
-            # Server TLS (mandatory — the API ships private keys). Mount a cert
-            # the edges trust; e.g. an internal-CA-signed cert for this Service.
+            # Server TLS (the API ships private keys). Mount a cert the edges
+            # trust; e.g. an internal-CA-signed cert for this Service. To serve
+            # plaintext HTTP on a trusted private network instead, omit both
+            # CP_TLS_CERT and CP_TLS_KEY (and the server-tls volume below).
             - name: CP_TLS_CERT
               value: /tls/tls.crt
             - name: CP_TLS_KEY

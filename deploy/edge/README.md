@@ -17,6 +17,10 @@ Create these before applying (names referenced by the manifests):
 ```bash
 # 1. Control-plane server TLS (edges must trust this cert). Use a cert for the
 #    control-plane Service hostname, signed by an internal CA the edges carry.
+#    OPTIONAL: skip this (and unset CP_TLS_CERT/CP_TLS_KEY) to serve plaintext
+#    HTTP when the edge↔control-plane hop is a trusted encrypted private network
+#    (tunnel / mesh / VPC peering). Point the edge at http:// and drop its CA
+#    secret. Do NOT do this over the open internet — the API ships private keys.
 kubectl -n parapet-ingress-controller create secret tls edge-controlplane-tls \
   --cert=cp.crt --key=cp.key
 

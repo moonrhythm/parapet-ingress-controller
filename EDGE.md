@@ -211,6 +211,7 @@ parapet        :80    data (h2c from edge)                 unchanged role, now b
                :443   data (re-encrypt from edge)
                :9187  metrics
 controlplane   :8443  HTTPS GET (server-TLS + bearer)       NEW — Go, own Service
+                      (or plaintext HTTP on a trusted private network — TLS off)
                       distributes PRIVATE KEYS; NetworkPolicy: edge sources only;
                       NOT on the public LB
 ```
