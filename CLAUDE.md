@@ -67,3 +67,11 @@ cd go && go test ./... && go vet ./...
 cd rust && cargo test -p parapet-ingress-controller
 cd rust && cargo test -p parapet-ingress-controller --features proxy,cluster
 ```
+
+## Before committing
+
+**Always run `cargo fmt --all --check` (in `rust/`) and `gofmt -l` (in `go/`)
+before committing — CI's lint job fails on any unformatted file.** Run
+`cargo fmt --all` / `gofmt -w .` to fix, then re-run the check until clean.
+Do not commit over a red build: run the relevant `cargo build`/`go build` and
+confirm it passes first — a green editor or a stale log is not proof.

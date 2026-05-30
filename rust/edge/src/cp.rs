@@ -198,7 +198,10 @@ mod tests {
         }
 
         let req = captured.lock().unwrap().clone();
-        assert!(req.starts_with("GET /v1/certs?sni=acme.com "), "path: {req}");
+        assert!(
+            req.starts_with("GET /v1/certs?sni=acme.com "),
+            "path: {req}"
+        );
         assert!(
             req.contains("authorization: Bearer tok-123")
                 || req.contains("Authorization: Bearer tok-123"),
