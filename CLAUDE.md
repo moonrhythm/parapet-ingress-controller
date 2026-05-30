@@ -52,9 +52,11 @@ rust/                   # Rust implementation
   other should call out the divergence (and mark it in SPEC) or be a bug.
 - **Go work** → `cd go` (module root). See [`go/CLAUDE.md`](go/CLAUDE.md).
 - **Rust work** → `cd rust`. See [`rust/README.md`](rust/README.md).
-- **Images**: Go publishes `…/parapet-ingress-controller:<sha|tag>`; Rust publishes
-  `…/parapet-ingress-controller:rust-<sha>`. `deploy/` is image-agnostic — point it
-  at whichever stream a cluster runs.
+- **Images**: all under one `…/parapet-ingress-controller` repo, distinguished by
+  a tag prefix per module — Go controller `:<sha|tag>`, Rust controller
+  `:rust-<sha>`, edge control plane `:controlplane-<sha>`, edge proxy
+  `:edge-<sha>`. `deploy/` is image-agnostic — point it at whichever stream a
+  cluster runs.
 
 ## Quick commands
 

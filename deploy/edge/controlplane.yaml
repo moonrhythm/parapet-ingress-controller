@@ -27,7 +27,8 @@ spec:
       serviceAccountName: parapet-ingress-controller # reuses the controller's RBAC (get/list/watch secrets)
       containers:
         - name: edge-controlplane
-          image: registry.moonrhythm.io/parapet-edge-controlplane:latest
+          # Same image as the controller, module-prefixed tag (see edge-build.yaml).
+          image: registry.moonrhythm.io/parapet-ingress-controller:controlplane-latest
           imagePullPolicy: IfNotPresent
           env:
             - name: CP_LISTEN
