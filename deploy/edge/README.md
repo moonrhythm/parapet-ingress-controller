@@ -54,6 +54,20 @@ client IP via `WAF_GEOIP_DB` / `WAF_ASN_DB` (the edge image bakes both at the
 default paths). The edge also forwards `X-Forwarded-Country` / `X-Forwarded-ASN`
 to parapet. Tenant **zones** are not distributed yet (Phase 3).
 
+## End-to-end smoke tests
+
+Two cluster-free harnesses wire the real control plane (`KUBERNETES_BACKEND=fs`)
++ real edge + a dummy upstream and assert TLS termination, global/zone/GeoIP WAF
+blocks, and SNI fallback (identical assertions):
+
+- `e2e/run.sh` — builds local binaries (`go build` / `cargo build`) and runs them
+  as processes. Fast; needs a Go + Rust toolchain.
+- `e2e/run-docker.sh` — builds the actual shipped images
+  (`go/Dockerfile.edge-controlplane`, `rust/Dockerfile.edge`) and runs them as
+  containers on a shared Docker network. Slower (compiles in-image) but exercises
+  the real images. Needs Docker (BuildKit). `EDGE_E2E_BUILD=0` reuses existing
+  images; `CP_IMAGE` / `EDGE_IMAGE` override the tags.
+
 ## Rotation
 
 The edge serves a cached cert and refreshes every `EDGE_REFRESH_INTERVAL`
