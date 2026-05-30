@@ -157,7 +157,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 
-    let mut tls = TlsSettings::with_callbacks(Box::new(EdgeTls::new(store)))
+    // Serve-all mode fetches a missing SNI's cert on demand via the CP runtime.
+    let edge_tls = if serve_all {
+        EdgeTls::with_ondemand(store, cp.clone(), cp_rt.handle().clone())
+    } else {
+        EdgeTls::new(store)
+    };
+    let mut tls = TlsSettings::with_callbacks(Box::new(edge_tls))
         .map_err(|e| format!("tls settings: {e}"))?;
     tls.set_min_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))
         .map_err(|e| format!("min tls version: {e}"))?;

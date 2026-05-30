@@ -30,13 +30,15 @@ spec:
     spec:
       containers:
         - name: parapet-edge
-          image: registry.moonrhythm.io/parapet-edge:latest
+          image: gcr.io/moonrhythm-containers/parapet-ingress-controller:edge-latest
           imagePullPolicy: IfNotPresent
           env:
             - name: EDGE_LISTEN
               value: "0.0.0.0:443"
-            # The domains THIS edge serves (its shard). Only these certs are
-            # fetched, and the bearer token must be authorized for them.
+            # The domains THIS edge serves (its shard) — pre-fetched, and the
+            # bearer token must be authorized for them. Leave EMPTY to serve ALL
+            # domains (certs fetched on demand per SNI; the token's authz still
+            # bounds which resolve). See EDGE.md "Pinned vs serve-all".
             - name: EDGE_DOMAINS
               value: "acme.com,www.acme.com"
             # Control-plane endpoint (private path) + the edge's bearer token.

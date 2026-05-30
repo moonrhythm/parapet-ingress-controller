@@ -28,7 +28,7 @@ spec:
       containers:
         - name: edge-controlplane
           # Same image as the controller, module-prefixed tag (see edge-build.yaml).
-          image: registry.moonrhythm.io/parapet-ingress-controller:controlplane-latest
+          image: gcr.io/moonrhythm-containers/parapet-ingress-controller:controlplane-latest
           imagePullPolicy: IfNotPresent
           env:
             - name: CP_LISTEN

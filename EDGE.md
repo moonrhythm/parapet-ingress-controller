@@ -164,6 +164,16 @@ the monotonic rollout counter surfaced for observability.
 4. A handshake reads the live table and installs the matched cert+key locally —
    no control-plane interaction on the handshake path.
 
+**Pinned vs serve-all.** `EDGE_DOMAINS` lists the SNIs to pre-fetch (the edge's
+shard); a handshake for anything else gets the self-signed fallback. Leaving
+`EDGE_DOMAINS` **empty** switches the edge to **serve-all**: on a handshake for
+an SNI it doesn't have, it fetches that cert from the control plane on demand
+(driven on the CP runtime; the handshake awaits it), caches it, and the periodic
+refresh keeps it rotated. This adds one control-plane round trip to the *first*
+handshake per new SNI. The CP's per-token authz is still the boundary — an SNI
+the token isn't allowed for `403`s and falls back to self-signed — so serve-all
+only truly serves "all" when the edge's token is authorized for all domains.
+
 ### Rotation ordering (the gotcha)
 
 The edge serves a cached cert. On rotation the new cert must reach the edge

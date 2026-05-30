@@ -77,6 +77,12 @@ impl CertStore {
     pub fn len(&self) -> usize {
         self.cache.lock().unwrap().len()
     }
+
+    /// The fetch keys currently cached. The periodic refresh uses this to keep
+    /// on-demand-fetched domains (serve-all mode) rotated, not just a fixed list.
+    pub fn keys(&self) -> Vec<String> {
+        self.cache.lock().unwrap().keys().cloned().collect()
+    }
 }
 
 impl Default for CertStore {

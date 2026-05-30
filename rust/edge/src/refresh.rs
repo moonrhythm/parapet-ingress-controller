@@ -17,7 +17,10 @@ pub async fn refresh_all(cp: &CpClient, store: &CertStore, domains: &[String]) -
     store.len()
 }
 
-async fn refresh_one(cp: &CpClient, store: &CertStore, domain: &str) {
+/// Fetch one domain's cert from the control plane (ETag-revalidated) and swap it
+/// into the store; fail-static on error. Used by the periodic loop and by the
+/// on-demand TLS path (serve-all mode).
+pub async fn refresh_one(cp: &CpClient, store: &CertStore, domain: &str) {
     let etag = store.etag(domain);
     match cp.fetch_cert(domain, etag.as_deref()).await {
         Ok(CertFetch::Unchanged) => {}
@@ -39,15 +42,20 @@ async fn refresh_one(cp: &CpClient, store: &CertStore, domain: &str) {
     }
 }
 
-/// Run the refresh loop forever on the current runtime.
+/// Run the refresh loop forever on the current runtime. Each tick refreshes the
+/// configured `domains` PLUS whatever is currently cached (deduped) — so
+/// on-demand-fetched domains (serve-all mode, empty `domains`) keep rotating too.
 pub async fn run(cp: CpClient, store: Arc<CertStore>, domains: Vec<String>, interval: Duration) {
     let mut tick = tokio::time::interval(interval);
     // first tick fires immediately; skip it since startup already did a full fetch
     tick.tick().await;
     loop {
         tick.tick().await;
-        for d in &domains {
-            refresh_one(&cp, &store, d).await;
+        let mut seen = std::collections::HashSet::new();
+        for d in domains.iter().cloned().chain(store.keys()) {
+            if seen.insert(d.clone()) {
+                refresh_one(&cp, &store, &d).await;
+            }
         }
     }
 }
