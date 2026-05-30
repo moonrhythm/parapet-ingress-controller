@@ -95,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let listen = env_or("EDGE_LISTEN", "0.0.0.0:443");
+    let https_listen = env_or("EDGE_HTTPS_LISTEN", "0.0.0.0:443");
     let cp_endpoint = env_or("EDGE_CP_ENDPOINT", "https://controlplane:8443");
     let cp_token = std::env::var("EDGE_CP_TOKEN").map_err(|_| "EDGE_CP_TOKEN is required")?;
     let cp_ca = std::env::var("EDGE_CP_CA")
@@ -184,21 +184,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tls.set_min_proto_version(Some(pingora::tls::ssl::SslVersion::TLS1_2))
         .map_err(|e| format!("min tls version: {e}"))?;
     tls.enable_h2();
-    svc.add_tls_with_settings(&listen, None, tls);
+    svc.add_tls_with_settings(&https_listen, None, tls);
 
-    // Optional plaintext HTTP listener (default off). The edge does NOT redirect
-    // http→https; it forwards plain-HTTP requests to parapet with
-    // `X-Forwarded-Proto: http` (set in upstream_request_filter) so the core's
-    // per-ingress `redirect-https` plugin makes that decision. The global/zone WAF
-    // runs on this listener too. Empty = disabled (HTTPS only, unchanged default).
-    let http_listen = env_or("EDGE_HTTP_LISTEN", "");
+    // Plaintext HTTP listener (default 0.0.0.0:80; set EDGE_HTTP_LISTEN="" to
+    // disable). The edge does NOT redirect http→https; it forwards plain-HTTP
+    // requests to parapet with `X-Forwarded-Proto: http` (set in
+    // upstream_request_filter) so the core's per-ingress `redirect-https` plugin
+    // makes that decision. The global/zone WAF runs on this listener too.
+    let http_listen = env_or("EDGE_HTTP_LISTEN", "0.0.0.0:80");
     if !http_listen.is_empty() {
         svc.add_tcp(&http_listen);
         tracing::info!(%http_listen, "parapet edge HTTP listener (plaintext; no redirect, forwards to core)");
     }
 
     server.add_service(svc);
-    tracing::info!(%listen, "parapet edge listening (local TLS termination)");
+    tracing::info!(%https_listen, "parapet edge listening (local TLS termination)");
     let _cp_rt = cp_rt; // keep the refresh runtime alive
     server.run_forever()
 }

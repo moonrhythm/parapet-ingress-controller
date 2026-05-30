@@ -222,8 +222,8 @@ Because the edge sets `X-Forwarded-For` and parapet trusts it
 ## Ports & exposure
 
 ```
-edge           :443   public TLS (terminated locally)       EDGE_LISTEN
-               :80    public plaintext (optional, off)      EDGE_HTTP_LISTEN
+edge           :443   public TLS (terminated locally)       EDGE_HTTPS_LISTEN
+               :80    public plaintext (on; ""=disable)     EDGE_HTTP_LISTEN
 parapet        :80    data (h2c from edge)                 unchanged role, now behind edge
                :443   data (re-encrypt from edge)
                :9187  metrics
@@ -235,8 +235,8 @@ controlplane   :8443  HTTPS GET (server-TLS + bearer)       NEW — Go, own Serv
 
 ### Plaintext HTTP listener (no redirect — the core decides)
 
-`EDGE_HTTP_LISTEN` (default empty = off) adds a second, plaintext listener
-(e.g. `0.0.0.0:80`) to the same proxy service. The edge **does not** redirect
+`EDGE_HTTP_LISTEN` (default `0.0.0.0:80`; set to `""` to disable) adds a second,
+plaintext listener to the same proxy service. The edge **does not** redirect
 http→https itself; it forwards the request to parapet with `X-Forwarded-Proto:
 http` (the scheme is detected per connection from the TLS digest, so the TLS
 listener still forwards `https`). parapet's per-ingress `redirect-https` plugin
