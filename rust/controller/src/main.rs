@@ -5,6 +5,24 @@
 use std::path::Path;
 use std::sync::Arc;
 
+// Use jemalloc as the global allocator. glibc's malloc keeps freed memory in
+// per-thread arenas and seldom returns it to the OS, so under Pingora's
+// many-worker-thread HTTP/2 load — and the ~20s reconcile rebuilding thousands
+// of routes/certs in one transient burst — resident memory ratchets upward for
+// the process lifetime (the "Rust climbs to OOM while Go stays flat" curve).
+// jemalloc fragments far less (size-class slabs) and purges idle pages back to
+// the OS on a decay timer, so RSS tracks the live working set instead. Its
+// defaults already do this (dirty_decay_ms=10s, muzzy_decay_ms=0 → return
+// immediately); the `background_threads` Cargo feature additionally runs that
+// purge proactively off the request path on Linux, and
+// `unprefixed_malloc_on_supported_platforms` routes the C deps (OpenSSL,
+// zlib-ng) through jemalloc too, not just Rust allocations. To override the
+// decay at runtime, set the `_RJEM_MALLOC_CONF` env var (e.g.
+// `_RJEM_MALLOC_CONF=dirty_decay_ms:2000`). msvc isn't a build target.
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use controller::k8s;
 use controller::proxy::limit::HostConcurrency;
 use controller::proxy::server::{run, ServeConfig};

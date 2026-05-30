@@ -51,6 +51,20 @@ regex = { version = "1", optional = true }
 # GeoIP country lookup (request.country) from an IPLocate ip-to-country .mmdb.
 maxminddb = { version = "0.28", optional = true }
 
+# jemalloc as the global allocator for the proxy binary (set in main.rs). glibc
+# malloc retains freed memory in per-thread arenas and rarely returns it to the
+# OS, so under Pingora's many-worker-thread H2 load — and the ~20s reconcile's
+# large transient allocations — RSS ratchets upward for the process lifetime
+# (the "Rust climbs, Go flat" curve). jemalloc's size-class slabs (less
+# fragmentation) + decay-based page purging keep RSS tracking the live set.
+# `unprefixed_malloc_on_supported_platforms` routes the C deps (OpenSSL, zlib-ng)
+# through jemalloc too, not just Rust allocs; `background_threads` runs the
+# purging off the request path. Builds on Linux/macOS (gated to non-msvc in code).
+tikv-jemallocator = { version = "0.6", features = [
+    "unprefixed_malloc_on_supported_platforms",
+    "background_threads",
+], optional = true }
+
 [features]
 cluster = ["dep:kube", "dep:tokio", "dep:futures", "dep:rustls", "waf"]
 proxy = [
@@ -66,6 +80,7 @@ proxy = [
     "dep:bytes",
     "dep:env_logger",
     "dep:libc",
+    "dep:tikv-jemallocator",
     "waf",
 ]
 # The CEL WAF engine. Enabled by both `proxy` (evaluates) and `cluster`
