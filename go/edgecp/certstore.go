@@ -27,8 +27,8 @@ type certEntry struct {
 // Lookups do exact match then a single-label wildcard climb, matching
 // go/cert.Table.Get and the Rust cert::Table so all three agree on coverage.
 type CertStore struct {
-	mu      sync.RWMutex
-	byName  map[string]*certEntry // SAN (lowercased) -> entry
+	mu     sync.RWMutex
+	byName map[string]*certEntry // SAN (lowercased) -> entry
 }
 
 func NewCertStore() *CertStore {
