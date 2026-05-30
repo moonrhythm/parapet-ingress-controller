@@ -63,7 +63,9 @@ impl EdgeProxy {
         let proto = format!("{:?}", req.version);
         // The edge always terminates public TLS, so the client-facing scheme is https.
         let scheme = "https".to_string();
-        let client_ip = session.client_addr().and_then(|a| a.as_inet().map(|i| i.ip()));
+        let client_ip = session
+            .client_addr()
+            .and_then(|a| a.as_inet().map(|i| i.ip()));
         let remote_ip = client_ip.map(|ip| ip.to_string()).unwrap_or_default();
         let (country, asn) = match &self.waf {
             Some(w) => (w.country_of(client_ip), w.asn_of(client_ip)),
@@ -171,7 +173,9 @@ impl ProxyHttp for EdgeProxy {
         _ctx: &mut Self::CTX,
     ) -> Result<()> {
         upstream.insert_header("x-forwarded-proto", "https")?;
-        let client_ip = session.client_addr().and_then(|a| a.as_inet().map(|i| i.ip()));
+        let client_ip = session
+            .client_addr()
+            .and_then(|a| a.as_inet().map(|i| i.ip()));
         if let Some(ip) = client_ip {
             let ip = ip.to_string();
             upstream.insert_header("x-forwarded-for", ip.as_str())?;

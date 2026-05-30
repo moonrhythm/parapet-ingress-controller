@@ -58,7 +58,9 @@ impl EdgeWaf {
 
     pub fn country_of(&self, ip: Option<IpAddr>) -> String {
         match &self.geoip {
-            Some(g) => ip.and_then(|ip| g.country(ip)).unwrap_or_else(|| "XX".to_string()),
+            Some(g) => ip
+                .and_then(|ip| g.country(ip))
+                .unwrap_or_else(|| "XX".to_string()),
             None => String::new(),
         }
     }
@@ -99,7 +101,10 @@ impl EdgeWaf {
         let cur = self.zones.load();
         let mut new_zones: HashMap<String, Arc<Waf>> = HashMap::with_capacity(zones_yaml.len());
         for (key, yaml) in zones_yaml {
-            let z = cur.get(&key).cloned().unwrap_or_else(|| Arc::new(Waf::new()));
+            let z = cur
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(Waf::new()));
             if let Err(e) = parse_rules(&[yaml]).and_then(|r| z.set_rules(&r)) {
                 first_err.get_or_insert(format!("zone {key}: {e}"));
             }
@@ -119,14 +124,23 @@ impl EdgeWaf {
     }
 
     /// Evaluate the global ruleset. `on_match` fires per matched rule.
-    pub fn evaluate_global(&self, req: &RequestData, on_match: impl FnMut(&str, Action)) -> Decision {
+    pub fn evaluate_global(
+        &self,
+        req: &RequestData,
+        on_match: impl FnMut(&str, Action),
+    ) -> Decision {
         self.global.evaluate(req, &self.cfg, on_match)
     }
 
     /// Evaluate the zone bound to `host` (if any). Resolution is host-level:
     /// `host → zoneKey → zone`. Returns `Pass` when the host binds no zone or the
     /// zone has no rules (so the caller forwards).
-    pub fn evaluate_zone(&self, host: &str, req: &RequestData, on_match: impl FnMut(&str, Action)) -> Decision {
+    pub fn evaluate_zone(
+        &self,
+        host: &str,
+        req: &RequestData,
+        on_match: impl FnMut(&str, Action),
+    ) -> Decision {
         let hz = self.host_zone.load();
         let Some(key) = hz.get(host) else {
             return Decision::Pass;

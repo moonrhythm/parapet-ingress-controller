@@ -179,7 +179,11 @@ mod tests {
         let cp = CpClient::new(base, "tok-123".into(), None).unwrap();
         let got = cp.fetch_cert("acme.com", None).await.unwrap();
         match got {
-            CertFetch::Updated { chain_pem, key_pem, etag } => {
+            CertFetch::Updated {
+                chain_pem,
+                key_pem,
+                etag,
+            } => {
                 assert_eq!(chain_pem, b"CHAIN");
                 assert_eq!(key_pem, b"KEY");
                 assert_eq!(etag.as_deref(), Some("\"abc\""));
@@ -189,8 +193,11 @@ mod tests {
 
         let req = captured.lock().unwrap().clone();
         assert!(req.starts_with("GET /v1/certs/acme.com "), "path: {req}");
-        assert!(req.contains("authorization: Bearer tok-123") || req.contains("Authorization: Bearer tok-123"),
-            "missing bearer header: {req}");
+        assert!(
+            req.contains("authorization: Bearer tok-123")
+                || req.contains("Authorization: Bearer tok-123"),
+            "missing bearer header: {req}"
+        );
     }
 
     #[tokio::test]
@@ -204,7 +211,10 @@ mod tests {
         assert!(matches!(got, CertFetch::Unchanged));
 
         let req = captured.lock().unwrap().clone();
-        assert!(req.to_lowercase().contains("if-none-match: \"v1\""), "missing INM: {req}");
+        assert!(
+            req.to_lowercase().contains("if-none-match: \"v1\""),
+            "missing INM: {req}"
+        );
     }
 
     #[tokio::test]

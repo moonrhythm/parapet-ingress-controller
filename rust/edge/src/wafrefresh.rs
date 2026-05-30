@@ -23,7 +23,9 @@ async fn refresh_once(cp: &CpClient, waf: &EdgeWaf) {
             etag,
         }) => match waf.update(generation, global_rules, zones, host_zone_map, etag) {
             Ok(()) => tracing::info!(generation, "edge: WAF rulesets updated"),
-            Err(e) => tracing::warn!(error = %e, "edge: a WAF ruleset was rejected; kept last-good (per ruleset)"),
+            Err(e) => {
+                tracing::warn!(error = %e, "edge: a WAF ruleset was rejected; kept last-good (per ruleset)")
+            }
         },
         Err(e) => {
             tracing::warn!(error = %e, "edge: WAF fetch failed; keeping last-good ruleset");
