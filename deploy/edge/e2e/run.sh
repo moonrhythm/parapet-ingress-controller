@@ -23,6 +23,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 WORK="$(mktemp -d)"
 CP_PORT=18443
 EDGE_PORT=18080
+EDGE_HTTP_PORT=18081
 UP_PORT=18090
 TOKEN="e2e-secret-token"
 DOMAIN="test.local"
@@ -159,7 +160,10 @@ import http.server, socketserver
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         body=b'hello-from-upstream'
-        self.send_response(200); self.send_header('content-length',str(len(body))); self.end_headers()
+        self.send_response(200); self.send_header('content-length',str(len(body)))
+        # Echo the proto the edge forwarded so the test can assert http vs https.
+        self.send_header('x-seen-forwarded-proto', self.headers.get('x-forwarded-proto',''))
+        self.end_headers()
         self.wfile.write(body)
     def log_message(self,*a): pass
 socketserver.TCPServer(('127.0.0.1',$UP_PORT),H).serve_forever()
@@ -177,7 +181,7 @@ wait_for_port "$CP_PORT" "control plane"
 say "6. start the Rust edge (fetches cert + WAF rules; GeoIP from fixture DB)"
 # Point the edge at the conformance GeoIP fixtures so request.country resolves at
 # the edge. Loopback (127.0.0.1) is unmapped in the country fixture → "XX".
-EDGE_LISTEN="127.0.0.1:$EDGE_PORT" \
+EDGE_HTTPS_LISTEN="127.0.0.1:$EDGE_PORT" EDGE_HTTP_LISTEN="127.0.0.1:$EDGE_HTTP_PORT" \
   EDGE_CP_ENDPOINT="https://localhost:$CP_PORT" EDGE_CP_TOKEN="$TOKEN" \
   EDGE_CP_CA="$WORK/ca.crt" EDGE_DOMAINS="$DOMAIN" \
   EDGE_PARAPET_ADDR="127.0.0.1:$UP_PORT" EDGE_PARAPET_TLS=false \
@@ -187,15 +191,30 @@ EDGE_LISTEN="127.0.0.1:$EDGE_PORT" \
   RUST_LOG=info \
   "$WORK/parapet-edge" > "$WORK/edge.log" 2>&1 & PIDS+=($!)
 wait_for_port "$EDGE_PORT" edge
+wait_for_port "$EDGE_HTTP_PORT" "edge http"
 
 # ---------------------------------------------------------------------------
 say "7. assertions"
 # Phase 1: a normal request terminates TLS with the fetched cert and reaches upstream.
-OUT="$(curl -sS --cacert "$WORK/ca.crt" --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" \
+OUT="$(curl -sS -D "$WORK/https.hdr" --cacert "$WORK/ca.crt" --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" \
   "https://$DOMAIN:$EDGE_PORT/" 2>"$WORK/curl.err")" \
   || { cat "$WORK/curl.err" "$WORK/edge.log" "$WORK/cp.log" >&2; fail "curl through edge failed"; }
 [ "$OUT" = "hello-from-upstream" ] || fail "unexpected body for /: $OUT"
-echo "  ✓ TLS terminated with control-plane-fetched cert; / forwarded to upstream"
+# The TLS listener must forward X-Forwarded-Proto: https (echoed back by upstream).
+grep -qiE "^x-seen-forwarded-proto: https[[:space:]]*$" "$WORK/https.hdr" \
+  || { cat "$WORK/https.hdr" >&2; fail "TLS listener did not forward X-Forwarded-Proto: https"; }
+echo "  ✓ TLS terminated with control-plane-fetched cert; / forwarded to upstream (proto=https)"
+
+# Phase 1b: the plaintext HTTP listener forwards to upstream WITHOUT redirecting,
+# tagging the hop X-Forwarded-Proto: http so the in-cluster core (not the edge)
+# owns the http→https redirect decision.
+HTTP_OUT="$(curl -sS -D "$WORK/http.hdr" -H "Host: $DOMAIN" \
+  "http://127.0.0.1:$EDGE_HTTP_PORT/" 2>"$WORK/curlhttp.err")" \
+  || { cat "$WORK/curlhttp.err" "$WORK/edge.log" >&2; fail "curl through edge HTTP listener failed"; }
+[ "$HTTP_OUT" = "hello-from-upstream" ] || fail "unexpected body over http: $HTTP_OUT"
+grep -qiE "^x-seen-forwarded-proto: http[[:space:]]*$" "$WORK/http.hdr" \
+  || { cat "$WORK/http.hdr" >&2; fail "HTTP listener did not forward X-Forwarded-Proto: http"; }
+echo "  ✓ plaintext HTTP listener forwarded to upstream (proto=http, no edge redirect)"
 
 # Phase 2: the global WAF rule blocks /blocked AT THE EDGE with 403 (never upstream).
 CODE="$(curl -s -o "$WORK/blocked.body" -w '%{http_code}' --cacert "$WORK/ca.crt" \
