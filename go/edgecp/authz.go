@@ -17,7 +17,8 @@ type Authz struct {
 }
 
 // NewAuthz builds the table from a token→domains map. Domain patterns are
-// lowercased; matching mirrors cert.Table (exact, then single-label wildcard).
+// lowercased; matching mirrors cert.Table (exact, then single-label wildcard),
+// plus a bare "*" catch-all that authorizes the token for every host.
 func NewAuthz(tokens map[string][]string) *Authz {
 	t := make(map[string][]string, len(tokens))
 	for tok, domains := range tokens {
@@ -31,9 +32,12 @@ func NewAuthz(tokens map[string][]string) *Authz {
 }
 
 // Allowed reports whether the token is known and authorized for host. An unknown
-// token (or empty host) is denied. The returned bool is the only signal — callers
-// must not distinguish "unknown token" from "known but unauthorized" to the
-// client beyond 401 vs 403 (handled in the server).
+// token (or empty host) is denied. A token whose domain list contains a bare "*"
+// is authorized for every (non-empty) host — the catch-all for a serve-all edge
+// that may front any domain (pure anycast/failover, where per-edge sharding buys
+// nothing; see EDGE.md). The returned bool is the only signal — callers must not
+// distinguish "unknown token" from "known but unauthorized" to the client beyond
+// 401 vs 403 (handled in the server).
 func (a *Authz) Allowed(token, host string) bool {
 	domains, ok := a.tokens[token]
 	if !ok {
@@ -44,7 +48,7 @@ func (a *Authz) Allowed(token, host string) bool {
 		return false
 	}
 	for _, d := range domains {
-		if d == name {
+		if d == "*" || d == name {
 			return true
 		}
 	}

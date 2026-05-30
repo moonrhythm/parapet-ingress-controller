@@ -30,7 +30,7 @@ func main() {
 	podNamespace := os.Getenv("POD_NAMESPACE")     // bounds the global WAF ruleset
 	tlsCert := os.Getenv("CP_TLS_CERT")            // server cert (with CP_TLS_KEY → HTTPS)
 	tlsKey := os.Getenv("CP_TLS_KEY")              // server key
-	tokensJSON := os.Getenv("CP_TOKENS")           // {"<token>":["acme.com","*.acme.com"]}
+	tokensJSON := os.Getenv("CP_TOKENS")           // {"<token>":["acme.com","*.acme.com"]} ("*" = all domains)
 	tokensFile := os.Getenv("CP_TOKENS_FILE")      // alternative: path to that JSON
 	wafEnabled := os.Getenv("CP_WAF_ENABLED") == "true"
 

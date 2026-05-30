@@ -97,8 +97,10 @@ Each edge holds a **per-edge bearer token** presented as `Authorization: Bearer
 <token>` on every control-plane request, over server-side HTTPS. The token maps
 (control-plane side) to an **allowed set of domains/zones** — Phase 1 from a
 static config (token → domains), later from a k8s Secret/ConfigMap. Allowed
-hosts match exact + single-label-wildcard like `cert.Table`. Deny by default. One
-`authorize(token, host|zone)` check gates both endpoints:
+hosts match exact + single-label-wildcard like `cert.Table`, plus a bare `"*"`
+catch-all entry in the domain list that authorizes the token for **every** host
+(the serve-all case below). Deny by default. One `authorize(token, host|zone)`
+check gates both endpoints:
 
 - `GET /v1/certs/{sni}` → require `sni ∈ allowed(token)`.
 - `GET /v1/waf` → return only the zones / host-map entries for the token's domains.
@@ -120,7 +122,10 @@ to blunt enumeration.
 
 > This isolation only buys anything if **edges are sharded by domain**. If every
 > edge may serve every domain (pure anycast/failover), every allowlist is "all"
-> and the per-edge scoping is moot. Decide sharding first.
+> and the per-edge scoping is moot. Decide sharding first. For that case give the
+> token a single `"*"` entry — an explicit all-domains grant — instead of trying
+> to enumerate every domain; the token then carries the full blast radius, so
+> rotate it aggressively.
 
 ## The HTTPS API (REST)
 
