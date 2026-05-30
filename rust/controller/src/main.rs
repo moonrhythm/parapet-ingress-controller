@@ -102,6 +102,12 @@ fn main() {
     #[cfg(target_os = "linux")]
     controller::proxy::procmetrics::start();
 
+    // jemalloc allocated/resident/retained gauges: lets Grafana separate a true
+    // leak (allocated climbs) from allocator retention (resident climbs while
+    // allocated is flat) on the live /metrics endpoint. See allocmetrics.rs.
+    #[cfg(not(target_env = "msvc"))]
+    controller::proxy::allocmetrics::start();
+
     let ingress_class = env_or("INGRESS_CLASS", "parapet");
     let load_all_certs = std::env::var("LOAD_ALL_CERTS").ok().as_deref() == Some("true");
     let http_port = env_or("HTTP_PORT", "80");
