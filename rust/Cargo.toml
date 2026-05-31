@@ -14,3 +14,12 @@ members = ["spike", "controller", "edge"]
 strip = true
 lto = "fat"
 codegen-units = 1
+
+# Debug-image profile: same codegen as release but KEEPS symbols + line tables so
+# `jeprof` can attribute a jemalloc heap profile to source. Used only by the
+# heap-profiling image (Dockerfile `CARGO_PROFILE=release-prof`), never shipped to
+# prod. Strip stays off; debug=1 is line-tables for symbolization.
+[profile.release-prof]
+inherits = "release"
+strip = false
+debug = 1
