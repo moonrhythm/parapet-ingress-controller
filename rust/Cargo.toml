@@ -1,10 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["spike", "controller", "edge"]
-# Vendored, patched copy of pingora-core (see [patch.crates-io] below). Excluded
-# from the workspace so it builds with its own crates.io deps, not ours.
-exclude = ["vendor/pingora-core"]
+# Vendored, patched copies of pingora-core and pingora-pool (see [patch.crates-io]
+# below). Excluded from the workspace so they build with their own crates.io deps,
+# not ours.
+exclude = ["vendor/pingora-core", "vendor/pingora-pool"]
 
+[patch.crates-io]
 # Add an idle timeout to pingora 0.8's downstream HTTP/2 serve loop, which
 # otherwise has none (its `TODO: add a timeout?`): an idle or half-open H2
 # connection — a client/scanner that finishes the handshake then sends nothing —
@@ -14,8 +16,15 @@ exclude = ["vendor/pingora-core"]
 # http::v2::server::handshake dominate). Our vendored copy closes idle connections
 # (no in-flight streams) after 60s; long-lived streams (SSE) are unaffected. Only
 # src/apps/mod.rs diverges from upstream. Drop once fixed in an upstream release.
-[patch.crates-io]
 pingora-core = { path = "vendor/pingora-core" }
+
+# Fix the unbounded ConnectionPool growth in pingora 0.8 (cloudflare/pingora#748):
+# a PoolNode is created per distinct upstream peer and never removed, so a proxy
+# whose backends churn (k8s pod IPs on every deploy/HPA) leaks one node per peer
+# for the process lifetime — the controller's "Rust RSS climbs to OOM" curve.
+# Our vendored copy removes the node once its last connection is popped. Drop this
+# patch once the fix lands in an upstream pingora-pool release.
+pingora-pool = { path = "vendor/pingora-pool" }
 
 # Release profile tuned for the production container image: a smaller binary
 # (~24M unstripped -> ~13M) and better runtime perf, which feeds the Phase 5
