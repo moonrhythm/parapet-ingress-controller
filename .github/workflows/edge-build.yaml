@@ -17,6 +17,14 @@ on:
       - 'rust/**'
       - 'deploy/edge/**'
       - '.github/workflows/edge-build.yaml'
+  # Also build + push on PRs (tagged with the PR's commit SHA) so a PR image can
+  # be deployed/tested before merge. Same-repo PRs only (needs registry creds).
+  pull_request:
+    paths:
+      - 'go/**'
+      - 'rust/**'
+      - 'deploy/edge/**'
+      - '.github/workflows/edge-build.yaml'
   workflow_dispatch: {}
 
 jobs:
