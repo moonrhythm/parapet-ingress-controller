@@ -1,6 +1,18 @@
 [workspace]
 resolver = "2"
 members = ["spike", "controller", "edge"]
+# Vendored, patched copy of pingora-pool (see [patch.crates-io] below). Excluded
+# from the workspace so it builds with its own crates.io deps, not ours.
+exclude = ["vendor/pingora-pool"]
+
+# Fix the unbounded ConnectionPool growth in pingora 0.8 (cloudflare/pingora#748):
+# a PoolNode is created per distinct upstream peer and never removed, so a proxy
+# whose backends churn (k8s pod IPs on every deploy/HPA) leaks one node per peer
+# for the process lifetime — the controller's "Rust RSS climbs to OOM" curve.
+# Our vendored copy removes the node once its last connection is popped. Drop this
+# patch once the fix lands in an upstream pingora-pool release.
+[patch.crates-io]
+pingora-pool = { path = "vendor/pingora-pool" }
 
 # Release profile tuned for the production container image: a smaller binary
 # (~24M unstripped -> ~13M) and better runtime perf, which feeds the Phase 5
