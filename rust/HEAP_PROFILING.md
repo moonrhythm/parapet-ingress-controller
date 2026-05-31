@@ -45,9 +45,16 @@ and add — keep everything else identical to prod so the leak reproduces:
 ```
 
 - `lg_prof_sample:19` → sample ~every 512 KiB allocated (low overhead, good detail).
-- `lg_prof_interval:30` → auto-dump a profile every 2^30 B (~1 GiB) allocated, to
-  `/tmp/jeprof.<pid>.<seq>.heap`. At ~2 GB/h that's a dump every ~30 min; lower it
-  (e.g. `27` ≈ 128 MiB) for a dump sooner.
+- `lg_prof_interval:30` → auto-dump a profile every 2^30 B (1 GiB) of **allocation
+  activity** to `/tmp/jeprof.<pid>.<seq>.heap`. This is *gross* bytes allocated
+  (every per-request buffer), **not** net live-heap growth — so under real traffic
+  it fires fast: the **first dump lands within a couple of minutes**, then one
+  every minute-or-two. (Raise to `33`≈8 GiB for fewer files if it's too chatty.)
+
+Each `.heap` is a snapshot of the *currently live* sampled allocations, so the
+leak shows up by diffing an early dump against a much-later one (step 4) — let
+the pod run ~20–30 min of wall-clock so the later dump has accumulated clearly
+more leaked heap, even though many interval dumps exist by then.
 
 ## 3. Capture
 
