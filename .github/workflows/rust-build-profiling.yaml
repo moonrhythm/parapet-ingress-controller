@@ -1,0 +1,51 @@
+name: Rust Build (heap profiling)
+
+# Manually-triggered build of a DEBUG image with jemalloc heap profiling enabled
+# (`jemalloc-prof` feature → --enable-prof) and symbols kept (`release-prof`
+# profile, unstripped) so `jeprof` can attribute a leak to source. Runs on a
+# debian runtime so the dump files can be pulled with `kubectl cp`. Pushed under
+# a distinct `rust-prof-<sha>` tag so it never collides with the prod stream.
+# See rust/HEAP_PROFILING.md for the capture + analysis runbook.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build (rust, heap-profiling)
+    runs-on: self-hosted
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-github-actions/auth@v2
+        id: auth
+        with:
+          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS }}
+          token_format: access_token
+      - uses: docker/login-action@v3
+        with:
+          registry: us-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+      - uses: docker/login-action@v3
+        with:
+          registry: asia-southeast3-docker.pkg.dev
+          username: oauth2accesstoken
+          password: ${{ steps.auth.outputs.access_token }}
+      - uses: docker/setup-buildx-action@v3
+        with:
+          version: latest
+          platforms: linux/amd64
+      - uses: docker/build-push-action@v6
+        with:
+          context: rust
+          provenance: false
+          build-args: |
+            TARGET_CPU=x86-64-v3
+            CARGO_PROFILE=release-prof
+            EXTRA_FEATURES=,jemalloc-prof
+            RUNTIME_IMAGE=debian:trixie-slim
+          push: true
+          cache-from: type=gha,scope=rust-prof
+          cache-to: type=gha,mode=max,scope=rust-prof
+          tags: |
+            us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:rust-prof-${{ github.sha }}
+            asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:rust-prof-${{ github.sha }}

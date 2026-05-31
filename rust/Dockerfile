@@ -46,6 +46,12 @@ COPY . .
 # GOAMD64=v1 equivalent — for the compat image; LLVM has no "x86-64-v1").
 # Left empty by default for a portable, generic-baseline build.
 ARG TARGET_CPU=
+# Heap-profiling debug image: CARGO_PROFILE=release-prof (unstripped, for jeprof)
+# + EXTRA_FEATURES=,jemalloc-prof (build jemalloc with --enable-prof). Defaults
+# reproduce the normal release build exactly. Pair with
+# --build-arg RUNTIME_IMAGE=debian:trixie-slim so the dump files can be pulled.
+ARG CARGO_PROFILE=release
+ARG EXTRA_FEATURES=
 ENV CARGO_TERM_COLOR=never
 # BuildKit cache mounts for the cargo registry/git and the target dir, so
 # rebuilds reuse fetched crates and compiled artifacts. Cache mounts are not
@@ -55,11 +61,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \
     if [ -n "$TARGET_CPU" ]; then export RUSTFLAGS="-C target-cpu=$TARGET_CPU"; fi; \
-    cargo build --release --locked \
+    cargo build --profile "$CARGO_PROFILE" --locked \
       -p parapet-ingress-controller \
-      --features proxy,cluster \
+      --features "proxy,cluster$EXTRA_FEATURES" \
       --bin parapet-ingress-controller \
-    && cp target/release/parapet-ingress-controller /usr/local/bin/parapet-ingress-controller
+    && cp "target/$CARGO_PROFILE/parapet-ingress-controller" /usr/local/bin/parapet-ingress-controller
 
 # ---- GeoIP databases ----
 # Both baked by default from IPLocate's free MMDBs (CC BY-SA 4.0 — no account or

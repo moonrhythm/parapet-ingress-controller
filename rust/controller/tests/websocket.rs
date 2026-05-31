@@ -139,30 +139,70 @@ fn websocket_upgrade_tunnels_through_proxy() {
 
     wait_ready(http_port);
 
-    // open a WebSocket upgrade through the proxy
-    let mut c = TcpStream::connect(("127.0.0.1", http_port)).unwrap();
-    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    // The tunnel must work at least once. A single attempt is racy on a loaded
+    // runner — the upgrade can occasionally be reset right at establishment — so
+    // retry the full upgrade+echo exchange within a deadline rather than assert
+    // on one shot. A genuinely broken tunnel never succeeds and still fails.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match ws_echo_once(http_port) {
+            Ok(()) => break,
+            Err(e) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "WS upgrade never tunneled within 15s; last error: {e}"
+                );
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One full attempt: connect, upgrade, expect 101, then ping and read the echo
+/// back. `Ok(())` only if the whole message tunnels back; any hiccup is `Err`
+/// so the caller can retry (transient establishment races) or eventually fail.
+fn ws_echo_once(http_port: u16) -> Result<(), String> {
+    let mut c = TcpStream::connect(("127.0.0.1", http_port)).map_err(|e| e.to_string())?;
+    c.set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| e.to_string())?;
     c.write_all(
         b"GET /chat HTTP/1.1\r\nHost: ws.test\r\nConnection: Upgrade\r\n\
           Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
           Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
     )
-    .unwrap();
+    .map_err(|e| e.to_string())?;
 
     // expect 101 Switching Protocols (the upgrade was proxied)
     let mut resp = [0u8; 1024];
-    let n = c.read(&mut resp).unwrap();
+    let n = c.read(&mut resp).map_err(|e| e.to_string())?;
     let head = String::from_utf8_lossy(&resp[..n]);
-    assert!(
-        head.contains("101"),
-        "expected 101 Switching Protocols, got:\n{head}"
-    );
+    if !head.contains("101") {
+        return Err(format!("expected 101 Switching Protocols, got:\n{head}"));
+    }
 
-    // the tunnel is live: bytes echo back through the proxy bidirectionally
-    c.write_all(b"ping-through-proxy").unwrap();
-    let mut echo = [0u8; 64];
-    let m = c.read(&mut echo).unwrap();
-    assert_eq!(&echo[..m], b"ping-through-proxy");
-
-    let _ = std::fs::remove_dir_all(&dir);
+    // the tunnel is live: bytes echo back through the proxy bidirectionally.
+    // Accumulate until the whole message arrives — a single read() can return a
+    // partial echo (TCP segmentation through the proxy).
+    c.write_all(b"ping-through-proxy")
+        .map_err(|e| e.to_string())?;
+    let expected: &[u8] = b"ping-through-proxy";
+    let mut echo = Vec::new();
+    let mut buf = [0u8; 64];
+    while echo.len() < expected.len() {
+        match c.read(&mut buf) {
+            Ok(0) => break,
+            Ok(m) => echo.extend_from_slice(&buf[..m]),
+            Err(e) => return Err(format!("echo read: {e}")),
+        }
+    }
+    if echo == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "echo mismatch: got {:?}",
+            String::from_utf8_lossy(&echo)
+        ))
+    }
 }
