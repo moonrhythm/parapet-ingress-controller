@@ -36,13 +36,29 @@ and add — keep everything else identical to prod so the leak reproduces:
 
 ```yaml
         env:
-        - name: _RJEM_MALLOC_CONF        # if no dumps appear, also try MALLOC_CONF
-          value: "prof:true,prof_active:true,lg_prof_sample:19,lg_prof_interval:30,prof_prefix:/tmp/jeprof"
+        # The Linux build is unprefixed (unprefixed_malloc_on_supported_platforms),
+        # so jemalloc reads MALLOC_CONF — NOT _RJEM_MALLOC_CONF (that name only
+        # applies to a prefixed build, e.g. local macOS). Set both to be safe; the
+        # wrong one is silently ignored, so a wrong name = no dumps and no error.
+        - name: MALLOC_CONF
+          value: "prof:true,prof_active:true,lg_prof_sample:19,lg_prof_interval:28,prof_prefix:/tmp/jeprof"
+        - name: _RJEM_MALLOC_CONF
+          value: "prof:true,prof_active:true,lg_prof_sample:19,lg_prof_interval:28,prof_prefix:/tmp/jeprof"
         volumeMounts:
         - { name: prof, mountPath: /tmp }
       volumes:
       - { name: prof, emptyDir: {} }
 ```
+
+Confirm it took, instead of waiting:
+
+```sh
+kubectl exec POD -- ls -la /tmp        # jeprof.<pid>.<seq>.heap appears within ~1 min
+kubectl logs POD | grep -i jemalloc    # "Invalid conf pair: prof:true" => prof not
+                                       #   compiled in (wrong image, not rust-prof-<sha>)
+```
+Use a small `lg_prof_interval` (e.g. `25` ≈ 32 MiB) for a near-instant first dump
+while confirming, then raise it.
 
 - `lg_prof_sample:19` → sample ~every 512 KiB allocated (low overhead, good detail).
 - `lg_prof_interval:30` → auto-dump a profile every 2^30 B (1 GiB) of **allocation
