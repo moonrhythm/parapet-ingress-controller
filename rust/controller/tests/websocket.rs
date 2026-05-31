@@ -158,11 +158,21 @@ fn websocket_upgrade_tunnels_through_proxy() {
         "expected 101 Switching Protocols, got:\n{head}"
     );
 
-    // the tunnel is live: bytes echo back through the proxy bidirectionally
+    // the tunnel is live: bytes echo back through the proxy bidirectionally.
+    // Accumulate until the whole message arrives — a single read() can return a
+    // partial echo (TCP segmentation through the proxy), which made this flaky.
+    // The 5s read timeout above bounds the loop if the tunnel is actually broken.
     c.write_all(b"ping-through-proxy").unwrap();
-    let mut echo = [0u8; 64];
-    let m = c.read(&mut echo).unwrap();
-    assert_eq!(&echo[..m], b"ping-through-proxy");
+    let expected = b"ping-through-proxy";
+    let mut echo = Vec::new();
+    let mut buf = [0u8; 64];
+    while echo.len() < expected.len() {
+        match c.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => echo.extend_from_slice(&buf[..n]),
+        }
+    }
+    assert_eq!(echo, expected, "bytes echoed back through the WS tunnel");
 
     let _ = std::fs::remove_dir_all(&dir);
 }
