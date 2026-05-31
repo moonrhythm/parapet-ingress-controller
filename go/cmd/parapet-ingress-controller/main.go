@@ -196,6 +196,7 @@ func main() {
 	m.Use(metric.Requests(ctrl.IsKnownHost))
 	m.Use(compress.Gzip())
 	m.Use(compress.BrWithQuality(4))
+	m.Use(compress.Zstd())
 	if wafConfig.Enabled {
 		// Global WAF runs just before routing: blocks are access-logged and
 		// counted above, and request.host is already normalized. Per-zone WAF
