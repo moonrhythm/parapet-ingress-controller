@@ -1,7 +1,7 @@
 # Edge proxy (Go, on the parapet framework) — terminates public TLS locally with
 # a cert+key fetched from the in-cluster control plane, runs the global + zone WAF
 # (early-drop), optionally caches responses on disk, and forwards to parapet. See
-# ../../EDGE.md. (Migrated off Rust/Pingora; image is now go/Dockerfile.edge.)
+# ../../EDGE.md. (Migrated off Rust/Pingora; image is now Dockerfile.edge.)
 #
 # The edge typically runs OUTSIDE the cluster (closer to clients). This manifest
 # is for the case where you run it in a *separate* edge cluster / node pool; adapt

@@ -1,0 +1,17 @@
+# The Docker build context is the repo root, but the images only need the Go
+# module. Exclude everything else so `ADD . .` stays lean and cache-stable
+# (notably the Rust tree, git metadata, IDE/agent dirs, docs, and manifests).
+.git
+.github
+.gitignore
+.editorconfig
+.idea
+.claude
+rust
+conformance
+deploy
+tools
+*.md
+LICENSE
+SKILL.md
+Makefile

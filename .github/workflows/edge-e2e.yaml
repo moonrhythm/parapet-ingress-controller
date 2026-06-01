@@ -8,12 +8,16 @@ name: edge-e2e
 on:
   push:
     paths:
-      - 'go/**'
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
       - 'deploy/edge/e2e/**'
       - '.github/workflows/edge-e2e.yaml'
   pull_request:
     paths:
-      - 'go/**'
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
       - 'deploy/edge/e2e/**'
       - '.github/workflows/edge-e2e.yaml'
 

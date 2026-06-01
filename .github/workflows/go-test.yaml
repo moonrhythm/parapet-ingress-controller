@@ -2,18 +2,19 @@ name: Go Test
 on:
   push:
     paths:
-      - 'go/**'
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
       - '.github/workflows/go-test.yaml'
   pull_request:
     paths:
-      - 'go/**'
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
       - '.github/workflows/go-test.yaml'
 jobs:
   runner-job:
     runs-on: self-hosted
-    defaults:
-      run:
-        working-directory: go
     strategy:
       matrix:
         go: ['1.26.3']
@@ -28,4 +29,4 @@ jobs:
     - run: go test -race -coverprofile=coverage.out -covermode=atomic -coverpkg=./... ./...
     - uses: codecov/codecov-action@v5
       with:
-        directory: ./go
+        directory: .

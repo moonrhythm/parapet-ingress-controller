@@ -4,7 +4,7 @@ Two tiny [IPLocate](https://github.com/iplocate/ip-address-databases)-shaped MMD
 used by both implementations' GeoIP tests:
 
 - `iplocate-country.mmdb` (**ip-to-country**) — Go `TestCountryIPLocateSchema`
-  (`go/geoip/geoip_test.go`), Rust `geoip_decodes_iplocate_flat_schema` /
+  (`geoip/geoip_test.go`), Rust `geoip_decodes_iplocate_flat_schema` /
   `country_of_resolves_and_falls_back_to_xx` (`rust/controller/src/waf.rs`).
 - `iplocate-asn.mmdb` (**ip-to-asn**) — Go `TestASNIPLocate`, Rust
   `asn_decodes_iplocate_flat_string` / `asn_of_resolves_and_zero_without_db`.

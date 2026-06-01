@@ -4,13 +4,19 @@ on:
     branches:
     - main
     paths:
-    - 'go/**'
+    - '**/*.go'
+    - 'go.mod'
+    - 'go.sum'
+    - 'Dockerfile'
     - '.github/workflows/go-build.yaml'
   # Also build + push on PRs (tagged with the PR's commit SHA) so a PR image can
   # be deployed/tested before merge. Same-repo PRs only (needs registry creds).
   pull_request:
     paths:
-    - 'go/**'
+    - '**/*.go'
+    - 'go.mod'
+    - 'go.sum'
+    - 'Dockerfile'
     - '.github/workflows/go-build.yaml'
   workflow_dispatch: {}
 jobs:
@@ -41,7 +47,7 @@ jobs:
     - uses: docker/build-push-action@v6
       with:
         provenance: false
-        context: go
+        context: .
         build-args: |
           VERSION=${{ github.sha }}
           GOAMD64=v3
@@ -52,7 +58,7 @@ jobs:
     - uses: docker/build-push-action@v6
       with:
         provenance: false
-        context: go
+        context: .
         build-args: |
           VERSION=${{ github.sha }}
           GOAMD64=v1

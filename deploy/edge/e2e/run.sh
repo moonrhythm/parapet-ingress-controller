@@ -16,8 +16,8 @@
 #   Phase 4 — the optional disk-backed response cache serves a cacheable object
 #     locally on the second request (X-Cache: MISS then HIT).
 #
-# Both the edge and the control plane are Go binaries (go/cmd/edge-proxy and
-# go/cmd/edge-controlplane). The control plane reads cert + WAF ConfigMap from
+# Both the edge and the control plane are Go binaries (cmd/edge-proxy and
+# cmd/edge-controlplane). The control plane reads cert + WAF ConfigMap from
 # static manifests via KUBERNETES_BACKEND=fs, so no cluster is needed.
 #
 # Usage:  deploy/edge/e2e/run.sh
@@ -152,9 +152,9 @@ printf '{"%s":["%s"]}' "$TOKEN" "$DOMAIN" > "$WORK/tokens.json"
 
 # ---------------------------------------------------------------------------
 say "3. build binaries (Go edge + Go control plane)"
-( cd "$REPO/go" && go build -o "$WORK/edge-controlplane" ./cmd/edge-controlplane ) \
+( cd "$REPO" && go build -o "$WORK/edge-controlplane" ./cmd/edge-controlplane ) \
   || fail "go build control plane"
-( cd "$REPO/go" && go build -o "$WORK/parapet-edge" ./cmd/edge-proxy ) \
+( cd "$REPO" && go build -o "$WORK/parapet-edge" ./cmd/edge-proxy ) \
   || fail "go build edge"
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@
 #
 # This is a production-style launcher, NOT a test. It does not build anything and
 # does not stand up a control plane or upstream — point it at a real, reachable
-# control plane and parapet. The edge is a Go binary (go/cmd/edge-proxy).
+# control plane and parapet. The edge is a Go binary (cmd/edge-proxy).
 #
 # Required:
 #   EDGE_CP_TOKEN     the edge's bearer token (authorizes its domains)
