@@ -12,11 +12,40 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use controller::waf::{Decision, RequestData};
+use pingora::cache::cache_control::CacheControl;
+use pingora::cache::eviction::EvictionManager;
+use pingora::cache::filters::resp_cacheable;
+use pingora::cache::key::HashBinary;
+use pingora::cache::lock::CacheKeyLockImpl;
+use pingora::cache::{
+    CacheKey, CacheMeta, CacheMetaDefaults, NoCacheReason, RespCacheable, VarianceBuilder,
+};
+use pingora::http::RequestHeader;
 use pingora::prelude::*;
 use pingora::proxy::{ProxyHttp, Session};
 use pingora::upstreams::peer::HttpPeer;
 
+use crate::diskcache::DiskCache;
 use crate::waf::EdgeWaf;
+
+/// Cacheability defaults: honor the origin only. The `|_| None` fresh-duration
+/// function means a response with no explicit `Cache-Control`/`Expires` freshness
+/// is **not** cached (no forced/heuristic TTL); 0/0 disable stale-while-revalidate
+/// and stale-if-error. Mirrors pingora's `BYPASS_CACHE_DEFAULTS` test constant.
+const CACHE_DEFAULTS: CacheMetaDefaults = CacheMetaDefaults::new(|_| None, 0, 0);
+
+/// The cache wiring handed to `HttpCache::enable`: the disk storage, the LRU
+/// eviction manager bounding total on-disk bytes, the cache lock collapsing
+/// concurrent misses for one key into a single origin fetch, and the per-file
+/// size cap. All leaked to `'static` in `main` (Pingora's cache APIs are
+/// `'static`). `None` on `EdgeProxy.cache` = caching disabled (zero per-request
+/// cost — the hooks early-return before touching the session cache).
+pub struct EdgeCache {
+    pub storage: &'static DiskCache,
+    pub eviction: &'static (dyn EvictionManager + Sync),
+    pub lock: &'static CacheKeyLockImpl,
+    pub max_file_size: usize,
+}
 
 /// The client-facing scheme for this connection: `"https"` when TLS was
 /// terminated at this edge (the public TLS listener) and `"http"` when the
@@ -45,6 +74,8 @@ pub struct EdgeProxy {
     pub parapet_sni: String,
     /// Global WAF (None = WAF distribution disabled at this edge).
     pub waf: Option<Arc<EdgeWaf>>,
+    /// Response cache (None = caching disabled at this edge).
+    pub cache: Option<EdgeCache>,
 }
 
 impl EdgeProxy {
@@ -55,22 +86,7 @@ impl EdgeProxy {
     fn build_waf_request(&self, session: &Session) -> RequestData {
         let req = session.req_header();
         let method = req.method.as_str().to_string();
-        // h2 carries the authority in the URI; h1 in the Host header. Prefer the
-        // URI authority (present on h2, and absolute-form h1), then fall back to
-        // Host — mirrors the controller's host derivation. Reading only Host misses
-        // h2 requests (no Host header), which broke host→zone lookup.
-        let host = req
-            .uri
-            .authority()
-            .map(|a| a.host().to_string())
-            .or_else(|| {
-                req.headers
-                    .get("host")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.split(':').next().unwrap_or("").to_string())
-            })
-            .unwrap_or_default()
-            .to_ascii_lowercase();
+        let host = req_host(req);
         let path = req.uri.path().to_string();
         let query = req.uri.query().unwrap_or("").to_string();
         let uri = req
@@ -215,6 +231,181 @@ impl ProxyHttp for EdgeProxy {
         }
         Ok(())
     }
+
+    // ---- response cache (edge tier) ---------------------------------------
+    //
+    // The cache phases run AFTER `request_filter`, so the edge WAF still screens
+    // every request (including cache hits). But a hit is served WITHOUT contacting
+    // parapet, so parapet's authoritative WAF does not re-run on hits — see
+    // EDGE.md. Only origin-opted-in (`Cache-Control` public) content is cached.
+
+    /// Enable caching for safe, idempotent methods. Disabled entirely when this
+    /// edge has no cache configured (zero per-request cost). Client request
+    /// `Cache-Control` (`no-cache`/`no-store`) is ignored by design — like a CDN,
+    /// to avoid a cache-busting DoS vector; parapet remains reachable for any
+    /// origin that genuinely needs freshness (it marks responses uncacheable).
+    fn request_cache_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<()> {
+        let Some(c) = &self.cache else {
+            return Ok(());
+        };
+        let m = session.req_header().method.as_str();
+        if m == "GET" || m == "HEAD" {
+            session
+                .cache
+                .enable(c.storage, Some(c.eviction), None, Some(c.lock), None);
+            // Let pingora enforce the per-object size cap: it refuses by
+            // Content-Length (client-safe) and aborts oversize chunked mid-stream.
+            // This replaces a hand-rolled check and avoids erroring the client.
+            session.cache.set_max_file_size_bytes(c.max_file_size);
+        }
+        Ok(())
+    }
+
+    /// Key on scheme + host + method + uri. Host comes from the same authority/Host
+    /// logic as the WAF request, so h1 and h2 agree and distinct hosts never
+    /// collide on a shared path.
+    fn cache_key_callback(&self, session: &Session, _ctx: &mut Self::CTX) -> Result<CacheKey> {
+        let req = session.req_header();
+        let uri = req.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
+        Ok(cache_key_for(
+            downstream_scheme(session),
+            req_host(req),
+            req.method.as_str(),
+            uri,
+        ))
+    }
+
+    /// Decide cacheability from the origin response (honor-origin). Delegates to
+    /// the pure `resp_cacheable_decision` so the policy is unit-testable without a
+    /// live `Session`. Per-object size is enforced by pingora (see
+    /// `request_cache_filter`), not here.
+    fn response_cache_filter(
+        &self,
+        _session: &Session,
+        resp: &pingora::http::ResponseHeader,
+        _ctx: &mut Self::CTX,
+    ) -> Result<RespCacheable> {
+        if self.cache.is_none() {
+            return Ok(RespCacheable::Uncacheable(NoCacheReason::NeverEnabled));
+        }
+        Ok(resp_cacheable_decision(resp))
+    }
+
+    /// Honor `Vary`: derive a variance key from the request's values for each
+    /// listed header so different variants (e.g. `Accept-Encoding`) get distinct
+    /// cache entries. `Vary: *` was already rejected in `response_cache_filter`.
+    fn cache_vary_filter(
+        &self,
+        meta: &CacheMeta,
+        _ctx: &mut Self::CTX,
+        req: &RequestHeader,
+    ) -> Option<HashBinary> {
+        let vary = meta.headers().get("vary")?.to_str().ok()?;
+        // Own the (name, value) pairs so they outlive the borrow into the builder.
+        let items: Vec<(String, Vec<u8>)> = vary
+            .split(',')
+            .filter_map(|name| {
+                let name = name.trim().to_ascii_lowercase();
+                if name.is_empty() || name == "*" {
+                    return None;
+                }
+                let value = req
+                    .headers
+                    .get(name.as_str())
+                    .map(|v| v.as_bytes().to_vec())
+                    .unwrap_or_default();
+                Some((name, value))
+            })
+            .collect();
+        if items.is_empty() {
+            return None;
+        }
+        let mut vb = VarianceBuilder::new();
+        for (name, value) in &items {
+            vb.add_value(name, value);
+        }
+        vb.finalize()
+    }
+
+    /// Tag the response so cache effectiveness is observable without a metrics
+    /// endpoint: `X-Cache: HIT` when served from the edge cache, `MISS` when
+    /// fetched from parapet. Omitted when caching wasn't engaged for the request.
+    async fn response_filter(
+        &self,
+        session: &mut Session,
+        resp: &mut pingora::http::ResponseHeader,
+        _ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if self.cache.is_none() || !session.cache.enabled() {
+            // caching disabled, or not engaged for this request (e.g. POST).
+            return Ok(());
+        }
+        // `upstream_used()` is true for every phase that contacted parapet, so it
+        // is the precise hit/miss signal — served-from-cache vs fetched-from-origin
+        // — regardless of revalidation/stale nuances.
+        let tag = if session.cache.upstream_used() {
+            "MISS"
+        } else {
+            "HIT"
+        };
+        resp.insert_header("x-cache", tag)?;
+        Ok(())
+    }
+}
+
+/// Derive the request host (lowercased, no port). h2 carries the authority in the
+/// URI; h1 in the Host header. Prefer the URI authority (present on h2, and
+/// absolute-form h1), then fall back to Host — mirrors the controller's host
+/// derivation. Reading only Host misses h2 requests (no Host header), which broke
+/// host→zone lookup. Shared by the WAF request build and the cache key.
+fn req_host(req: &RequestHeader) -> String {
+    req.uri
+        .authority()
+        .map(|a| a.host().to_string())
+        .or_else(|| {
+            req.headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.split(':').next().unwrap_or("").to_string())
+        })
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+/// Build the cache key: namespace = host, primary = `"METHOD scheme uri"`. Two
+/// requests collide iff all four agree. Factored out of `cache_key_callback` so
+/// it's unit-testable without a live `Session`.
+fn cache_key_for(scheme: &str, host: String, method: &str, uri: &str) -> CacheKey {
+    CacheKey::new(host, format!("{method} {scheme} {uri}"), "")
+}
+
+/// Pure honor-origin cacheability decision for an origin response, factored out
+/// of `response_cache_filter` so the policy is unit-testable without a live
+/// `Session`. Refuses `Set-Cookie`, `Vary: *`, and `private`/`no-store`;
+/// otherwise defers to pingora's `resp_cacheable` with honor-origin defaults
+/// (cache only on explicit `Cache-Control`/`Expires` freshness). Per-object size
+/// is enforced separately by pingora (`set_max_file_size_bytes`).
+fn resp_cacheable_decision(resp: &pingora::http::ResponseHeader) -> RespCacheable {
+    // A Set-Cookie response is per-client; never store it in a shared cache.
+    if resp.headers.contains_key("set-cookie") {
+        return RespCacheable::Uncacheable(NoCacheReason::Custom("set-cookie"));
+    }
+    // Vary: * means uncacheable (no single key can represent it).
+    if let Some(v) = resp.headers.get("vary").and_then(|v| v.to_str().ok()) {
+        if v.split(',').any(|t| t.trim() == "*") {
+            return RespCacheable::Uncacheable(NoCacheReason::Custom("vary-*"));
+        }
+    }
+    let cc = CacheControl::from_resp_headers(resp);
+    if let Some(cc) = &cc {
+        if cc.private() || cc.no_store() {
+            return RespCacheable::Uncacheable(NoCacheReason::OriginNotCache);
+        }
+    }
+    // authorization_present=false: the edge does not vary on Authorization; a
+    // request carrying it is a candidate only if the origin marks it public,
+    // which resp_cacheable enforces.
+    resp_cacheable(cc.as_ref(), resp.clone(), false, &CACHE_DEFAULTS)
 }
 
 /// `k=v; k2=v2` → map (first value wins), mirroring the controller's parse_cookies.
@@ -272,4 +463,93 @@ fn url_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pingora::cache::key::CacheHashKey;
+    use pingora::http::ResponseHeader;
+
+    fn resp(headers: &[(&str, &str)]) -> ResponseHeader {
+        let mut h = ResponseHeader::build(200, None).unwrap();
+        for (k, v) in headers {
+            h.append_header(k.to_string(), v.to_string()).unwrap();
+        }
+        h
+    }
+
+    fn is_cacheable(headers: &[(&str, &str)]) -> bool {
+        matches!(
+            resp_cacheable_decision(&resp(headers)),
+            RespCacheable::Cacheable(_)
+        )
+    }
+
+    #[test]
+    fn honors_origin_freshness_only() {
+        // explicit freshness -> cacheable
+        assert!(is_cacheable(&[("cache-control", "public, max-age=60")]));
+        assert!(is_cacheable(&[("cache-control", "max-age=60")]));
+        // no freshness directive at all -> NOT cached (no heuristic/forced TTL)
+        assert!(!is_cacheable(&[]));
+        assert!(!is_cacheable(&[("content-type", "text/html")]));
+    }
+
+    #[test]
+    fn refuses_private_no_store_set_cookie_and_vary_star() {
+        assert!(!is_cacheable(&[("cache-control", "private, max-age=60")]));
+        assert!(!is_cacheable(&[("cache-control", "no-store")]));
+        // Set-Cookie is per-client even if the origin says public.
+        assert!(!is_cacheable(&[
+            ("cache-control", "public, max-age=60"),
+            ("set-cookie", "sid=abc"),
+        ]));
+        // Vary: * cannot be keyed.
+        assert!(!is_cacheable(&[
+            ("cache-control", "public, max-age=60"),
+            ("vary", "*"),
+        ]));
+    }
+
+    #[test]
+    fn vary_on_named_header_is_still_cacheable() {
+        // a concrete Vary is fine here; the variance is applied in cache_vary_filter.
+        assert!(is_cacheable(&[
+            ("cache-control", "public, max-age=60"),
+            ("vary", "accept-encoding"),
+        ]));
+    }
+
+    #[test]
+    fn cache_key_separates_scheme_host_method_uri_and_is_stable() {
+        let base = cache_key_for("https", "acme.com".into(), "GET", "/a").combined();
+        // identical inputs -> identical key
+        assert_eq!(
+            base,
+            cache_key_for("https", "acme.com".into(), "GET", "/a").combined()
+        );
+        // each component changes the key
+        assert_ne!(
+            base,
+            cache_key_for("http", "acme.com".into(), "GET", "/a").combined()
+        );
+        assert_ne!(
+            base,
+            cache_key_for("https", "other.com".into(), "GET", "/a").combined()
+        );
+        assert_ne!(
+            base,
+            cache_key_for("https", "acme.com".into(), "HEAD", "/a").combined()
+        );
+        assert_ne!(
+            base,
+            cache_key_for("https", "acme.com".into(), "GET", "/b").combined()
+        );
+        // query string is part of the key
+        assert_ne!(
+            base,
+            cache_key_for("https", "acme.com".into(), "GET", "/a?x=1").combined()
+        );
+    }
 }
