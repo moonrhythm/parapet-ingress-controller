@@ -4,8 +4,8 @@ name: edge-build
 # `parapet-ingress-controller` image name as the controller, distinguished by a
 # module prefix on the tag (mirroring the existing `:<sha>` Go / `:rust-<sha>`
 # Rust streams):
-#   controlplane-<sha>  — the Go control plane (go/Dockerfile.edge-controlplane)
-#   edge-<sha>          — the Go edge proxy    (go/Dockerfile.edge)
+#   controlplane-<sha>  — the Go control plane (Dockerfile.edge-controlplane)
+#   edge-<sha>          — the Go edge proxy    (Dockerfile.edge)
 # Both are now Go (the edge was migrated off Rust/Pingora; rust/edge is dormant).
 # See EDGE.md. Triggered when the Go module or the edge manifests change.
 # Auth/registries mirror go-build / rust-build.
@@ -14,14 +14,22 @@ on:
     branches:
       - main
     paths:
-      - 'go/**'
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile.edge'
+      - 'Dockerfile.edge-controlplane'
       - 'deploy/edge/**'
       - '.github/workflows/edge-build.yaml'
   # Also build + push on PRs (tagged with the PR's commit SHA) so a PR image can
   # be deployed/tested before merge. Same-repo PRs only (needs registry creds).
   pull_request:
     paths:
-      - 'go/**'
+      - '**/*.go'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Dockerfile.edge'
+      - 'Dockerfile.edge-controlplane'
       - 'deploy/edge/**'
       - '.github/workflows/edge-build.yaml'
   workflow_dispatch: {}
@@ -54,8 +62,8 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           provenance: false
-          context: go
-          file: go/Dockerfile.edge-controlplane
+          context: .
+          file: Dockerfile.edge-controlplane
           push: true
           build-args: |
             VERSION=${{ github.sha }}
@@ -91,8 +99,8 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           provenance: false
-          context: go
-          file: go/Dockerfile.edge
+          context: .
+          file: Dockerfile.edge
           push: true
           build-args: |
             VERSION=${{ github.sha }}

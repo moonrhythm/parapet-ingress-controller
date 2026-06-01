@@ -7,8 +7,8 @@ private keys) and WAF rules for the domains that edge serves.
 
 > Status: **Phases 1–4 implemented** (cert distribution, WAF distribution + edge
 > global eval, zones at edge, disk response cache); Phase 5 (purge) is design only.
-> Both the control plane (`go/cmd/edge-controlplane`, reusing `go/cert`, `go/k8s`,
-> `go/wafrule`) and the **edge** (`go/cmd/edge-proxy` + `go/edge`, on the parapet
+> Both the control plane (`cmd/edge-controlplane`, reusing `cert`, `k8s`,
+> `wafrule`) and the **edge** (`cmd/edge-proxy` + `edge`, on the parapet
 > framework) are **Go**. They share **only a language-neutral HTTP/JSON contract**
 > (below) on the wire. Per [`CLAUDE.md`](CLAUDE.md) the contract changes here first.
 
@@ -50,7 +50,7 @@ traffic); the cluster stays the source of truth:
    so its WAF is an early-drop optimization; parapet re-runs the full WAF inside.
    A buggy, stale, or compromised edge can never mean an *unprotected* origin.
 4. **One WAF engine everywhere.** The edge reuses `parapet/pkg/waf` (the same Go
-   CEL engine the controller uses) + `go/wafrule`, so rule semantics are identical
+   CEL engine the controller uses) + `wafrule`, so rule semantics are identical
    by construction and it shares the [`conformance/`](conformance/) corpus via the
    Go surface — no reimplementation.
 
@@ -89,19 +89,19 @@ keys**, so it must never be on the public LoadBalancer. See
 
 ## Components
 
-- **`go/cmd/edge-controlplane/`** (Go) — in-cluster HTTPS REST server. Reuses the
-  Go controller's k8s client (`go/k8s`), cert table (`go/cert`), WAF rule parser
-  (`go/wafrule`), and route/zone logic. Serves `GET /v1/certs?sni=…` (cert+key)
+- **`cmd/edge-controlplane/`** (Go) — in-cluster HTTPS REST server. Reuses the
+  Go controller's k8s client (`k8s`), cert table (`cert`), WAF rule parser
+  (`wafrule`), and route/zone logic. Serves `GET /v1/certs?sni=…` (cert+key)
   and `GET /v1/waf` (rules). Not on the request path.
-- **`go/cmd/edge-proxy/` + `go/edge/`** (Go) — a parapet-framework proxy. Reuses
-  `go/cert.Table` for SNI resolution (plugged into `tls.Config.GetCertificate`,
-  self-signed fallback on a miss), `go/wafrule` + `parapet/pkg/waf` for CEL
-  evaluation, and `go/geoip` for `request.country`/`request.asn`. Maintains an
-  in-memory cert store refreshed from `GET /v1/certs?sni=…` (`go/edge/certstore.go`,
-  `go/edge/cp.go`), runs global + zone WAF (`go/edge/waf.go`), optionally caches
+- **`cmd/edge-proxy/` + `edge/`** (Go) — a parapet-framework proxy. Reuses
+  `cert.Table` for SNI resolution (plugged into `tls.Config.GetCertificate`,
+  self-signed fallback on a miss), `wafrule` + `parapet/pkg/waf` for CEL
+  evaluation, and `geoip` for `request.country`/`request.asn`. Maintains an
+  in-memory cert store refreshed from `GET /v1/certs?sni=…` (`edge/certstore.go`,
+  `edge/cp.go`), runs global + zone WAF (`edge/waf.go`), optionally caches
   responses via `parapet/pkg/cache` (memory or disk, selected by
   `EDGE_CACHE_BACKEND`), and forwards to parapet with `X-Forwarded-*`
-  (`go/edge/forward.go`). Keys live in memory only, never on disk.
+  (`edge/forward.go`). Keys live in memory only, never on disk.
 
 ## Authorization (bearer token, two endpoints)
 
@@ -193,7 +193,7 @@ the monotonic rollout counter surfaced for observability.
    cert+key from the k8s Secret, and returns it (or `304`).
 3. The edge parses the PEM into a `tls.Certificate` (`tls.X509KeyPair`) and
    **atomically swaps** the rebuilt SNI index into its in-memory `cert.Table`
-   (`go/edge/certstore.go`). Keys are **never written to disk**.
+   (`edge/certstore.go`). Keys are **never written to disk**.
 4. A handshake reads the live table via `tls.Config.GetCertificate` and serves the
    matched cert+key locally — no control-plane interaction on the handshake path
    (except the first handshake per new SNI in serve-all mode).
@@ -504,16 +504,16 @@ which remains authoritative" property are recorded in [`SPEC.md`](SPEC.md).
 
 ## Build layout
 
-- **Control plane** is a Go binary in the `go/` module
-  (`go/cmd/edge-controlplane`, image `go/Dockerfile.edge-controlplane`), reusing
-  `go/cert`, `go/k8s`, `go/wafrule`.
-- **Edge** is a Go binary in the same `go/` module (`go/cmd/edge-proxy` + the
-  `go/edge` lib, image `go/Dockerfile.edge`), on the parapet framework, reusing
-  `go/cert`, `go/wafrule`, `go/geoip`, and `parapet/pkg/waf`. Pure Go (no CGO/
+- **Control plane** is a Go binary in the Go module (now at the repo root)
+  (`cmd/edge-controlplane`, image `Dockerfile.edge-controlplane`), reusing
+  `cert`, `k8s`, `wafrule`.
+- **Edge** is a Go binary in the same Go module (`cmd/edge-proxy` + the
+  `edge` lib, image `Dockerfile.edge`), on the parapet framework, reusing
+  `cert`, `wafrule`, `geoip`, and `parapet/pkg/waf`. Pure Go (no CGO/
   brotli) → static binary on `distroless/static`, with the IPLocate GeoIP MMDBs
   baked like the controller image.
 
-Both build/test with the Go toolchain (`cd go && go test ./... && go vet ./...`).
+Both build/test with the Go toolchain (`go test ./... && go vet ./...`).
 They never share in-process state; the HTTP/JSON contract above is their entire
 runtime interface (they do share Go libraries at compile time).
 

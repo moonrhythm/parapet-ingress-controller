@@ -14,8 +14,8 @@ change can't land in one implementation without the other.
 
 | Fixture | Specifies | Go asserts in | Rust asserts in |
 |---|---|---|---|
-| [`waf-cel-corpus.md`](waf-cel-corpus.md) | CEL rule strings evaluate identically (cel-go ↔ cel-rust) | `go/wafrule/*_test.go` + parapet `pkg/waf` tests | `rust/controller/src/waf.rs` (`corpus_*` tests) |
-| _(routing, annotations — to add)_ | PathType registration, annotation→behavior | `go/controller_test.go`, `go/plugin/*_test.go` | `rust/controller/src/{router,config,proxy}.rs` |
+| [`waf-cel-corpus.md`](waf-cel-corpus.md) | CEL rule strings evaluate identically (cel-go ↔ cel-rust) | `wafrule/*_test.go` + parapet `pkg/waf` tests | `rust/controller/src/waf.rs` (`corpus_*` tests) |
+| _(routing, annotations — to add)_ | PathType registration, annotation→behavior | `controller_test.go`, `plugin/*_test.go` | `rust/controller/src/{router,config,proxy}.rs` |
 
 ## Why a shared CEL corpus matters most
 

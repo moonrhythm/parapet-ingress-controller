@@ -14,7 +14,7 @@ which build you run.
 The controller ships as **two co-maintained implementations of one behavior
 contract** ([`SPEC.md`](SPEC.md)):
 
-| | [`go/`](go/) | [`rust/`](rust/) |
+| | [`./` (root)](.) | [`rust/`](rust/) |
 |---|---|---|
 | Framework | [parapet](https://github.com/moonrhythm/parapet) | [Pingora](https://github.com/cloudflare/pingora) |
 | Image | `…/parapet-ingress-controller:<tag>` | `…/parapet-ingress-controller:rust-<sha>` |
@@ -79,7 +79,7 @@ spec:
 
 Plugins use annotation in ingress to config. The full annotation reference,
 env-var table, and per-request order are in [`SPEC.md`](SPEC.md) (the contract
-both implementations track); the Go plugins live in [`go/plugin`](go/plugin).
+both implementations track); the Go plugins live in [`plugin`](plugin).
 
 ## Configuration
 

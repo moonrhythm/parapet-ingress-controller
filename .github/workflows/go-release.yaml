@@ -31,7 +31,7 @@ jobs:
     - uses: docker/build-push-action@v6
       with:
         provenance: false
-        context: go
+        context: .
         build-args: |
           VERSION=${{ github.ref_name }}
           GOAMD64=v3
@@ -44,7 +44,7 @@ jobs:
     - uses: docker/build-push-action@v6
       with:
         provenance: false
-        context: go
+        context: .
         build-args: |
           VERSION=${{ github.ref_name }}
           GOAMD64=v1

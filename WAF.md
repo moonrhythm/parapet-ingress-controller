@@ -7,8 +7,8 @@ reused verbatim in the Go controller, and reimplemented on
 [cel-rust](https://github.com/cel-rust/cel-rust) in the Rust port (`rust/`) for
 CEL-string parity.
 
-> Status: **implemented** in both the Go controller (`go/controller_waf.go`,
-> `go/plugin/waf.go`, `go/wafrule/`) and the Rust port (`rust/controller/src/waf.rs`,
+> Status: **implemented** in both the Go controller (`controller_waf.go`,
+> `plugin/waf.go`, `wafrule/`) and the Rust port (`rust/controller/src/waf.rs`,
 > behind the `waf` feature), gated by `WAF_ENABLED` (off by default). Both
 > implementations are co-maintained; see [`CLAUDE.md`](CLAUDE.md) and [`SPEC.md`](SPEC.md).
 
@@ -197,7 +197,7 @@ and treat a load failure as non-fatal (country stays `""`).
   image at `/geoip/ip-to-country.mmdb`:
 
   ```bash
-  docker build -t img go/   # or rust/  — bakes the DB by default
+  docker build -t img .     # or rust/  — bakes the DB by default
   # then run with: WAF_GEOIP_DB=/geoip/ip-to-country.mmdb
   ```
 
@@ -321,9 +321,9 @@ lifecycle are independent:
 
 The engine is free (`pkg/waf`); the work is plumbing.
 
-- **Shared parser** (`go/wafrule/`): YAML `rules:` doc → `[]waf.Rule`, `action`
+- **Shared parser** (`wafrule/`): YAML `rules:` doc → `[]waf.Rule`, `action`
   string → `waf.Action`. Used by both the global and zone paths.
-- **k8s** (`go/k8s/`): `GetConfigMaps` / `WatchConfigMaps` with a label selector
+- **k8s** (`k8s/`): `GetConfigMaps` / `WatchConfigMaps` with a label selector
   (cluster client applies it server-side; fs client returns all and the
   controller filters).
 - **Controller** holds `globalWAF *waf.WAF` and

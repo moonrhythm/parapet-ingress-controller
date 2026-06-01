@@ -1,7 +1,7 @@
 # Behavior contract
 
 This is the **single source of truth** for what the controller does — the
-contract that **both** implementations ([`go/`](go/) and [`rust/`](rust/)) must
+contract that **both** implementations ([`./`](.) and [`rust/`](rust/)) must
 honor. When behavior changes, change it here first, then in both implementations
 and the [`conformance/`](conformance/) fixtures.
 
@@ -115,8 +115,8 @@ untouched.
 ## Edge control plane (cert+key + WAF distribution)
 
 Full design in **[EDGE.md](EDGE.md)**. An optional out-of-cluster **edge** proxy
-(`go/cmd/edge-proxy`, on the parapet framework) terminates public TLS **locally**
-and runs the WAF. A **Go** in-cluster **control plane** (`go/cmd/edge-controlplane`)
+(`cmd/edge-proxy`, on the parapet framework) terminates public TLS **locally**
+and runs the WAF. A **Go** in-cluster **control plane** (`cmd/edge-controlplane`)
 distributes, per edge, the cert+key and WAF rules for that edge's domains over an
 **HTTPS REST** API (`GET /v1/certs?sni=…`, `GET /v1/waf`) authenticated by a
 **per-edge bearer token** → allowed domains/zones. (The edge was migrated off the
@@ -133,15 +133,15 @@ invariants:
   zones from its own router. Edge-vs-parapet zone-resolution drift is non-fatal
   (parapet corrects it). Never disable parapet's WAF for edge traffic.
 - **Same WAF contract** — the edge reuses **`parapet/pkg/waf`** (the same Go CEL
-  engine the controller uses) and `go/wafrule`, so rule semantics are identical by
+  engine the controller uses) and `wafrule`, so rule semantics are identical by
   construction and it shares the [`conformance/`](conformance/) corpus via the Go
   surface. Rules ship as YAML over the wire.
 - **Separate channel** — control plane on its own port/Service (`:8443`), HTTPS +
   bearer token, reachable only by edges over a private path, never on the public
   LoadBalancer.
 - **Both Go** — control plane and edge are both Go. The control plane reuses
-  `go/cert`, `go/k8s`, `go/wafrule`; the edge reuses `go/cert`, `go/wafrule`,
-  `go/geoip`, and `parapet/pkg/waf`. They still share only the HTTP/JSON contract
+  `cert`, `k8s`, `wafrule`; the edge reuses `cert`, `wafrule`,
+  `geoip`, and `parapet/pkg/waf`. They still share only the HTTP/JSON contract
   on the wire (no shared in-process state), though both being Go they now draw on
   the same libraries. (Earlier the edge was Rust/Pingora and shared nothing in
   code; it was migrated to Go — see EDGE.md "Implementation history".)
@@ -240,5 +240,5 @@ not absolute value.
   `WAF_DISABLE_MACROS` is Go-only, and no CEL extension libraries are enabled in
   either.
 - **Cloud Profiler/Trace** are Go-only (no Rust SDK).
-- See [`go/CLAUDE.md`-style notes in `CLAUDE.md`](CLAUDE.md) and
+- See [`CLAUDE.md`](CLAUDE.md) and
   [`rust/README.md`](rust/README.md) for the full per-impl detail.

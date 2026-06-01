@@ -9,7 +9,7 @@ plane**. Design and contract: [`../../EDGE.md`](../../EDGE.md).
   ClusterIP only, locked to edge source IPs; never on the public LB.
 - `edge.yaml` — the Go edge proxy (`Deployment` + `LoadBalancer Service`).
   Terminates public TLS; the public-facing tier. (Migrated off Rust/Pingora; the
-  image is now built from `go/Dockerfile.edge`.)
+  image is now built from `Dockerfile.edge`.)
 
 ## Required secrets
 
