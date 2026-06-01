@@ -8,7 +8,8 @@
 > [`CLAUDE.md`](CLAUDE.md), the behavior contract changes in [`SPEC.md`](SPEC.md)
 > first; on acceptance, the contract bits (the trust predicate, the new env vars,
 > the new `POST /v1/edge-cert` endpoint, the per-request order) fold into `SPEC.md`
-> and the architecture into `EDGE.md`.
+> and the architecture into `EDGE.md`. **No cert-manager dependency:** the control
+> plane self-manages the edge CA.
 
 ## The problem
 
@@ -57,22 +58,22 @@ comes from*.
 Authenticate the **edge → core hop with mutual TLS**. Trust follows a private key,
 not a source IP.
 
-1. **A dedicated, single-purpose edge CA.** Created once. It signs **nothing else**,
-   so "chains to this CA" means exactly "is a sanctioned-edge credential." Under
-   `EDGE_CA_MODE=direct` (the Docker-friendly default) the CA key **lives with the
-   control plane** (its own RBAC-locked Secret); under `EDGE_CA_MODE=cert-manager`
-   it stays inside cert-manager. Either way the key never reaches an edge — only
-   leaf certs do. See [Control-plane wiring](#control-plane-wiring-cp-issues-the-client-cert).
+1. **A dedicated, single-purpose edge CA.** Created once and reused forever; it
+   signs **nothing else**, so "chains to this CA" means exactly "is a sanctioned-edge
+   credential." By default (**managed** mode) the **control plane generates the CA on
+   first boot and persists it** to its own RBAC-locked `parapet-edge-ca` Secret — no
+   cert-manager, no out-of-band openssl. For orgs with an existing PKI, **provided**
+   mode lets the operator mount their own CA (`EDGE_CA_CERT`/`EDGE_CA_KEY`) and the CP
+   uses it without generating. Either way the key never reaches an edge — only leaf
+   certs do. See [Control-plane wiring](#control-plane-wiring-cp-issues-the-client-cert).
 
 2. **Each edge gets a short-lived client cert with a stable URI SAN
    `spiffe://parapet.moonrhythm.io/edge/<id>`.** By default the **control plane
    issues it** over the edge's existing bearer-authenticated HTTPS channel — the
-   edge sends a CSR to `POST /v1/edge-cert`, the CP signs it with the in-cluster
-   edge CA and returns only the cert chain; the **private key never leaves the
-   edge**, and the **CP decides the SAN from the token identity** (ignoring any SAN
-   in the CSR), so a compromised edge cannot request a SAN it isn't entitled to.
-   cert-manager (a per-edge `Certificate`, `usages: [client auth]`) is a
-   **k8s-only alternative** for operators who already run it. Renewal is generous
+   edge sends a CSR to `POST /v1/edge-cert`, the CP signs it with the edge CA and
+   returns only the cert chain; the **private key never leaves the edge**, and the
+   **CP decides the SAN from the token identity** (ignoring any SAN in the CSR), so a
+   compromised edge cannot request a SAN it isn't entitled to. Renewal is generous
    (renew at ~⅓ lifetime *remaining*) so it never races expiry — see
    [Edge wiring](#edge-wiring).
 
@@ -102,8 +103,8 @@ not a source IP.
 
    The SAN check is re-evaluated **per request** against an `atomic.Pointer`-held
    allow-set, so **dropping a SAN distrusts that edge within ~300 ms** — even on
-   existing keep-alive / HTTP-2 connections. That is the fast revocation lever, and
-   (per the security model) the *only* bound on a cert minted from a leaked token.
+   existing keep-alive / HTTP-2 connections. That is the fast per-edge revocation
+   lever (but **not** a defense against a stolen *CA* key — see the Security model).
 
 ### Single source of truth (onboard in one place)
 
@@ -145,40 +146,32 @@ convergence before declaring an edge trusted.
 ## Deployment models: k8s edge vs Docker edge
 
 There are two edge deployment shapes, and the data-plane client cert must work for
-**both** with the same onboarding gesture ("provision one token"). The mechanism
-that makes the cert *arrive* differs:
+**both** with the same onboarding gesture ("provision one token"). The cert always
+arrives the same way — the CP issues it via `POST /v1/edge-cert`; only how the edge
+is packaged differs:
 
 **k8s edge.** The edge runs as a Deployment in some cluster (its own or the core's).
-cert-manager is available, so a per-edge `Certificate` (issuer `parapet-edge-ca`,
-`usages: [client auth]`, URI SAN `spiffe://parapet.moonrhythm.io/edge/<id>`) is
-minted into a `kubernetes.io/tls` Secret and mounted; `edge/forward.go` reads it
-**live**. This is the cert-manager path — now a **k8s-only alternative**, not the
-default.
+The data-plane client cert rides `POST /v1/edge-cert` exactly as for Docker. An
+operator who already runs cert-manager and wants to *mount* a client cert can still
+do so via the legacy `EDGE_UPSTREAM_CLIENT_CERT`/`_KEY` file path — but that is a
+mount detail on the edge, **not a CA mode on the CP**. cert-manager is no longer part
+of this design.
 
 **Docker edge (the motivating case).** The edge is a bare `docker run` on a VM / box
 near clients (`deploy/edge/run-edge-docker.sh`). Its **only required input is
 `EDGE_CP_TOKEN`** — no cert-manager, no CRDs, no file mounts, no manual renewal. It
 already pulls its public cert+key (`GET /v1/certs`) and WAF rules (`GET /v1/waf`)
 from the control plane on `EDGE_REFRESH_INTERVAL`, fail-static, keys in memory only.
-A cert-manager-mounted client cert is **impossible** here (there is no cert-manager
-and no Secret to mount), and a hand-mounted PEM re-introduces manual file management
-and manual renewal — exactly what the token-pull model removed for the public cert.
-
-**So the data-plane identity rides the SAME channel and loop the public cert already
-rides.** The control plane **issues** the edge its data-plane client cert over the
-existing bearer-authenticated HTTPS channel: `POST /v1/edge-cert` (see
-[Control-plane wiring](#control-plane-wiring-cp-issues-the-client-cert)), CSR in,
-signed chain out, on `EDGE_REFRESH_INTERVAL`, fail-static, key in memory only. This
-is **the primary mechanism**; cert-manager is the alternative for operators who
-already run it and want the CA key out of the CP (`EDGE_CA_MODE=cert-manager`).
+The data-plane identity rides the **same channel and loop**: `POST /v1/edge-cert`,
+CSR in, signed chain out, key in memory only.
 
 | | k8s edge | Docker edge |
 |---|---|---|
 | Public cert+key | `GET /v1/certs` (token-pull) | `GET /v1/certs` (token-pull) |
 | WAF rules | `GET /v1/waf` (token-pull) | `GET /v1/waf` (token-pull) |
-| **Data-plane client cert** | cert-manager Secret **or** `POST /v1/edge-cert` | **`POST /v1/edge-cert`** (only option — no cert-manager) |
+| **Data-plane client cert** | `POST /v1/edge-cert` (mounted-cert file path optional) | **`POST /v1/edge-cert`** |
 | Required edge input | token (+ optional mounted cert Secret) | **`EDGE_CP_TOKEN`, and nothing else** |
-| Renewal | cert-manager `renewBefore` / CP loop | CP loop (`EDGE_REFRESH_INTERVAL`) |
+| Renewal | CP loop (`EDGE_REFRESH_INTERVAL`) | CP loop (`EDGE_REFRESH_INTERVAL`) |
 
 The payoff is uniformity: the Docker edge's onboarding stays "add one token to the
 registry," and the same token edit that authorizes its key/WAF fetch also makes the
@@ -232,23 +225,32 @@ base.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
 `GetConfigForClient` must be non-nil before `Serve()` and must **never** return nil
 (return last-good on any error). A startup **self-test** asserts the served config
 carries `GetCertificate` **and** `ClientCAs` **and**
-`ClientAuth == VerifyClientCertIfGiven` (not `RequireAndVerify`, which would abort
-Cloudflare/browser handshakes; not `NoClientCert`, which silently disables mTLS).
-The SNI-cert reload loop and the trust reload loop write **separate** atomics and
-never share a config object.
+`ClientAuth == VerifyClientCertIfGiven`.
 
-**The trust watch** (`controller.go` + a new `controller_trust.go` mirroring
-`controller_waf.go`): a 6th watcher, gated by `EDGE_TRUST_SECRET != ""` (default
-off ⇒ identical to today). Reuse the generic `watchResource[*v1.Secret]` for
-`POD_NAMESPACE`; on change call `reloadTrustDebounced` (a 300 ms `debounce`). It
-**never rebuilds `ctrl.mux`** (trust is orthogonal to routes) and is
-**validate-then-swap, all-or-nothing** like WAF `SetRules`: parse `ca.crt` with
-`x509.NewCertPool().AppendCertsFromPEM`; a **non-empty input that yields zero certs
-is rejected** (keep last-good, log, bump `parapet_trust_reload_rejected_total`); a
-*deliberately empty* `ca.crt` means "mTLS disabled." On success, atomically `Store`
-**both** `clientCAs` and `trustPol` together so they can never disagree. A rejected
-reload keeps last-good **and alerts loudly** — a stale allow-set silently degrades
-every edge onboarded after the rejection.
+### The trust watch
+
+`controller.go` + a new `controller_trust.go` mirroring `controller_waf.go`: a 6th
+watcher, gated by `EDGE_TRUST_SECRET != ""` (default off ⇒ identical to today).
+Reuse the generic `watchResource[*v1.Secret]` for `POD_NAMESPACE`; on change call
+`reloadTrustDebounced` (a 300 ms `debounce`). It **never rebuilds `ctrl.mux`** (trust
+is orthogonal to routes) and is **validate-then-swap, all-or-nothing** like WAF
+`SetRules`. Parse the CA bundle: read key **`tls.crt`** first (the managed
+`kubernetes.io/tls` `parapet-edge-ca` Secret), falling back to `ca.crt` (a
+hand-rolled bundle / provided-mode convention); whichever is non-empty is fed to
+`x509.NewCertPool().AppendCertsFromPEM`. A **non-empty input that yields zero certs
+is rejected** (keep last-good, log, bump `parapet_trust_reload_rejected_total`). On
+success, atomically `Store` **both** `clientCAs` and `trustPol` so they can never
+disagree. A rejected reload keeps last-good **and alerts loudly** — a stale allow-set
+silently degrades every edge onboarded after the rejection.
+
+**Runtime keep-last-good on disappearance.** Distinguish **startup absence**
+(`EDGE_TRUST_SECRET` set but the Secret/key never loaded ⇒ degrade to CIDR-only,
+safe, warn) from **runtime disappearance** (the watched Secret is DELETED, or its
+`tls.crt`/`ca.crt` goes empty, *after* a good bundle was applied). A runtime
+DELETE/empty event MUST **keep last-good `clientCAs`** and bump
+`parapet_trust_reload_rejected_total` + alert — it MUST NEVER nil the live pool,
+because nilling it instantly distrusts the whole fleet (every edge's XFF
+overwritten). Only a deliberately-empty bundle *at startup* means "mTLS disabled."
 
 **Header hardening (a real gap today, not just for mTLS):** mount a middleware
 **first** in `main.go`'s `m` chain (before `ctrl`) that **unconditionally deletes**
@@ -274,18 +276,16 @@ error if mTLS is on with TLS off, mirroring the existing https-endpoint guard at
   atomically swaps — **if validation fails, the prior pair is kept** (never clears
   the pointer, never swaps in a broken cert). `GetClientCertificate` returns
   last-good non-empty whenever possible; a never-loaded empty return is loud
-  (metric + log) and gates readiness — never a silent half-rotated (new-key/old-chain)
-  state.
-- **`edge/refresh.go`** — `RefreshEdgeCertOnce(cp, ccStore)` mirroring
-  `RefreshCertOnce`: generate an ephemeral key **into a local var** (not the live
-  store), build the CSR, `cp.FetchEdgeCert(...)`, on success `ccStore.Update(chain,
-  localKey)` as **one atomic unit**, on error fail-static (keep the in-memory cert,
-  log a warning). `RunEdgeCertRefresh(ctx, cp, ccStore, ...)` mirrors
+  (metric + log) and gates readiness — never a silent half-rotated state.
+- **`edge/refresh.go`** — `RefreshEdgeCertOnce(cp, ccStore)`: generate an ephemeral
+  key **into a local var** (not the live store), build the CSR, `cp.FetchEdgeCert(...)`,
+  on success `ccStore.Update(chain, localKey)` as **one atomic unit**, on error
+  fail-static (keep the in-memory cert, log a warning). `RunEdgeCertRefresh` mirrors
   `RunCertRefresh` but **renews on remaining-life/renew-before, not bare interval
-  equality**, with **aggressive backoff retries** (faster than the 300 s tick) as
-  expiry nears, adds **per-edge jitter** (the current `RunCertRefresh` has none, so
-  a co-booted fleet stays phase-locked — a thundering-herd risk on a signing
-  endpoint), and **honors the CP's `Retry-After`**.
+  equality**, with **aggressive backoff retries** as expiry nears, adds **per-edge
+  jitter** (the current `RunCertRefresh` has none → a co-booted fleet stays
+  phase-locked, a thundering-herd risk on a signing endpoint), and **honors the CP's
+  `Retry-After`**.
 - **`edge/forward.go` `NewForwarder`** gains a `*ClientCertStore` param (nil ⇒
   anonymous re-encrypt, back-compat); on `useTLS` it sets
   `tlsConfig.GetClientCertificate = ccStore.GetClientCertificate`.
@@ -294,10 +294,11 @@ error if mTLS is on with TLS off, mirroring the existing https-endpoint guard at
 - **Readiness is fail-closed.** When `EDGE_DATAPLANE_MTLS=true`, the readiness gate
   (`cmd/edge-proxy/main.go:197`) becomes
   `(serveAll || store.Loaded()) && clientCert.Loaded()` — a hard AND that
-  **serve-all does NOT bypass** (the headline Docker serve-all edge must not go
-  ready with no client cert and silently run untrusted). First-boot issuance
-  failure keeps the edge **not-ready** (503), not serving-while-untrusted, with a
-  bounded background retry that flips ready when the first cert lands.
+  **serve-all does NOT bypass**. First-boot issuance failure keeps the edge
+  **not-ready** (503), not serving-while-untrusted, with a bounded background retry.
+  **But CP-readiness ≠ system-readiness:** the edge cannot self-detect "the core does
+  not yet trust my CA" (trust convergence happens in another process), so it can go
+  ready and still 502 in the convergence window — see the system-readiness fail mode.
 
 The edge remains the first hop and sets **no** `TrustProxy`, so it keeps
 overwriting incoming `X-Forwarded-*` with the true client peer before forwarding —
@@ -328,11 +329,9 @@ POST /v1/edge-cert    Authorization: Bearer <token>
 It is the **only mutating endpoint** (everything else is `GET`). The CP returns
 **`chain_pem` only** (no key on the wire — the edge holds it). `Cache-Control:
 no-store` **and** `Pragma: no-cache` are set. **No ETag / `If-None-Match` / 304**: a
-fresh ephemeral key each renewal means a new public key → new leaf → new chain, so a
-304 could never legitimately fire and an erroneous one would silently freeze a cert
-toward expiry — renewal is driven **solely** by `not_after`/renew-before. Body
-capped at 16 KiB via `io.LimitReader`. Absent signer / `EDGE_CA_*` unset ⇒ the
-endpoint **404s** (fully backward-compatible, mirroring `waf == nil` → 404).
+fresh ephemeral key each renewal means a new public key → new leaf → new chain.
+Body capped at 16 KiB via `io.LimitReader`. Absent signer ⇒ the endpoint **404s**
+(fully backward-compatible).
 
 **CSR flow** (reusing `edge/refresh.go` + `edge/cp.go` `CpClient`):
 
@@ -344,19 +343,17 @@ endpoint **404s** (fully backward-compatible, mirroring `waf == nil` → 404).
 3. **Edge — POST over the bearer channel.** New `CpClient.FetchEdgeCert(csrPEM)`
    mirroring `FetchCert`/`FetchWaf`: POSTs `{"csr_pem":…}`, sets `Authorization:
    Bearer <token>`, body-capped read, returns chain+not_after+serial on 200 / error
-   otherwise (caller is fail-static). `do()` is generalized to take method+body
-   (today it is GET-only).
+   otherwise (caller fail-static). `do()` is generalized to take method+body
+   (today GET-only).
 4. **CP — verify + sign** (`handleEdgeCert`, new): `bearer(r)` + `authz.Known(token)`
    → 401; `authz.Identity(token)` → 403 if no grant; decode CSR; **whitelist the key
    type/curve BEFORE verifying** (ECDSA P-256/P-384 or Ed25519 only; reject RSA →
    400) so a `CheckSignature` DoS on an oversized key is impossible;
-   `csr.CheckSignature()` (mandatory, unconditional — an unsupported sig alg is a
-   hard 400, never a silent pass) → 400 on failure; then `Signer.Sign(csr.PublicKey,
-   authorizedSAN)`.
+   `csr.CheckSignature()` (mandatory — an unsupported sig alg is a hard 400, never a
+   silent pass) → 400 on failure; then `Signer.Sign(csr.PublicKey, authorizedSAN)`.
 5. **CP — return chain only.** 200 with `chain_pem` + `not_after` + `serial`.
-6. **Edge — assemble + hold atomically.** Pair the returned chain with the in-memory
-   key into a `tls.Certificate` (`tls.X509KeyPair`) and atomically store the
-   **complete** keypair+chain in `ClientCertStore`.
+6. **Edge — assemble + hold atomically.** Pair the chain with the in-memory key into
+   a `tls.Certificate` and atomically store the **complete** keypair+chain.
 7. **Edge — present via `GetClientCertificate`** per handshake — no restart, no file.
 
 ### Signing: template, custody, rate-limiting
@@ -364,31 +361,24 @@ endpoint **404s** (fully backward-compatible, mirroring `waf == nil` → 404).
 All in `edgecp/` + `cmd/edge-controlplane`, reusing existing primitives.
 
 **`edgecp/server.go`.** New `handleEdgeCert` + `mux.HandleFunc("POST /v1/edge-cert",
-…)`. New `signer *Signer` field (nil ⇒ 404), wired by a `WithSigner(*Signer)`
-chaining method like `WithWAF`. **Absent signer ⇒ backward-compatible.**
+…)`. New `signer atomic.Pointer[*Signer]` (nil ⇒ 404), wired by `WithSigner` like
+`WithWAF`. **Absent signer ⇒ backward-compatible.**
 
-**`edgecp/signer.go` (new).** `Signer` holds the parsed edge CA cert + key; `Sign`
-builds the `x509.Certificate` template **from a zero value — never from the parsed
-CSR** — setting ONLY:
-
-- `SerialNumber`: a fresh 128-bit CSPRNG serial (`crypto/rand`), surfaced as `serial`.
-- `NotBefore = now - EDGE_CLIENTCERT_SKEW` (default 10m), `NotAfter = now + EDGE_CLIENTCERT_TTL`.
-- `KeyUsage = DigitalSignature`; `ExtKeyUsage = [x509.ExtKeyUsageClientAuth]` ONLY.
-- `URIs = [authorizedSAN]` derived from the token (the shared-derivation package).
-  **No DNSNames, no IPAddresses, no Subject/CN of significance.**
-- `BasicConstraintsValid = true, IsCA = false`.
-
-The CSR contributes **exactly one thing: `csr.PublicKey`**. The template
-**explicitly never** assigns `Subject`/`DNSNames`/`IPAddresses`/`EmailAddresses`/
-`URIs`/`Extensions`/`ExtraExtensions` from the CSR — getting this exactly right is
-the single highest-value invariant (a verifier matching a smuggled CN, a copied
-rogue SAN, or a carried-over `basicConstraints CA:true` would defeat the model).
-**Post-sign self-check:** re-parse the issued leaf and assert `IsCA==false`,
-`KeyUsage==DigitalSignature`, `ExtKeyUsage==[ClientAuth]`, `URIs==[authorizedSAN]`,
+**`edgecp/signer.go` (new).** `Signer` holds the parsed edge CA cert + key (behind an
+interface — the **HSM/KMS seam**); `Sign` builds the leaf `x509.Certificate` template
+**from a zero value — never from the parsed CSR** — setting ONLY: `SerialNumber`
+(128-bit CSPRNG); `NotBefore = now - EDGE_CLIENTCERT_SKEW`, `NotAfter = now +
+EDGE_CLIENTCERT_TTL`; `KeyUsage = DigitalSignature`; `ExtKeyUsage =
+[ExtKeyUsageClientAuth]` ONLY; `URIs = [authorizedSAN]` from the token (the shared
+derivation package); `BasicConstraintsValid = true, IsCA = false`. The CSR
+contributes **exactly one thing: `csr.PublicKey`**. The template **explicitly never**
+assigns `Subject`/`DNSNames`/`IPAddresses`/`EmailAddresses`/`URIs`/`Extensions`/
+`ExtraExtensions` from the CSR. **Post-sign self-check (mandatory in BOTH CA modes):**
+re-parse the issued leaf and assert `IsCA==false`, `KeyUsage==DigitalSignature`,
+`ExtKeyUsage==[ClientAuth]`, `URIs==[authorizedSAN]`,
 `len(DNSNames)==len(IPAddresses)==0`; **refuse to return** a cert that fails any
-check (mirrors the `GetConfigForClient` self-test discipline). A conformance test
-feeds a CSR carrying `CA:true`, a rogue URI/DNS SAN, and a malicious CN and asserts
-none appear in the leaf.
+check. A conformance test feeds a CSR carrying `CA:true`, a rogue URI/DNS SAN, and a
+malicious CN and asserts none appear in the leaf.
 
 **`edgecp/authz.go` — per-edge identity (explicit opt-in).** Extend `Authz` with
 `identities map[string]string` (token → id) populated alongside `tokens` in
@@ -397,279 +387,489 @@ separate**, NOT auto-derived from the token's presence or its domains; `Identity
 returns `("",false)` (→ 403) unless the operator set it. A serve-all (`"*"`) token
 **MUST NOT** get a default identity. Migration defaults every token to NO identity.
 
-**CA custody — `EDGE_CA_MODE`:**
+**CA custody — managed (default) vs provided.** The edge CA is the new crown jewel
+and **lives with the CP**. Two modes, decided at boot by the **presence** of
+`EDGE_CA_CERT`/`EDGE_CA_KEY` (no `EDGE_CA_MODE` knob):
 
-- **`direct` (default — Docker-friendly).** In-process `x509.CreateCertificate` with
-  the edge CA key from `EDGE_CA_CERT`/`EDGE_CA_KEY`. **No cert-manager dependency** —
-  the whole point for a bare Docker edge. The CA key is the new crown jewel and
-  **now lives with the CP**: store it in its **own** Secret in `POD_NAMESPACE` (NOT
-  co-located with tenant TLS keys), tightest RBAC (only the CP ServiceAccount),
-  behind the CP's edge-sources-only `NetworkPolicy`. **Hot-reload** the key/cert
-  from the watched Secret (validate-then-swap, fail-closed) — NOT load-once — so CA
-  rotation needs no CP restart. Constrain the edge CA with **NameConstraints**
-  limiting URI SANs to `spiffe://parapet.moonrhythm.io/edge/*` (and EKU clientAuth),
-  so even a stolen CA key can mint less. Emit a **loud startup log** that the CP now
-  holds a fleet-minting key.
-- **`cert-manager` (k8s-only alternative).** The CP proxies a cert-manager
-  `CertificateRequest` to an `Issuer`/`ClusterIssuer` and polls. The CA key stays
-  inside cert-manager (smaller CP blast radius) but adds a hard CRD dependency and an
-  async round trip, and does **not** work without cert-manager. **Strongly preferred
-  wherever cert-manager is present.**
+- **`managed` (default — zero PKI, zero openssl, zero cert-manager).** On first boot
+  the CP **generates** a single-purpose edge CA and **persists** it to its own
+  `parapet-edge-ca` Secret (`kubernetes.io/tls`, in `POD_NAMESPACE`), reuses it
+  across restarts/replicas, and **hot-reloads** it on change. The generated CA
+  template (from a zero value): key **ECDSA P-384** (`EDGE_CA_KEY_TYPE=ed25519`
+  alt), PKCS#8; `SerialNumber` 128-bit CSPRNG; `Subject` CN `parapet-edge-ca`
+  (cosmetic); `NotBefore = now-10m`, `NotAfter = now + EDGE_CA_TTL` (default 10y —
+  the **leaf** TTL is the short knob); `KeyUsage = CertSign | CRLSign` ONLY;
+  `ExtKeyUsage = [ClientAuth]` ONLY; `BasicConstraintsValid=true, IsCA=true,
+  MaxPathLenZero=true`; `NameConstraints.PermittedURIDomains = ["parapet.moonrhythm.io"]`.
+  **Honest scope:** this pins the SAN **host** only — SPIFFE path-segment scoping to
+  `/edge/*` is *not* expressible as a URI NameConstraint (the issuance template's
+  `URIs=[authorizedSAN]` + post-sign self-check pin the path). So the constraint stops
+  cross-domain/serverAuth abuse of a stolen key, **NOT** edge-fleet impersonation. **A
+  conformance test must prove** `x509.Verify` rejects `spiffe://evil.example/edge/x`
+  and accepts `spiffe://parapet.moonrhythm.io/edge/x` under this constraint before it
+  is counted as a control. Managed mode emits a **loud startup log** that the CP now
+  HOLDS (and on first boot GENERATED) a fleet-minting CA key, and requires the new
+  `k8s` write path, the dedicated CP ServiceAccount, and `POD_NAMESPACE`.
+- **`provided` (escape hatch — operator's own PKI).** Both `EDGE_CA_CERT`/`EDGE_CA_KEY`
+  point at mounted PEM files; the CP **uses** them, **never generates**, **never
+  writes** the Secret, and **needs no `get`/`update` RBAC**. Hot-reload the mounted
+  files (validate-then-swap). **Validation (mandatory):** the CA MUST be `IsCA` and
+  carry EKU `clientAuth` (reject pure serverAuth / hard-reject `anyExtendedKeyUsage`);
+  **warn loudly (or refuse behind a flag) if it lacks
+  `NameConstraints.PermittedURIDomains`** — the leak-containment guarantee is void
+  without it. It SHOULD be a **dedicated single-purpose** CA, never a shared org
+  intermediate. Not cert-manager-specific: cert-manager may *populate* the mounted
+  Secret, but the CP sees opaque files — no CRD, no `CertificateRequest`, no polling.
 
-**`cmd/edge-controlplane/main.go`.** Load `EDGE_CA_CERT`/`EDGE_CA_KEY` (or
-cert-manager mode), build `Signer`, `server.WithSigner(signer)`. Gated on the env
-being set (absent ⇒ no signer ⇒ 404 ⇒ back-compat).
+**`cmd/edge-controlplane/main.go`.** Branch on `EDGE_CA_CERT`/`EDGE_CA_KEY`: both set
+⇒ provided (read, validate, build `Signer`); both empty ⇒ managed (`edgecp.EnsureCA`
+adopt-or-generate + persist, synchronous, before serving); exactly one set ⇒ hard
+config error (mirrors the `CP_TLS_CERT`/`CP_TLS_KEY` pairing guard at `main.go:41-44`).
+In managed mode, `POD_NAMESPACE` MUST be non-empty (downward-API `metadata.namespace`)
+— a missing `POD_NAMESPACE` is a **fatal** startup error, never a silent
+wrong-namespace write. Either branch yields one `*Signer` wired via
+`server.WithSigner(signer)`; neither ⇒ nil signer ⇒ `POST /v1/edge-cert` 404
+(back-compat).
 
 **Rate-limiting + DoS.** A **per-token** token-bucket (`EDGE_CLIENTCERT_RATE`,
 default 10/min → 429) blunts a single-token forged-CSR flood. It does **nothing**
-against a fleet-wide restart storm (N different tokens), so add a **global signing
-concurrency cap** (a bounded worker pool / semaphore around `Signer.Sign`) returning
-**429/503 + `Retry-After`** when saturated. The authz reject and the **key-type
-whitelist run before** any signing, so an unauthorized or oversized-key flood costs
-no CA work. Keep the endpoint behind the CP's existing edge-sources-only
-`NetworkPolicy`.
+against a fleet-wide restart storm (N tokens), so add a **global signing concurrency
+cap** (a bounded worker pool / semaphore around `Signer.Sign`) returning **429/503 +
+`Retry-After`** when saturated. The authz reject and the **key-type whitelist run
+before** any signing, so an unauthorized or oversized-key flood costs no CA work.
+Keep the endpoint behind the CP's edge-sources-only `NetworkPolicy`.
+
+### Managed-CA bootstrap: replica-safe create-once + anti-regeneration guard
+
+`edgecp.EnsureCA(ctx, k8sClient, podNamespace, secretName)` runs **synchronously
+before serving** (mirroring `wafReloader.LoadOnce` at `main.go:88-93`); only after it
+returns a valid `Signer` is `WithSigner` wired. Until then `POST /v1/edge-cert` 404s
+— never sign with a half-initialized/unpersisted CA.
+
+**Precondition (manifest):** the operator pre-creates an **empty** `parapet-edge-ca`
+Secret. RBAC `resourceNames` can scope `get`/`update` but **cannot** scope `create`;
+the stub lets us grant scoped `update` instead of broad namespace `create`.
+
+**The CAS read MUST be a strongly-consistent typed `Secrets(ns).Get`** (the new
+`k8s.GetSecret`), never an informer/lister cache (a stale-empty cache read can
+livelock the loser into regenerating). Algorithm `ensureCA(ctx)`:
+
+1. `GetSecret(podNamespace, parapet-edge-ca)`. Cases:
+   - **(a) populated** (`tls.crt`+`tls.key` parse into a valid CA keypair) → **ADOPT**,
+     build `Signer`, log "adopted existing edge CA", return. *(Steady state, replica
+     scale-up, and the CAS-loser all land here.)*
+   - **(b) guard annotation present but `tls.crt` empty** → **HARD ANOMALY** (a
+     populated CA was re-blanked). **NEVER regenerate** (a regenerate is
+     indistinguishable from the catastrophic re-blank and would distrust the whole
+     fleet). Keep any in-memory CA, bump `parapet_edge_ca_unexpected_empty_total`,
+     alert, fail readiness. CA replacement is the **overlap rotation**, never
+     delete+regenerate.
+   - **(c) virgin empty stub** (no guard annotation, never populated) → go to 2.
+   - **(d) `NotFound`** → **fatal config error** ("operator must pre-create the empty
+     parapet-edge-ca Secret"). Do NOT fall back to a broad `create` grant.
+2. Generate keypair + self-signed CA **in memory** (local vars).
+3. On the **observed** Secret object (carrying its `resourceVersion`), set
+   `Data["tls.crt"]`/`Data["tls.key"]` **and a guard annotation**
+   `parapet.moonrhythm.io/edge-ca-generation` + populated-at timestamp, and call
+   `k8s.UpdateSecret(...)`. `Update` is a compare-and-swap on `resourceVersion`:
+   succeeds only if the stored version is unchanged.
+4. **Success** → I am the winner; use my keypair; bump `parapet_edge_ca_generated_total`.
+5. **Conflict** (`apierrors.IsConflict`, the loser path) → RE-READ and **ADOPT** the
+   winner's keypair (case a), discard mine. Still-empty re-read (transient, never
+   possible once the guard annotation is set) → jittered bounded backoff;
+   **exhaustion is a hard non-zero exit** (kubelet restarts) — never a silent
+   no-signer 404.
+
+The API server's `resourceVersion` CAS **linearizes** the replicas: exactly one
+`Update` on the empty stub wins; the other gets `Conflict` and adopts. **The Secret
+IS the lock — no leader election, no leases.**
+
+**Anti-regeneration is the load-bearing safety property.** The guard annotation
+(case b) closes the GitOps/operator re-blank hazard: a Flux/Argo sync or `kubectl
+apply` that resets the stub to empty does NOT trigger a regenerate-and-distrust. The
+pre-created stub in `deploy/` MUST carry GitOps drift-exclusion
+(`argocd.argoproj.io/sync-options: Prune=false`, an `ignoreDifferences` on `/data`,
+a Flux server-side-apply field-manager note). Alert if `parapet_edge_ca_generated_total`
+ever increments more than once across the fleet's lifetime.
+
+**Testability:** the create-once MUST be tested against
+`k8s.io/client-go/kubernetes/fake` (or envtest), which honors `resourceVersion` CAS
+and returns `IsConflict`, with a two-goroutine concurrent-generate test asserting
+exactly one CA survives and the loser adopts. The **fs backend's `UpdateSecret` is
+non-CAS** (best-effort in-memory) so managed mode against fs **regenerates per boot**
+— fine for local dev, **never** prod, and cannot validate the linearization.
+
+### Where the core gets the CA (one Secret, no publish step)
+
+The **core reads the public CA cert directly from the same `parapet-edge-ca` Secret**
+via its existing trust watch — no separate publish step, no extra CP write, no skew.
+Point the core at it: `EDGE_TRUST_SECRET=parapet-edge-ca`, reading key **`tls.crt`**
+(fallback `ca.crt`). The cert the CP signs **with** and the cert the core **trusts**
+are the **same bytes in the same Secret**, so they cannot drift; the core needs **zero
+new RBAC** (it already list/watches secrets in the namespace). (Rejected: a separate
+`parapet-edge-trust` Secret holding only `ca.crt` — a second write target and a
+re-introduced publish/skew window for nothing the namespace co-tenancy doesn't already
+concede.)
+
+**Namespace invariant:** the CP's CA Secret and the core's `EDGE_TRUST_SECRET` watch
+MUST be in the **same** namespace, and that namespace is `POD_NAMESPACE` for **both**.
+The CP's CA read/write targets `POD_NAMESPACE` (the pod's own namespace), **NOT**
+`WATCH_NAMESPACE` (which defaults to `""` = all-namespaces and cannot be a write
+target). The core already injects `POD_NAMESPACE` via the downward API
+(`deploy/deployment.yaml:38-41`); the CP manifest does not today and MUST be amended.
+
+### CA hot-reload + rotation (CP-driven, bundle-based, no cert-manager)
+
+**The signer is hot-reloadable, not boot-once.** `EnsureCA` does the create-once; a
+**CA-Secret watch** (a 2nd CP watcher, mirroring the cert `Reloader`) then keeps the
+signer live: validate-then-swap into `atomic.Pointer[*Signer]`. A boot-time-only
+signer would let a replica that booted **before** a rotation keep signing with a stale
+in-memory key — intermittent 502s during the bundle-trim step. Every replica exposes
+`parapet_edge_ca_signer_fingerprint`; the rotation interlock confirms **all** replicas
+converged before trimming.
+
+**Rotation invariant:** the NEW CA's public cert must be in the core's `ClientCAs`
+BEFORE the CP signs any leaf with the new key — else fresh leaves 502. The enabler is
+**bundle support**: `AppendCertsFromPEM` appends every CERTIFICATE block, so `tls.crt`
+can hold an **overlap bundle** (old ++ new CA concatenated), and validate-then-swap
+treats a partially-bad bundle as a rejected reload (keep last-good).
+
+**Rotation is single-writer** (Phase 1: a one-shot Job / subcommand, or
+leader-elected — NOT the steady-state `replicas: 2`). The Secret-as-lock CAS
+linearizes only create-once, not a 4-stage promote/trim state machine. So the **active
+signer is derived SOLELY from Secret content** (e.g. a `tls-active: old|new` field),
+never per-replica state, and every stage is gated on a **core-observed**
+trust-bundle-hash metric:
+
+1. Generate NEW CA in memory.
+2. Write `tls.crt = OLD ++ NEW`, stage NEW key as `tls-next.key`, keep OLD active.
+   Core's watch fires → trusts BOTH. (Invariant satisfied.)
+3. Keep signing with OLD while every short-TTL leaf renews; watch
+   `parapet_edge_clientcert_not_after` / registry-generation convergence.
+4. **Promote:** set `tls-active: new` (all replicas swap within one debounce), keep
+   BOTH certs in the bundle for ≥ one full leaf-TTL, then trim the OLD cert — only
+   after the convergence metric shows zero leaves on the old CA.
+
+**CA-key-compromise emergency:** skip overlap, write ONLY the new CA, accept the brief
+gap (existing edges 502 until they re-fetch a new-CA leaf). **This is the stolen-CA-key
+runbook** — SAN-drop cannot revoke a forged leaf riding a real SAN. Auto-rotation is
+Phase 2.
+
+### k8s client: the first write path
+
+The `k8s` client is **read-only** today (`k8s/k8s.go` exposes only `Get*`/`Watch*`;
+`cluster.go` wraps List/Watch; `fs.go` is the local fixture backend). Managed mode
+needs the **first** write path, added to the interface and **both** backends with
+package-level forwarders:
+
+- `GetSecret(ctx, ns, name) (*v1.Secret, error)` — single-object read preserving
+  `resourceVersion` for the CAS. cluster: `Secrets(ns).Get`. fs: matching secret or
+  `apierrors.NewNotFound`.
+- `UpdateSecret(ctx, ns, *v1.Secret) (*v1.Secret, error)` — the CAS write; sends
+  `s.ResourceVersion`; apiserver rejects a stale version with `Conflict`. cluster:
+  `Secrets(ns).Update`. fs: best-effort in-memory (**non-CAS**, dev-only).
+
+Import `k8s.io/apimachinery/pkg/api/errors` for `IsConflict`/`IsNotFound`. No
+`CreateSecret` in the recommended posture (the stub is pre-created; `NotFound` is
+fatal-config). The **core never uses these writes** — they live solely in the CP
+boot/rotation path. `ensureCA` is **idempotent**: re-running after a CA exists is a
+pure adopt (no write).
+
+## Deployment & RBAC (self-managed CA)
+
+The CP **stops reusing** the controller's ServiceAccount — splitting the SA is the
+prerequisite for isolating the mint/write capability from the core. Concrete manifest
+changes:
+
+1. **New `deploy/edge/serviceaccount.yaml`** — ServiceAccount `edge-controlplane`.
+2. **`controlplane.yaml`:** `serviceAccountName: edge-controlplane` (was
+   `parapet-ingress-controller`); add `POD_NAMESPACE` via downward API `fieldRef:
+   metadata.namespace` (**required** in managed mode); add a hardened `securityContext`
+   (`readOnlyRootFilesystem`, `runAsNonRoot`, `allowPrivilegeEscalation: false`) and an
+   egress `NetworkPolicy`; add `EDGE_CA_SECRET` (and optionally `EDGE_CA_TTL`,
+   `EDGE_CA_KEY_TYPE`).
+3. **New `deploy/edge/role-ca.yaml`** — namespaced Role `edge-controlplane` in
+   `POD_NAMESPACE` with secrets `get, update` scoped to
+   `resourceNames: [parapet-edge-ca]` (resourceNames scopes get/update/patch/delete
+   but **cannot** scope create — exactly why the stub is pre-created), + RoleBinding to
+   the new SA.
+4. **Cluster-wide read rebind (the migration footgun):** because the CP runs
+   `WATCH_NAMESPACE=""` (cluster-wide tenant-cert Reloader), the new SA needs a
+   **ClusterRoleBinding** to the existing `parapet-ingress-controller` read ClusterRole.
+   A namespaced RoleBinding alone **silently breaks cert distribution**. If
+   `WATCH_NAMESPACE` is pinned, a namespaced RoleBinding to the read Role suffices —
+   the binding scope MUST match `WATCH_NAMESPACE`. Ship `deploy/edge/role-binding-read.yaml`.
+5. **New `deploy/edge/ca-secret.yaml`** — the pre-created **empty** `parapet-edge-ca`
+   Secret in `POD_NAMESPACE`. (Confirm whether target k8s rejects a zero-length
+   `tls.crt` on a `kubernetes.io/tls` CREATE; if so ship it as type `Opaque` — type is
+   advisory to our code and cannot change on `Update`.) MUST carry GitOps
+   drift-exclusion so a reconciler never prunes or blanks the CP-populated Secret.
+6. **The core keeps** its namespace-wide secrets list/watch (it needs all tenant TLS
+   for SNI) and reads ONLY the public `tls.crt` from `parapet-edge-ca` via
+   `EDGE_TRUST_SECRET` — **zero new core RBAC**.
+7. **CP startup RBAC self-probe:** after `k8s.Init`, probe-List secrets in
+   `WATCH_NAMESPACE` and probe-Get the CA Secret; on 403, fatal-log naming the exact
+   missing binding.
+8. **etcd encryption-at-rest** is a managed-mode prerequisite (loud startup warning if
+   undetectable): the long-lived CA key now lives in a Secret, exposed in etcd backups
+   and to anyone with namespace secret-get without it.
 
 ## Security model
 
 **Trust boundary.** Exactly the edges holding a private key whose cert chains to the
-dedicated edge CA **and** whose URI SAN is in the live allow-set. The CA signs
-nothing else. Trust is **operator-asserted**: only an operator editing the registry
-Secret moves the boundary — never an edge action, never a token-writable
-self-registration. mTLS trust is conferred **only on `:443`**.
+dedicated edge CA **and** whose URI SAN is in the live allow-set. Trust is
+**operator-asserted**: only an operator editing the registry Secret moves the boundary.
+mTLS trust is conferred **only on `:443`**.
 
-**Spoofing.** A non-edge reaching `:443` **cannot forge trust**:
-`VerifiedChains` is populated only after the Go stack cryptographically verifies the
-presented cert against `ClientCAs`; forging requires the in-cluster CA key. And a
-compromised edge **cannot request a SAN it isn't entitled to** — the CP stamps the
-SAN from the bearer token's registry identity and ignores the CSR's SAN entirely.
+**Spoofing.** A non-edge reaching `:443` **cannot forge trust**: `VerifiedChains` is
+populated only after the Go stack cryptographically verifies the presented cert against
+`ClientCAs`; forging requires the edge CA key. A compromised edge **cannot request a SAN
+it isn't entitled to** — the CP stamps the SAN from the bearer token's registry
+identity and ignores the CSR's SAN.
 
-> **Honest scoping (read this).** mTLS authenticates the **connection, not the
-> headers.** A trusted edge — or anything wielding a stolen edge key — can still
-> set `X-Forwarded-For` to whatever it likes *for its own requests*, because
-> parapet honors a trusted hop's XFF verbatim. The claim is **"an unauthenticated
-> peer is never trusted,"** not "XFF can never be spoofed." Second caveat: with the
-> shipped `TRUST_PROXY: cloudflare` default, a non-edge from a Cloudflare CIDR
-> reaching `:443` is CIDR-trusted with no cert. So **never add edge egress CIDRs to
-> `TRUST_PROXY`** (mTLS is the edge path), and lock **both** core data-plane ports
-> with a `NetworkPolicy` to the edge/Cloudflare source set.
+> **Honest scoping.** mTLS authenticates the **connection, not the headers.** A trusted
+> edge — or anything wielding a stolen edge *leaf* key — can still set
+> `X-Forwarded-For` for its own requests; the claim is **"an unauthenticated peer is
+> never trusted,"** not "XFF can never be spoofed." Second caveat: with the shipped
+> `TRUST_PROXY: cloudflare` default, a non-edge from a Cloudflare CIDR is CIDR-trusted
+> with no cert. **Never add edge egress CIDRs to `TRUST_PROXY`**, and lock both
+> data-plane ports with a `NetworkPolicy`.
 
-**Replay.** None on the data plane — the cert is proven inside a live mTLS handshake
-(ephemeral keys, transcript signing), not a replayable bearer credential.
+**Replay.** None on the data plane — the cert is proven inside a live mTLS handshake.
 
-> **Token-minted certs outlive token revocation.** A leaked-but-not-yet-revoked
-> token POSTed to `/v1/edge-cert` mints a self-contained TLS credential the core
-> verifies cryptographically for its full TTL. Revoking the token stops *future*
-> issuance but does **not** revoke an already-minted cert — only **dropping the
-> registry entry** (which drops its SAN from the live allow-set, re-checked per
-> request) revokes it, within ~300 ms. Therefore: (1) the leaked-token runbook is
-> **"delete the registry entry,"** never "rotate only the token"; (2)
-> `EDGE_CLIENTCERT_TTL` is kept short to shrink the window; (3) **CP-issuance is
-> INCOMPATIBLE with `EDGE_TRUST_REQUIRE_SAN=false`** (CA-only mode) — the per-request
-> SAN check is the *only* bound on such a cert, so the CP MUST refuse to issue
-> and/or the core MUST refuse CA-only when the same edge CA backs issuance.
+> **Token-minted leaf certs outlive token revocation.** A leaked-but-not-yet-revoked
+> token POSTed to `/v1/edge-cert` mints a self-contained cert the core verifies for its
+> full TTL. Revoking the token stops *future* issuance but does **not** revoke a minted
+> cert — only **dropping the registry entry** (which drops its SAN from the live
+> allow-set, re-checked per request) revokes it, in ~300 ms. Runbook for a leaked
+> **token**: delete the registry entry. `EDGE_CLIENTCERT_TTL` is kept short to shrink
+> the window; **CP-issuance is INCOMPATIBLE with `EDGE_TRUST_REQUIRE_SAN=false`** (the
+> per-request SAN check is the only bound on such a cert).
 
-**Blast radius.** A leaked edge client key lets the holder spoof XFF **as that one
-edge** until its SAN is dropped (~300 ms) or its cert expires. It leaks **no** server
-TLS private key. The **crown jewel is the edge CA key** (mints any edge). Under
-`EDGE_CA_MODE=direct` it **lives with the control plane** — a deliberate,
-design-acknowledged escalation from the CP's prior posture (it distributed tenant
-*leaf* keys; it now holds a *CA* that forges fleet-wide edge trust). Mitigated by: a
-**single-purpose** CA, **NameConstraints** capping URI SANs to
-`spiffe://parapet.moonrhythm.io/edge/*`, the key in its **own** tightly-RBAC'd
-in-cluster Secret (never the tenant-cert Secret, never shipped — only the chain
-leaves the cluster), **hot-reload** for restart-free rotation, short
-`EDGE_CLIENTCERT_TTL`, per-request SAN revocation, and the
-`EDGE_CA_MODE=cert-manager` alternative that keeps the CA key out of the CP. A
-future HSM/KMS signer interface can keep the raw key out of pod memory. CA-key
-compromise is handled by the overlap rotation runbook with a metric interlock.
+**Blast radius.** A leaked edge **leaf** key lets the holder spoof XFF **as that one
+edge** until its SAN is dropped (~300 ms) or its cert expires. The **crown jewel is the
+edge CA key** (mints any edge). In **managed** mode the CP both **GENERATES and HOLDS**
+it — a deliberate escalation from the CP's prior posture (it distributed tenant *leaf*
+keys; it now holds, and mints, a *CA* that forges fleet-wide edge trust). **State this
+plainly:** a stolen edge-CA key forges the **entire** fleet's identities. NameConstraints
+(`PermittedURIDomains`) and EKU `clientAuth` only stop **cross-purpose** abuse (other URI
+domains, serverAuth leaves) — they do **not** bound edge-fleet impersonation, because a
+forged leaf carries a SAN already in the allow-set, so **per-request SAN-drop does NOT
+revoke a forged leaf without also distrusting the legitimate edge.** The **only** real
+bound on a stolen CA key is **CA rotation** (the overlap/emergency runbook); that, not
+SAN-drop, is the stolen-CA-key runbook. Mitigations that genuinely shrink the
+window/surface: a **single-purpose** CA (`KeyUsage=CertSign|CRLSign`, `MaxPathLen=0`,
+EKU `clientAuth`), its **own** tightly-RBAC'd Secret read only by the **dedicated CP
+ServiceAccount**, the CP's edge-sources-only `NetworkPolicy` + hardened pod, **provided**
+mode (key never in an in-cluster Secret) for high-assurance, and a future **HSM/KMS
+`Signer`** so the raw key never sits in pod memory. **Phase-1 honesty:** because the
+**core** SA needs namespace-wide secret read for SNI certs, the core CAN read the CA
+private key from `parapet-edge-ca` in the shared namespace — the dedicated CP SA isolates
+the **mint/write** capability, NOT key-read. Full key-read isolation requires moving
+`parapet-edge-ca` to a CP-only namespace (Phase-1 *option*, applyable manifest) or
+provided mode. The CP also concentrates risk: the same process holds cluster-wide read of
+**all** tenant TLS keys (`WATCH_NAMESPACE=""`) **and** the fleet-minting CA key — pin
+`WATCH_NAMESPACE` to specific tenant-secret namespaces to shrink this.
 
 **Fail-default: fail-closed, degrading to the static CIDR branch.** A missing trust
-Secret ⇒ `trustPol` nil ⇒ mTLS branch always false ⇒ edges distrusted (degraded but
-safe — identical to the pre-mechanism world), Cloudflare CIDR unaffected, startup
-warning logged. An empty/garbage `ca.crt` on reload ⇒ validate-then-swap **rejects**
-and keeps last-good. First-boot issuance failure ⇒ edge **not-ready** (never
-serve-while-untrusted). **No path fails open.**
+Secret ⇒ `trustPol` nil ⇒ mTLS branch false ⇒ edges distrusted (degraded but safe),
+Cloudflare CIDR unaffected. An empty/garbage `ca.crt` on reload ⇒ validate-then-swap
+**rejects** and keeps last-good. First-boot issuance failure ⇒ edge **not-ready**. A
+trust Secret that **vanishes at runtime** keeps **last-good** `clientCAs` and alerts — it
+never nils the live pool; only a *never-loaded* startup absence degrades to the CIDR
+branch. **No path fails open.**
 
-**The explicit tradeoff.** This forces re-encrypt TLS (`EDGE_UPSTREAM_TLS=true`), a
-PKI lifecycle, and the CA key living with the CP (direct mode). An **expired edge
-cert hard-fails the handshake** (502s); the CP-outage budget (= `TTL` ×
-renew-before-fraction) must exceed the operator's CP recovery SLO. Accepted: a
-cryptographic, IP-independent, per-edge-revocable identity that makes a bare Docker
-edge work with nothing but a token is worth the discipline.
+**The explicit tradeoff.** This forces re-encrypt TLS, a PKI lifecycle, and the CA key
+living with the CP (managed mode). An **expired edge cert hard-fails the handshake**
+(502s); the CP-outage budget (= `EDGE_CLIENTCERT_TTL` × renew-before-fraction) must
+exceed the operator's CP recovery SLO. Accepted: a cryptographic, IP-independent,
+per-edge-revocable identity that makes a bare Docker edge work with nothing but a token.
 
 ## Fail modes
 
 | Failure | Behavior |
 |---|---|
-| Trust Secret absent / never created | mTLS branch false for all (`trustPol` nil); edges distrusted (XFF overwritten → WAF/limits/GeoIP see edge IP); core serves; Cloudflare CIDR unaffected. **Fail-closed, degraded-not-down.** Startup warning + `parapet_trust_source{none}`. |
-| `ca.crt` edited to empty/garbage on reload | Validate-then-swap: non-empty input yielding zero certs **rejected**, last-good kept, `parapet_trust_reload_rejected_total++`, **loud alert** (a stale allow-set silently degrades edges onboarded after). A *deliberately* empty `ca.crt` = "mTLS disabled." Never fails open. |
-| Edge client cert expired / not yet renewed | `VerifyClientCertIfGiven` **aborts the handshake** → edge `:443` connection 502s. Mitigated by short-TTL + generous renew-before, live `GetClientCertificate` reload, NTP sync, alerting on `parapet_edge_clientcert_not_after`. |
-| Edge on plaintext `:80` but operator expected trust | No client cert on `:80`; `r.TLS == nil`; edge distrusted (CIDR-only). Made loud: edge errors if `EDGE_DATAPLANE_MTLS` set with TLS off; `parapet_trust_source{none}` alerts. |
-| Per-edge revocation (registry-entry delete) | **Fast path.** SAN re-checked per request against the live atomic allow-set → distrusts within ~300 ms even on existing connections. The routine revocation lever. |
-| CA-drop revocation latency | `VerifiedChains`/`ClientCAs` are consulted only at **handshake**. Dropping a CA takes effect on **new** handshakes only; existing connections keep their verified chain until they close. Mitigate: prefer SAN-drop; cap `:443` connection age; reserve CA-drop for CA-key compromise. |
-| Edge CA private key leaked (direct mode) | Attacker mints trusted edges until CA rotation. **Highest severity.** Mitigated by the own-Secret + tightest-RBAC custody, NameConstraints, the cert-manager alternative (key out of CP), and the overlap rotation runbook with a metric interlock. |
+| Trust Secret absent / never created (startup) | mTLS branch false (`trustPol` nil); edges distrusted (XFF overwritten); core serves; Cloudflare CIDR unaffected. **Fail-closed, degraded-not-down.** Startup warning + `parapet_trust_source{none}`. |
+| `ca.crt`/`tls.crt` empty/garbage on reload | Validate-then-swap **rejects**, last-good kept, `parapet_trust_reload_rejected_total++`, **loud alert**. Never fails open. |
+| Managed CA Secret deleted / blanked at RUNTIME (operator, GitOps prune, restore of the empty stub) | CP: the guard annotation makes a re-blanked-but-previously-populated stub a HARD ANOMALY — the CP **NEVER regenerates** (would mint a new CA and distrust the fleet), keeps its in-memory CA, bumps `parapet_edge_ca_unexpected_empty_total`, alerts, fails readiness. Core: a runtime DELETE/empty of `EDGE_TRUST_SECRET` keeps **LAST-GOOD** `ClientCAs` + alerts — never nils the live pool. Replacement is the overlap rotation, never delete+regenerate. The `deploy/` stub carries GitOps drift-exclusion. |
+| Two CP replicas both observe an empty stub and both generate (split-CA race) | `resourceVersion` CAS linearizes them: exactly one `Update` wins (rv advances), the other gets `Conflict`, re-reads, **ADOPTS** the winner's keypair. The Secret IS the lock — no leader election. The CAS read MUST be a strongly-consistent typed `Get` (never an informer cache, which can serve a stale-empty stub and livelock the loser); retry exhaustion is a hard non-zero exit. |
+| CP started managed with empty `POD_NAMESPACE` (downward API not wired) | **FATAL** startup error before any write — the CA Secret has no known namespace and a wrong-namespace write would land where the core never sees it. Mirrors the `CP_TLS` pairing guard. |
+| CP switched to the dedicated SA without the cluster-wide read rebind (`WATCH_NAMESPACE=""`) | The cluster-wide tenant-cert Reloader 403s → stale/empty cert store → edges fail to fetch certs → data-plane outage. MUST bind a ClusterRoleBinding to the existing read ClusterRole. The CP startup RBAC self-probe fails loud, naming the missing binding. |
+| A CP replica booted before a CA rotation keeps signing with the stale key | Prevented by the CA-Secret watch: signer is `atomic.Pointer[*Signer]`, hot-reloaded on change; the active key derives solely from Secret content (`tls-active`) so all replicas converge within one debounce. The interlock confirms all `parapet_edge_ca_signer_fingerprint` match before trimming. |
+| Edge client cert expired / CP down past `NotAfter` | `VerifyClientCertIfGiven` aborts the handshake → 502s. Until expiry, the edge keeps its last-good in-memory cert (**fail static**) and retries with backoff. Outage budget = `TTL` × renew-before-fraction; size `TTL` above the CP recovery SLO. |
+| Leaked-but-not-yet-revoked token replayed to `/v1/edge-cert` | Mints a cert for ITS OWN SAN, valid for the full TTL. Token revocation does NOT revoke it — **only deleting the registry entry** drops its SAN (per-request → distrusted ~300 ms). Bounded by short `EDGE_CLIENTCERT_TTL`. |
+| Stolen edge-CA key (managed mode) | Attacker forges the **ENTIRE fleet's** identities. NameConstraints + EKU stop only cross-purpose abuse, NOT impersonation (a forged leaf rides a real SAN, so SAN-drop can't revoke it without distrusting the legit edge). The ONLY bound is **CA ROTATION**. Phase-1 honesty: the CA key is readable by the core SA (namespace co-tenancy); the dedicated CP SA isolates mint/write, not key-read. |
+| CP signs with a CA the core's `ClientCAs` doesn't yet trust (rotation skew) | Fresh certs fail verification → 502s. Prevented by the overlap invariant (new CA in the bundle BEFORE signing with it) + the convergence interlock. CP hot-reloads the CA so rotation needs no restart. |
+| Clock skew: core clock behind the CP by > `EDGE_CLIENTCERT_SKEW` | A fresh cert is "not yet valid" at the core → handshake aborts → 502s, self-healing once skew elapses. The validator is the **core** clock. Mitigated by the NotBefore backdating (default 10m), an NTP-sync prerequisite, and a distinct notBefore/notAfter failure metric. |
+| First-boot issuance fails under `EDGE_DATAPLANE_MTLS=on` (CP down at startup) | **Fail-CLOSED on readiness:** edge stays not-ready (503), not routed to. Bounded background retry flips ready when the first cert lands. Readiness `= (serveAll || store.Loaded()) && clientCert.Loaded()` — serve-all does NOT bypass. CP HA recommended. |
+| CP readiness ("can sign") mistaken for system readiness ("core trusts the CA") | The edge cannot self-detect the core-doesn't-trust-me state and WILL go ready and serve 502s in the convergence window (core debounce + watch + etcd lag, worst-case seconds). The onboarding gate **REQUIRES** confirming `parapet_trust_source{mtls}` / the trust-bundle-hash includes the new CA before routing prod traffic; optionally an edge-side post-issuance re-encrypt probe before flipping ready. |
+| Provided-mode CA mounted without NameConstraints / clientAuth EKU | The CP validates: `IsCA` required; EKU must contain `clientAuth` (reject pure serverAuth / anyEKU); **warn loudly (or refuse behind a flag)** if `NameConstraints.PermittedURIDomains` is absent. The post-sign self-check still bounds the emitted leaf in both modes. |
+| Malformed / oversized-key / unsupported-alg CSR (DoS probe) | 16 KiB body cap (413); the **key-type/curve whitelist rejects (400) BEFORE `CheckSignature`** so an oversized-RSA verify-DoS is impossible. authz + reject precede any CA signing. |
+| Fleet-wide re-issue storm (rollout / drain / CP recovery) | Per-token rate limit does NOT help (N tokens). A **global signing concurrency cap** returns 429/503 + `Retry-After`; the edge honors it with backoff; the edge refresh loop adds **jitter** so a co-booted fleet doesn't stay phase-locked. |
+| `ClientCertStore.Update` gets an unparseable / mismatched chain | All-or-nothing: `tls.X509KeyPair(chain, heldKey)` failing keeps the PRIOR pair (never clears the pointer, never swaps a broken cert), logs + bumps a rejection metric. Never a silent half-rotated state. |
 | `GetConfigForClient` returns nil / omits `ClientAuth`/`GetCertificate` | Guarded: base config built non-nil before `Serve()`; callback returns last-good, never nil; startup self-test asserts the three properties. |
-| CP-issuance endpoint unreachable / CP down | Edge keeps its last-good in-memory client cert (**fail static**); core `:443` handshakes keep succeeding. Renewal retries with aggressive backoff as expiry nears. Only if the CP stays down PAST `NotAfter` does the handshake hard-502. Outage budget = `TTL` × renew-before-fraction. |
-| Leaked-but-not-yet-revoked token replayed to `/v1/edge-cert` | Mints a cert for ITS OWN SAN, cryptographically valid for the full TTL. Token revocation does NOT revoke it — **only deleting the registry entry** drops its SAN (re-checked per request → distrusted ~300 ms). Runbook: delete the registry entry. Bounded by short `EDGE_CLIENTCERT_TTL`. |
-| CP-issuance enabled with `EDGE_TRUST_REQUIRE_SAN=false` (CA-only) | **Refused — fail-closed.** CA-only trusts any chain to the edge CA with no per-request SAN check, so a leaked-token-minted cert would stay trusted for the full TTL. The CP refuses to issue and/or the core refuses CA-only; startup error names the conflict. |
-| Malformed / oversized-key / unsupported-alg CSR (DoS probe) | 16 KiB body cap (413) bounds bytes; the **key-type/curve whitelist rejects (400) BEFORE `CheckSignature`** so an oversized-RSA verify-DoS is impossible. `CheckSignature` is mandatory; an unsupported sig alg is a hard 400. authz + reject precede any CA signing. |
-| Fleet-wide re-issue storm (rollout / node drain / CP recovery) | Per-token rate limit does NOT help (N tokens). A **global signing concurrency cap** returns 429/503 + `Retry-After`; the edge honors it with backoff; the edge refresh loop adds **jitter** (unlike the public-cert loop) so a co-booted fleet does not stay phase-locked. |
-| CP signs with a CA the core's `ClientCAs` does not yet trust (rotation skew) | Freshly-issued certs fail verification at the core → 502s. Prevented by the overlap invariant: the new CA must be in the core's `ClientCAs` bundle (concatenated CAs allowed) BEFORE the CP signs with it; the old CA stays until the metric interlock confirms every edge re-issued. CP hot-reloads the CA so rotation needs no restart. |
-| Clock skew: core clock behind the CP by > `EDGE_CLIENTCERT_SKEW` | A fresh cert is "not yet valid" at the core → handshake aborts → 502s, self-healing once skew elapses. The validator is the **core** clock. Mitigated by the configurable NotBefore backdating (default 10m), a hard NTP-sync prerequisite between CP and core pods, and a distinct notBefore/notAfter handshake-failure metric. |
-| First-boot issuance fails under `EDGE_DATAPLANE_MTLS=on` (CP down at startup) | **Fail-CLOSED on readiness:** edge stays not-ready (503), is NOT routed to, does not serve-while-untrusted. Bounded background retry flips ready when the first cert lands. Readiness `= (serveAll || store.Loaded()) && clientCert.Loaded()` — serve-all does NOT bypass. Availability tradeoff documented; CP HA recommended. |
-| `ClientCertStore.Update` gets an unparseable / mismatched chain | All-or-nothing: `tls.X509KeyPair(chain, heldKey)` failing keeps the PRIOR complete pair (never clears the pointer, never swaps in a broken cert), logs + bumps a rejection metric. Never a silent half-rotated state. |
 
 ## Configuration
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
-| `TRUST_PROXY` | core | `cloudflare` | **Unchanged.** Static CIDR list / `cloudflare`/`true`/`false`. Becomes the `cidrTrust` OR-branch. **Never add edge egress CIDRs here.** |
-| `EDGE_TRUST_SECRET` | core | `""` (feature **off**) | Name of the Secret in `POD_NAMESPACE` carrying `ca.crt` (edge CA PEM bundle). `edge-controlplane-tokens` (single-source) or a dedicated `parapet-edge-trust` (separation). Unset ⇒ mTLS disabled, identical to today. |
-| `EDGE_TRUST_REQUIRE_SAN` | core | `true` | Trust requires the verified leaf's URI SAN ∈ the live allow-set (enables per-edge revocation). When false (CA-only), any chain to the edge CA is trusted. **Incompatible with CP-issuance: the per-request SAN check is the ONLY bound on a cert minted from a leaked bearer token (token revocation does not revoke a minted cert). When the same edge CA backs issuance, the CP MUST refuse to issue and/or the core MUST refuse CA-only — fail-closed.** |
+| `TRUST_PROXY` | core | `cloudflare` | **Unchanged.** Static CIDR list / `cloudflare`/`true`/`false` → the `cidrTrust` OR-branch. **Never add edge egress CIDRs here.** |
+| `EDGE_TRUST_SECRET` | core | `""` (feature **off**) | Name of the Secret in `POD_NAMESPACE` carrying the edge CA **public** cert into `ClientCAs`. Set to `parapet-edge-ca` to single-source from the managed CA Secret. Reads key **`tls.crt`** first, `ca.crt` as fallback. MUST be the same namespace as the CP's CA Secret (= `POD_NAMESPACE` for both). Unset ⇒ mTLS disabled, identical to today. |
+| `EDGE_TRUST_REQUIRE_SAN` | core | `true` | Trust requires the verified leaf's URI SAN ∈ the live allow-set (enables per-edge revocation). **Incompatible with CP-issuance: the per-request SAN check is the ONLY bound on a cert minted from a leaked token. When the same edge CA backs issuance, the CP MUST refuse to issue and/or the core MUST refuse CA-only — fail-closed.** |
 | `EDGE_DATAPLANE_MTLS` | edge | `false` | Enable the CP-issued data-plane client cert (CSR → `POST /v1/edge-cert`, presented via `GetClientCertificate`). Off ⇒ anonymous re-encrypt, identical to today. Requires `EDGE_UPSTREAM_TLS=true` (loud error otherwise). When on, readiness is gated on the client cert (fail-closed). |
-| `EDGE_CLIENTCERT_KEY_TYPE` | edge | `ecdsa-p256` | Key type for the in-memory ephemeral keypair (the key that never leaves the edge). `ecdsa-p256`/`p384`/`ed25519` — matches the CP's accepted-key whitelist. RSA is not offered (bounds the CP's CSR-verify DoS surface). |
-| `EDGE_CA_CERT` | CP | `""` | PEM path to the edge CA certificate (its OWN Secret, not the tenant-cert Secret). The same CA the core loads as `ClientCAs`. Hot-reloaded. Unset ⇒ no signer ⇒ `POST /v1/edge-cert` 404 (feature off). |
-| `EDGE_CA_KEY` | CP | `""` | PEM path to the edge CA **private** key (direct mode). The new crown jewel living with the CP — its OWN tightly-RBAC'd Secret, never shipped. Hot-reloaded. A loud startup log warns the CP holds a fleet-minting key. Ideally NameConstrained. |
-| `EDGE_CA_MODE` | CP | `direct` | `direct` = in-process `x509.CreateCertificate` (no cert-manager — the Docker-friendly default). `cert-manager` = proxy a `CertificateRequest` (k8s-only; CA key stays in cert-manager; CRD dependency + async). Prefer `cert-manager` where present. |
-| `EDGE_CLIENTCERT_TTL` | CP | `1h` | Issued cert lifetime. Short — renewal is free over the loop — to bound a leaked-token-minted cert. Outage budget = `TTL` × renew-before-fraction; raise (e.g. 24–72h) if outage tolerance matters more than mint-window shrinkage (call out the tension). |
-| `EDGE_CLIENTCERT_SKEW` | CP | `10m` | NotBefore backdating slack. The cert is minted on the CP clock but **validated on the core clock** at the handshake. NTP sync between CP and core pods is a hard prerequisite. A distinct core-side notBefore/notAfter failure metric surfaces a skew regression. |
-| `EDGE_CLIENTCERT_RATE` | CP | `10/min` | Per-token issuance rate limit (429 over cap). A **global** signing concurrency cap (worker pool around `Signer.Sign`, 429/503 + `Retry-After`) is separate and necessary — the per-token limit does nothing against a fleet-wide restart storm. |
-| `EDGE_UPSTREAM_CLIENT_CERT` / `EDGE_UPSTREAM_CLIENT_KEY` | edge | `""` / `""` | **cert-manager / mounted-Secret (k8s-only) path**, superseded as the default by `EDGE_DATAPLANE_MTLS` + CP-issuance. PEM paths to a mounted client cert+key, live-reloaded from disk. Use for the k8s-edge mount case. |
+| `EDGE_CLIENTCERT_KEY_TYPE` | edge | `ecdsa-p256` | Key type for the in-memory ephemeral keypair (never leaves the edge). `ecdsa-p256`/`p384`/`ed25519` — matches the CP's accepted-key whitelist. RSA not offered (bounds the CP's CSR-verify DoS surface). |
+| `EDGE_CLIENTCERT_TTL` | CP | `1h` | Issued **leaf** cert lifetime. Short — renewal is free over the loop — to bound a leaked-token-minted cert. Outage budget = `TTL` × renew-before-fraction; raise (24–72h) if outage tolerance dominates (call out the tension). |
+| `EDGE_CLIENTCERT_SKEW` | CP | `10m` | NotBefore backdating slack. The cert is minted on the CP clock but **validated on the core clock**. NTP sync between CP and core is a hard prerequisite. |
+| `EDGE_CLIENTCERT_RATE` | CP | `10/min` | Per-token issuance rate limit (429). A **global** signing concurrency cap (429/503 + `Retry-After`) is separate and necessary — per-token does nothing against a fleet-wide restart storm. |
+| `EDGE_CA_CERT` / `EDGE_CA_KEY` | CP | `""` / `""` (⇒ managed mode) | **Provided mode:** PEM paths to a MOUNTED edge CA cert+key. Set ⇒ the CP uses them and does NOT generate/write the Secret; hot-reloaded from disk. Both-or-neither (hard config error if only one). Absent ⇒ **managed** mode (CP self-generates). Not cert-manager-specific. |
+| `EDGE_CA_SECRET` | CP | `parapet-edge-ca` | Name of the Secret in `POD_NAMESPACE` the CP adopts-or-generates the CA into (managed). Operator pre-creates it **empty** (with GitOps drift-exclusion). Keys `tls.crt`/`tls.key`; carries the `parapet.moonrhythm.io/edge-ca-generation` guard once populated. Read/written in `POD_NAMESPACE`, never `WATCH_NAMESPACE`. |
+| `EDGE_CA_TTL` | CP | `87600h` (10y) | Lifetime of a CP-**generated** edge CA cert (managed/generate path). Long-lived (the CA is the anchor; the short knob is the leaf TTL). Ignored in provided mode. *(Open: shorten to 1–2y unless convergence-gated rotation has shipped.)* |
+| `EDGE_CA_KEY_TYPE` | CP | `ecdsa-p384` | Key type for a CP-generated CA: `ecdsa-p384` (default) or `ed25519`. Ignored in provided mode. |
+| `POD_NAMESPACE` | CP | downward API `metadata.namespace` (**required in managed mode**) | The CP's own namespace; the CA Secret is read/written here (NOT `WATCH_NAMESPACE`). Empty in managed mode ⇒ fatal startup error. Must be added to `deploy/edge/controlplane.yaml` (the core already wires it). |
+| `WATCH_NAMESPACE` | CP | `""` (all namespaces) | Existing knob; documented here for its security weight. `""` = cluster-wide tenant-TLS read = highest blast radius. **Recommend pinning** to the namespace(s) holding tenant TLS Secrets. Distinct from `POD_NAMESPACE`; the CA read/write never uses it. |
+| `EDGE_UPSTREAM_CLIENT_CERT` / `_KEY` | edge | `""` / `""` | **Legacy mounted-cert (k8s-only) edge-side path**, superseded as the default by `EDGE_DATAPLANE_MTLS` + CP-issuance. PEM paths to a mounted client cert+key, live-reloaded from disk. An edge mount detail, not a CA mode. |
 | `EDGE_UPSTREAM_TLS` | edge | `false` | **Unchanged.** Must be `true` for mTLS trust. Selects the re-encrypt path. |
 | `EDGE_UPSTREAM_SNI` | edge | `""` | **Unchanged.** SNI/`ServerName` presented to the core on re-encrypt. |
 
-Metrics: `parapet_trust_source{mtls|cidr|none}` and `parapet_trust_reload_rejected_total`
-(core); `parapet_edge_clientcert_loaded` (0/1) and `parapet_edge_clientcert_not_after`
-(edge). Both planes also expose the registry generation/hash they last applied, so an
-operator can confirm convergence before declaring an edge trusted.
+Metrics: `parapet_trust_source{mtls|cidr|none}`, `parapet_trust_reload_rejected_total`
+(core); `parapet_edge_clientcert_loaded` (0/1), `parapet_edge_clientcert_not_after`
+(edge); `parapet_edge_ca_generated_total`, `parapet_edge_ca_signer_fingerprint`,
+`parapet_edge_ca_unexpected_empty_total` (CP). Both planes also expose the registry
+generation/hash they last applied, so an operator can confirm convergence before
+declaring an edge trusted.
 
 ## Onboarding flow (the payoff)
 
-1. **One-time:** create the dedicated edge CA. Under `EDGE_CA_MODE=direct`, put its
-   cert + key in their **own** RBAC-locked Secret for the CP (`EDGE_CA_CERT` /
-   `EDGE_CA_KEY`) and its cert in the core's trust Secret (`ca.crt`); under
-   `cert-manager`, create the `Issuer`. Roll the core and CP **once** to pick up the
-   new code. *This is the only restart, ever — never again per-edge.*
-2. **Per edge — grant a data-plane identity (one registry edit, no cert-manager).**
-   Add the edge's entry to `edge-controlplane-tokens` with an explicit `id` (its
-   SPIFFE identity opt-in). This single edit (a) authorizes its cert/WAF fetch, (b)
-   makes the CP **issue** its data-plane client cert on `POST /v1/edge-cert` over the
-   existing bearer channel — key generated in the edge's memory, never mounted, never
-   renewed by hand — and (c) adds its SAN `spiffe://…/edge/<id>` to the core's live
-   allow-set. *(k8s-only alternative: mint a cert-manager `Certificate`, mount the
-   Secret, set `EDGE_CA_MODE=cert-manager` + `EDGE_UPSTREAM_CLIENT_CERT`.)*
+1. **One-time, code-only:** deploy the dedicated `edge-controlplane` ServiceAccount +
+   its scoped Role/RoleBinding (`get,update` on `resourceNames: [parapet-edge-ca]`) +
+   the cluster-wide read rebind (when `WATCH_NAMESPACE=""`), pre-create the **empty**
+   `parapet-edge-ca` Secret (with GitOps drift-exclusion annotations), set
+   `POD_NAMESPACE` on the CP via the downward API, and roll the core + CP **once** to
+   pick up the new code. On first boot the CP **generates and persists** the edge CA
+   itself (managed mode) — **no openssl, no cert-manager, no out-of-band CA**. The core
+   points `EDGE_TRUST_SECRET=parapet-edge-ca` and reads the public cert from the same
+   Secret. *This is the only restart, ever — never again per-edge.* (Provided mode: skip
+   the generate — mount `EDGE_CA_CERT`/`EDGE_CA_KEY`; the CP needs no `get`/`update`.)
+2. **Per edge — grant a data-plane identity (one registry edit).** Add the edge's entry
+   to `edge-controlplane-tokens` with an explicit `id`. This single edit (a) authorizes
+   its cert/WAF fetch, (b) makes the CP **issue** its data-plane client cert on `POST
+   /v1/edge-cert` — key generated in the edge's memory, never mounted, never renewed by
+   hand — and (c) adds its SAN `spiffe://…/edge/<id>` to the core's live allow-set.
 3. **Configure the edge:** `EDGE_DATAPLANE_MTLS=true`, `EDGE_UPSTREAM_TLS=true`,
    `EDGE_UPSTREAM_ADDR` → core `:443`. For a Docker edge that's it — **no client-cert
-   file mounts**; its only input across all of this stays `EDGE_CP_TOKEN`.
-4. **Deploy.** The edge generates a keypair in memory, fetches its cert from the CP,
-   re-encrypts to `:443` presenting it; the core verifies the chain + SAN and
-   **immediately honors its `X-Forwarded-*`** — no `TRUST_PROXY` edit, no core
-   restart. Confirm via `parapet_trust_source{mtls}` and `parapet_edge_clientcert_loaded`.
+   file mounts**; its only input stays `EDGE_CP_TOKEN`.
+4. **Deploy + verify.** The edge generates a keypair in memory, fetches its cert, and
+   re-encrypts to `:443` presenting it. **Confirm `parapet_trust_source{mtls}` / the
+   trust-bundle-hash includes the CA before routing prod traffic** (the edge can't
+   self-detect the core-doesn't-trust-me window). No `TRUST_PROXY` edit, no core restart.
 5. **Revoke:** **delete the edge's registry entry** → its SAN leaves the allow-set →
-   distrusted within ~300 ms, even on live connections (deleting only the token does
-   NOT revoke an already-minted cert). For a leaked **CA** key, use the overlap
-   rotation runbook.
+   distrusted within ~300 ms (deleting only the token does NOT revoke an already-minted
+   cert). For a **leaked CA key**, SAN-drop does NOT help (a forged leaf rides a real
+   SAN) — the only fix is **CA rotation** (overlap runbook), gated on the convergence
+   metric.
 
 ## Phasing
 
-1. **Phase 1 — the primary mechanism (makes a bare Docker edge work, no cert-manager).**
-   Core: the per-request closure, `GetConfigForClient` hot-swap over a **separate**
-   atomic from the SNI cert table, the `EDGE_TRUST_SECRET` watch
-   (validate-then-swap, keep-last-good, alert-on-reject), `EDGE_TRUST_REQUIRE_SAN=true`
-   single-sourced, the unconditional `X-Forwarded-Country/-ASN` strip, the metrics.
-   **Plus CP-issuance:** `POST /v1/edge-cert`, `edgecp/signer.go` (zero-value template
-   + post-sign self-check + key-type whitelist), `Authz.Identity`, the **shared SAN
-   derivation package** imported by both binaries, `EDGE_DATAPLANE_MTLS` edge wiring
-   with atomic key+chain swap, jitter, fail-closed readiness, the global signing
-   concurrency cap. The cert-manager mount path
-   (`EDGE_CA_MODE=cert-manager` / `EDGE_UPSTREAM_CLIENT_CERT`) ships **alongside** as
-   the k8s-only alternative. `NetworkPolicy` locking core `:80`/`:443` to
-   edge/Cloudflare sources.
-2. **Phase 2 — stronger hardening.** Mutual auth of the hop (edge pins the core CA,
-   drop `InsecureSkipVerify`); CRL/OCSP via `tls.Config.VerifyConnection` if
-   revocation must beat TTL + SAN-drop; an HSM/KMS `Signer` interface so the raw edge
-   CA key need not sit in CP pod memory; real SPIRE SVID migration (the SAN naming
-   already aligns).
+1. **Phase 1 — the primary mechanism (a bare Docker edge works, no cert-manager).** Core:
+   the per-request closure, `GetConfigForClient` hot-swap over a **separate** atomic from
+   the SNI cert table, the `EDGE_TRUST_SECRET` watch (validate-then-swap, keep-last-good,
+   runtime-keep-last-good-on-delete, alert-on-reject), `EDGE_TRUST_REQUIRE_SAN=true`
+   single-sourced, the `X-Forwarded-Country/-ASN` strip, the metrics. CP-issuance: `POST
+   /v1/edge-cert`, `edgecp/signer.go` (zero-value template + post-sign self-check +
+   key-type whitelist + HSM/KMS seam interface), `Authz.Identity`, the **shared SAN
+   derivation package**, the global signing concurrency cap. **Managed-CA bootstrap:**
+   `edgecp.EnsureCA` (adopt-or-generate, ECDSA-P384, single-purpose, NameConstrained)
+   under the `resourceVersion`-CAS create-once over the pre-created empty Secret, the
+   **anti-regeneration guard**, the new `k8s.GetSecret`/`UpdateSecret` write path, the
+   CA-Secret **watch** keeping the signer hot-reloadable (`atomic.Pointer[*Signer]`), the
+   dedicated CP ServiceAccount + scoped Role + cluster-wide read rebind, `POD_NAMESPACE`
+   on the CP, the CP startup RBAC self-probe, and the CA metrics. **Provided** mode ships
+   alongside as the escape hatch. Edge: `EDGE_DATAPLANE_MTLS` wiring with atomic key+chain
+   swap, jitter, fail-closed readiness. `NetworkPolicy` locking core `:80`/`:443`.
+2. **Phase 2 — stronger hardening.** Mutual auth of the hop (edge pins the core CA, drop
+   `InsecureSkipVerify`); the CP-only-namespace CA-key-read isolation as a turnkey
+   manifest; **CA auto-rotation** (CP rotates at `NotAfter` × fraction) gated on the
+   cross-replica convergence metric; an **HSM/KMS `Signer`** so the raw CA key never sits
+   in pod memory; CRL/OCSP via `tls.Config.VerifyConnection` if revocation must beat TTL +
+   SAN-drop; real SPIRE SVID migration (the SAN naming already aligns).
 3. **Phase 3 — optional companion.** A `TRUST_PROXY_DYNAMIC=true` ConfigMap-of-CIDRs
-   OR-branch for callers that genuinely cannot present a client cert (a known
-   in-cluster plaintext `:80` caller) — same atomic + validate-then-swap discipline,
-   never panic on the watch path.
+   OR-branch for callers that genuinely cannot present a client cert — same atomic +
+   validate-then-swap discipline, never panic on the watch path.
 
 ## Alternatives considered
 
-- **CP mints key+cert and ships both (vs CSR-based).** Simpler on the edge (no
-  in-process keygen/CSR), and the only viable fallback if some edge runtime cannot do
-  x509 keygen. **Rejected as the default — strictly weaker:** it puts a *private key
-  on the wire*, re-introducing exactly the key-transits-the-channel exposure the cert
-  path otherwise avoids. The CSR form keeps the key edge-local (generated in memory;
-  only the public key + returned chain transit) for **no** added operator burden, and
-  the CP-decides-SAN property holds in both forms.
-- **Token-gated `TrustProxy` (HMAC-over-timestamp header).** A near-tie co-leader on
-  operational single-source-of-truth — which is why we **grafted** that strength (the
-  SAN allow-set comes from the same registry). Rejected as the *primary* mechanism on
-  security: the credential is a request **header** whose placement the attacker
-  controls; it is replayable for the skew window; the strip-before-upstream middleware
-  is order-fragile; HMAC verification is an O(N) CPU-amplification vector; and it adds
-  a clock-skew failure mode. mTLS has none of these.
+- **CP mints key+cert and ships both (vs CSR-based).** Simpler on the edge, the only
+  viable fallback if an edge runtime cannot do x509 keygen. **Rejected as default —
+  strictly weaker:** it puts a *private key on the wire*. The CSR form keeps the key
+  edge-local for no added operator burden.
+- **Token-gated `TrustProxy` (HMAC header).** A near-tie co-leader on operational
+  single-source-of-truth — we **grafted** that strength (the SAN allow-set from the same
+  registry). Rejected as primary on security: a replayable header credential,
+  order-fragile strip middleware, an O(N) HMAC CPU-amplification vector, and a clock-skew
+  failure mode. mTLS has none of these.
 - **Dynamic IP trust list (ConfigMap of CIDRs).** Lowest effort; we graft its
-  operator-asserted-trust principle and keep-last-good discipline. Rejected as primary:
-  it does **not raise the security bar** — anything sharing a trusted CIDR can spoof
-  XFF — and for NAT'd/dynamic edges the natural pattern widens the spoof surface. Kept
-  as the optional Phase 3 companion for the `:80` gap.
-- **SPIFFE/SPIRE workload identity (mTLS SVID).** Strongest in theory, operationally
-  disqualifying now: an out-of-cluster edge can't use in-cluster attestation, so it
-  needs SPIRE federation — a hard runtime dependency and a second rotating CA bundle
-  whose staleness breaks the data plane. We graft only its **URI-SAN naming** and
-  leave a Phase 2 migration path.
+  operator-asserted-trust principle and keep-last-good discipline. Rejected as primary: it
+  does **not raise the security bar** and widens the spoof surface for NAT'd edges. Kept as
+  the optional Phase 3 companion.
+- **SPIFFE/SPIRE workload identity.** Strongest in theory, operationally disqualifying now
+  (out-of-cluster attestation needs SPIRE federation + a second rotating CA bundle whose
+  staleness breaks the data plane). We graft only its **URI-SAN naming** and leave a Phase
+  2 migration path.
 - **CA-only mTLS (`EDGE_TRUST_REQUIRE_SAN=false`).** Supported for **non-issuance**
-  deployments (issuing the cert is the whole onboarding) but **forbidden in
-  combination with CP-issuance**: CA-only trusts any chain to the edge CA, so a cert
-  minted from a leaked token before revocation would stay trusted for the full TTL
-  with no per-request revocation lever — resurrecting exactly the split-brain
-  single-sourcing closes.
+  deployments but **forbidden with CP-issuance**: CA-only trusts any chain to the edge CA
+  with no per-request SAN check, so a cert minted from a leaked token would stay trusted
+  for the full TTL — resurrecting exactly the split-brain single-sourcing closes.
+- **cert-manager-issued CA / cert-manager-proxy issuance (removed).** An earlier draft
+  offered `EDGE_CA_MODE=cert-manager` (the CP proxies a `CertificateRequest`) and an
+  out-of-band cert-manager self-signed Issuer for the CA. **Removed:** it added a hard CRD
+  dependency, an async issuance round-trip, and an out-of-band CA-creation step that
+  defeats the zero-PKI goal for a bare Docker edge. The CP now self-manages the CA
+  (managed mode); operators with an existing PKI use **provided** mode (mounted CA, no
+  CRDs). cert-manager can still *populate* the mounted Secret, but the CP treats it as
+  opaque files — no `CertificateRequest`, no polling, no CRD.
 
 ## Open questions
 
-- **`EDGE_CLIENTCERT_TTL` default — the mint-window vs CP-outage-budget tension:** a
-  short TTL (1h) shrinks a leaked-token-minted cert's life but cuts the outage budget
-  (= `TTL` × renew-before-fraction) before an expired cert hard-502s the edge. Pin a
-  default that exceeds the operator's CP recovery SLO, or expose `TTL` + renew-before
-  as paired knobs with a guard that renew-before < `TTL` by a safe margin?
-- **`EDGE_CA_MODE=cert-manager` async issuance:** the CP proxies a `CertificateRequest`
-  and polls — what poll timeout / failure handling keeps `POST /v1/edge-cert`
-  responsive (503 + `Retry-After` and let the edge fail-static, or block up to a
-  bound)? Does it also need the global signing concurrency cap, or does cert-manager's
-  own queue suffice?
-- **HSM/KMS signer interface for direct mode:** should `Signer.Sign` be an interface so
-  the raw edge CA key need not sit in CP pod memory (the highest-severity blast
-  radius), and is a KMS round-trip per issuance acceptable against the
+- **Empty-stub feasibility:** do the target k8s versions reject a zero-length `tls.crt`
+  on a `kubernetes.io/tls` Secret CREATE? If yes, the pre-created stub must be type
+  `Opaque`. Confirm and pin one stub type.
+- **NameConstraints enforcement:** does `x509.Verify` actually enforce
+  `PermittedURIDomains` for a `spiffe://` leaf URI against `parapet.moonrhythm.io`? Add a
+  conformance test (reject `spiffe://evil.example/edge/x`, accept the legit form) **before**
+  counting NameConstraints as a security control — the stdlib's URI-SAN NameConstraint
+  support is underspecified.
+- **`EDGE_CA_TTL` default:** 10y maximizes single-theft value of a plaintext-Secret key.
+  Pin shorter (1–2y) until convergence-gated rotation ships, or keep 10y only contingent
+  on rotation being implementable? Tie the decision to whether etcd encryption-at-rest is
+  a hard prerequisite.
+- **CP-only namespace for the CA Secret:** ship the key-read-isolation manifest (core SA
+  cannot read `parapet-edge-ca`) as a Phase-1 option now, or defer? The core's SNI read is
+  namespace-wide by necessity, so co-tenancy concedes core-reads-the-key unless the CA
+  Secret moves namespaces.
+- **HSM/KMS `Signer`:** the interface lands in Phase 1; does the in-memory impl suffice
+  for first ship, and is a KMS round-trip per issuance acceptable against the
   fleet-restart-storm concurrency budget?
-- **Key reuse across a graceful restart:** should the edge re-use a surviving
-  in-memory key across a restart, or accept that every restart = one fresh
-  keygen+CSR+sign (given keys are never written to disk)? Is the per-restart signature
-  cost acceptable at fleet scale once the global cap + jitter are in place?
-- **Mutual auth of the hop:** should the edge verify the core's server cert (pin the
-  core CA, drop `InsecureSkipVerify` in `forward.go`)? Today only edge→core is
-  authenticated.
-- **Connection-age cap on `:443`:** what max lifetime balances draining stale-CA
-  connections (for CA-drop revocation) against handshake churn? The default
-  `IdleTimeout` 320 s lets a busy connection outlive a CA drop without an explicit cap.
-- **Multi-CA `ca.crt` parsing:** confirm `AppendCertsFromPEM` over a concatenated
-  bundle adds every valid block and that one malformed block doesn't silently drop the
-  good CAs — validate-then-swap must treat a partially-bad bundle as a **rejected**
-  reload.
+- **System-readiness gap:** add an edge-side post-issuance probe (test re-encrypt
+  handshake to the core before flipping ready), or accept the gap with the core-side
+  `parapet_trust_source{mtls}` / bundle-hash as a REQUIRED onboarding gate?
+- **Rotation single-writer mechanism:** ship Phase-1 rotation as a one-shot Job/subcommand,
+  or add leader election to the steady-state `replicas: 2`? The Secret-as-lock CAS
+  linearizes only create-once, not the 4-stage promote/trim.
+- **`EDGE_CLIENTCERT_TTL` vs CP-outage budget:** pin a default that exceeds the operator's
+  CP recovery SLO, or expose `TTL` + renew-before as paired knobs with a guard that
+  renew-before < `TTL` by a safe margin?
 
 ## Conformance / contract
 
 On acceptance, fold into [`SPEC.md`](SPEC.md): the trust predicate
 (`cidrTrust OR (verified-edge-CA-chain AND SAN ∈ allow-set)`), the new
-`POST /v1/edge-cert` endpoint (CSR in, chain out; CP-decided SAN; no key on the
-wire), the new env vars (`EDGE_TRUST_SECRET`, `EDGE_TRUST_REQUIRE_SAN`,
-`EDGE_DATAPLANE_MTLS`, `EDGE_CLIENTCERT_*`, `EDGE_CA_*`), the shared SAN-derivation
-package + its CP-SAN == core-allow-set conformance test, the `X-Forwarded-Country/-ASN`
-ingress strip, and the per-request order (trust evaluation precedes WAF/rate-limit,
-as today). The Rust implementation in [`rust/`](rust/) tracks the same contract or
-records a divergence.
+`POST /v1/edge-cert` endpoint (CSR in, chain out; CP-decided SAN; no key on the wire),
+the managed/provided CA model, the new env vars (`EDGE_TRUST_*`, `EDGE_DATAPLANE_MTLS`,
+`EDGE_CLIENTCERT_*`, `EDGE_CA_*`, CP `POD_NAMESPACE`/`WATCH_NAMESPACE`), the shared
+SAN-derivation package + its CP-SAN == core-allow-set conformance test, the
+NameConstraints-enforcement test, the `X-Forwarded-Country/-ASN` ingress strip, and the
+per-request order (trust evaluation precedes WAF/rate-limit). The Rust implementation in
+[`rust/`](rust/) tracks the same contract or records a divergence.
 
 [TLS SNI fallback memory]: the proxy serves a self-signed fallback on an SNI miss
 when the live cert table loses `GetCertificate`; the `GetConfigForClient` self-test
