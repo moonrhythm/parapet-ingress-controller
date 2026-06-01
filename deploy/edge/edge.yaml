@@ -59,11 +59,11 @@ spec:
             - name: EDGE_CP_CA
               value: /cp-ca/ca.crt
             # Where to forward (the in-cluster parapet, reached via the same private
-            # path). Plaintext h2c by default; set EDGE_PARAPET_TLS=true to
+            # path). Plaintext h2c by default; set EDGE_UPSTREAM_TLS=true to
             # re-encrypt across an untrusted hop.
-            - name: EDGE_PARAPET_ADDR
+            - name: EDGE_UPSTREAM_ADDR
               value: "parapet-ingress-controller.parapet-ingress-controller.svc:80"
-            - name: EDGE_PARAPET_TLS
+            - name: EDGE_UPSTREAM_TLS
               value: "false"
             - name: EDGE_REFRESH_INTERVAL
               value: "300"
