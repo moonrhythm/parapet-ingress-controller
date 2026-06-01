@@ -122,6 +122,15 @@ token** → allowed domains/zones. Contract-relevant invariants:
 - **Language split** — control plane is **Go** (reuses `go/cert`, `go/k8s`,
   `go/wafrule`); edge is **Rust** (Pingora). They share only the HTTP/JSON
   contract — no shared library.
+- **Response cache (edge-only)** — the edge has an optional disk-backed HTTP
+  response cache (`EDGE_CACHE_*`, off by default): **honor-origin** policy (caches
+  only on explicit `Cache-Control`/`Expires` freshness; refuses
+  `private`/`no-store`/`Set-Cookie`/`Vary: *`), `GET`/`HEAD`, LRU-bounded,
+  restart-persistent, fail-static, `X-Cache: HIT|MISS`. **parapet does not cache**
+  — there is no Go equivalent and no conformance obligation. A cache **hit** is
+  served without contacting parapet, so parapet's authoritative WAF does not
+  re-run on hits (only origin-opted-in public content is cached). See
+  [EDGE.md](EDGE.md#response-cache-at-the-edge).
 
 ## Configuration (environment variables)
 

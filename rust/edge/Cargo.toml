@@ -12,12 +12,23 @@ publish = false
 # bearer token), cached in memory and refreshed on a timer. Forwards to parapet.
 [dependencies]
 # openssl backend matches the controller, so controller's cert types unify cleanly.
-pingora = { version = "0.8", features = ["proxy", "openssl"] }
+# `cache` adds pingora-cache (HTTP response cache); we implement a disk-backed
+# Storage in src/diskcache.rs (pingora ships only an in-memory MemCache).
+pingora = { version = "0.8", features = ["proxy", "openssl", "cache"] }
 # Reuse the controller's cert table + LoadedCert::parsed() (needs the `proxy` feature).
 controller = { path = "../controller", package = "parapet-ingress-controller", features = ["proxy"] }
 
 async-trait = "0.1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+# fs + io-util back the disk cache's async file IO (diskcache.rs).
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "signal",
+    "sync",
+    "time",
+    "fs",
+    "io-util",
+] }
 arc-swap = "1"
 # HTTPS client to the control plane (rustls so it doesn't pull a second TLS lib).
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

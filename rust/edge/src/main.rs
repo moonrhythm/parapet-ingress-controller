@@ -5,6 +5,7 @@
 
 mod certstore;
 mod cp;
+mod diskcache;
 mod proxy;
 mod refresh;
 mod tls;
@@ -27,6 +28,9 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use pingora::cache::eviction::lru::Manager as LruManager;
+use pingora::cache::eviction::EvictionManager;
+use pingora::cache::lock::{CacheKeyLockImpl, CacheLock};
 use pingora::listeners::tls::TlsSettings;
 use pingora::proxy::http_proxy_service;
 use pingora::server::Server;
@@ -88,6 +92,67 @@ fn load_geo_dbs() -> (
         }
     };
     (geoip, asndb)
+}
+
+/// Build the edge response cache from env (`EDGE_CACHE_*`), or `None` when
+/// disabled. Leaks the disk storage / LRU eviction manager / cache lock to
+/// `'static` (Pingora's cache APIs take `&'static`), then re-seeds the eviction
+/// manager from whatever survived on disk so the byte cap holds across restarts
+/// (its accounting is otherwise in-memory only). See diskcache.rs + EDGE.md.
+fn build_cache() -> Option<proxy::EdgeCache> {
+    if env_or("EDGE_CACHE_ENABLED", "false") != "true" {
+        return None;
+    }
+    let dir = env_or("EDGE_CACHE_DIR", "/var/cache/parapet-edge");
+    let max_size: usize = env_or("EDGE_CACHE_MAX_SIZE", "1073741824")
+        .parse()
+        .unwrap_or(1 << 30);
+    let max_file: usize = env_or("EDGE_CACHE_MAX_FILE_SIZE", "8388608")
+        .parse()
+        .unwrap_or(8 << 20);
+
+    let dc = match diskcache::DiskCache::new(&dir, max_file) {
+        Ok(dc) => dc,
+        Err(e) => {
+            tracing::error!(error = %e, dir, "edge cache: cannot init cache dir; caching disabled");
+            return None;
+        }
+    };
+    let storage: &'static diskcache::DiskCache = Box::leak(Box::new(dc));
+    let eviction: &'static LruManager<8> =
+        Box::leak(Box::new(LruManager::<8>::with_capacity(max_size, 1024)));
+
+    // Re-admit surviving entries (orphans/torn writes are reaped by scan()).
+    // admit() can return victims if we're already over the cap (e.g. the cap was
+    // lowered since last run) — delete those files synchronously.
+    let mut seeded = 0usize;
+    let mut evicted = 0usize;
+    for e in storage.scan() {
+        for v in eviction.admit(e.key, e.size, e.fresh_until) {
+            if storage.remove_blocking(&v) {
+                evicted += 1;
+            }
+        }
+        seeded += 1;
+    }
+    tracing::info!(
+        dir,
+        max_size,
+        max_file,
+        seeded,
+        evicted,
+        "edge cache enabled (disk-backed)"
+    );
+
+    // The cache lock collapses concurrent misses for one key into a single origin
+    // fetch; the timeout bounds how long a waiting reader blocks on the writer.
+    let lock: &'static CacheKeyLockImpl = Box::leak(CacheLock::new_boxed(Duration::from_secs(2)));
+    Some(proxy::EdgeCache {
+        storage,
+        eviction: eviction as &'static (dyn EvictionManager + Sync),
+        lock,
+        max_file_size: max_file,
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -162,6 +227,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // Optional disk-backed response cache (off by default; honor-origin policy,
+    // bounded by EDGE_CACHE_MAX_SIZE). See build_cache + diskcache.rs.
+    let cache = build_cache();
+
     let mut server = Server::new(None).map_err(|e| format!("server init: {e}"))?;
     server.bootstrap();
 
@@ -170,6 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         parapet_tls,
         parapet_sni,
         waf,
+        cache,
     };
     let mut svc = http_proxy_service(&server.configuration, proxy);
 

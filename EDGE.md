@@ -224,6 +224,74 @@ the zone from its own router. So:
 Because the edge sets `X-Forwarded-For` and parapet trusts it
 (`TRUST_PROXY=<edge CIDR>`), both evaluate against the same client IP.
 
+## Response cache at the edge
+
+An optional **HTTP response cache** on the edge, off by default. The edge sits
+close to clients and (above) can be 200–300 ms from the cluster, so serving a
+cacheable object locally removes a full origin round trip. Enabled with
+`EDGE_CACHE_ENABLED=true`.
+
+> **Edge-only feature.** The edge is Rust-only by design (see *Language split*);
+> there is no Go edge, so this is **not** a parapet-core behavior change and
+> carries no `go/` mirror or `conformance/` obligation. parapet itself does not
+> cache. Recorded as an edge divergence in [`SPEC.md`](SPEC.md).
+
+### What it does
+
+- **Disk-backed.** Pingora 0.8 ships only an in-memory `MemCache` ("testing");
+  there is no disk Storage in the OSS release (cloudflare/pingora#210), so the
+  edge implements the `pingora::cache::Storage` trait against the filesystem
+  (`rust/edge/src/diskcache.rs`). A disk cache survives restarts and isn't bounded
+  by RSS (matters given the edge's memory-pressure history). Total size is bounded
+  by an LRU eviction manager (`EDGE_CACHE_MAX_SIZE`); per-object size by
+  `EDGE_CACHE_MAX_FILE_SIZE`.
+- **Honor-origin policy.** Caches **only** when the origin opts in via response
+  `Cache-Control`/`Expires` freshness — no forced or heuristic TTL. Refuses
+  `private`/`no-store`, any `Set-Cookie`, and `Vary: *`. Honors `Vary` (keys per
+  varied request header). `GET`/`HEAD` only; cacheable status codes per RFC.
+- **Cache lock.** Concurrent misses for one key collapse into a single origin
+  fetch (no stampede).
+- **Observability.** Sets `X-Cache: HIT|MISS` (HIT = served from the edge cache,
+  MISS = fetched from parapet). No metrics endpoint yet — the edge exposes none.
+
+### On-disk layout (sharded by hash)
+
+```
+<EDGE_CACHE_DIR>/<aa>/<hash>.body   response body bytes
+<EDGE_CACHE_DIR>/<aa>/<hash>.meta   framed sidecar: CacheMeta + CompactCacheKey
+<EDGE_CACHE_DIR>/tmp/<hash>.<seq>.* in-progress writes, atomically renamed
+```
+
+Writes are temp-file + fsync + atomic `rename`, with the `.meta` written **last**
+so its presence implies a complete `.body`; a crash mid-write leaves only an
+orphan reaped on startup. The eviction manager's accounting is in-memory, so on
+startup the edge **scans the cache dir and re-admits** surviving entries (the
+sidecar carries the `CompactCacheKey` for exactly this) — the byte cap holds
+across restarts, and orphans/torn writes are reaped.
+
+### WAF interaction (security note)
+
+The cache phases run **after** `request_filter`, so the edge WAF still screens
+every request, including cache hits. **But a hit is served without contacting
+parapet, so parapet's authoritative WAF does not re-run on hits.** This is normal
+CDN behavior: only origin-opted-in (`Cache-Control` public) content is cached —
+content the origin has marked safe for a shared cache. Do not mark per-user or
+authorization-sensitive responses publicly cacheable.
+
+### Config
+
+```
+EDGE_CACHE_ENABLED       on/off (default false)
+EDGE_CACHE_DIR           cache root (default /var/cache/parapet-edge)
+EDGE_CACHE_MAX_SIZE      total bytes cap, LRU-evicted (default 1073741824 = 1 GiB)
+EDGE_CACHE_MAX_FILE_SIZE per-object bytes cap (default 8388608 = 8 MiB)
+```
+
+A fetch/IO error on the read path **fails static** (degrades to a cache miss →
+serve from origin), never erroring the client request. **Not yet:** purge/
+invalidation API, stale-while-revalidate / stale-if-error, Range/partial caching,
+per-route policy via Ingress annotations, and cache metrics + a `:9187` listener.
+
 ## Ports & exposure
 
 ```
@@ -276,6 +344,8 @@ edge *can* be co-located, prefer keyless (recoverable in git history).
 | Bad rule snapshot | All-or-nothing compile rejects the batch; previous good ruleset stays live. |
 | Edge compromised | Leaks its allowlisted domains' keys → **reissue/revoke those certs**; revoke the edge's token. Other edges/domains unaffected. |
 | Cert rotation gap | Overlapping refresh + fail-static avoid a window where the edge has no usable cert. |
+| Cache read IO error | Degrades to a cache miss (**fail static**) → served from parapet. Never errors the client request. |
+| Cache dir unwritable | Cache init fails → caching disabled for the process (logged); the edge still proxies normally. |
 
 ## Conformance
 
@@ -310,3 +380,7 @@ The two never link; the HTTP/JSON contract above is their entire interface.
    ships it scoped to the edge's allowed hosts, alongside the zone rulesets).
    Path-precise zone resolution stays parapet's authoritative job — if the edge's
    host-level binding ever diverges, parapet corrects it on its re-run.
+4. **Response cache** — optional disk-backed HTTP cache (`EDGE_CACHE_*`),
+   honor-origin policy, LRU-bounded, restart-persistent, fail-static. **(done)**
+   See [Response cache at the edge](#response-cache-at-the-edge). Edge-only (no
+   parapet-core equivalent).
