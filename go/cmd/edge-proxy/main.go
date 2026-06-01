@@ -164,6 +164,7 @@ func main() {
 	}
 
 	health := healthz.New()
+	health.SetReady(false) // healthz defaults to ready; gate it on a usable cert below
 
 	// Shared middleware chain (both listeners use it). Order mirrors the
 	// controller: host normalization, then WAF (global, then host-bound zone)
