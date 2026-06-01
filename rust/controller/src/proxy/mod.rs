@@ -305,6 +305,12 @@ impl ProxyHttp for Proxy {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Ctx) -> Result<bool> {
+        // Reassemble HTTP/2 split Cookie crumbs into one header up front (RFC 7540
+        // §8.1.2.5) — Pingora, unlike Go's h2 server, doesn't. Done here so BOTH
+        // the WAF cookie eval (`build_waf_request`) and the upstream request
+        // (cloned from this session) see a single correct Cookie. See SPEC.md.
+        coalesce_cookies(session.req_header_mut());
+
         let scheme = if self.is_tls { "https" } else { "http" };
         let remote_ip = client_ip(session);
 
@@ -987,6 +993,36 @@ fn is_event_stream(resp: &ResponseHeader) -> bool {
         .unwrap_or(false)
 }
 
+/// Reassemble HTTP/2 split `Cookie` header fields into a single `Cookie` line.
+///
+/// RFC 7540 §8.1.2.5: an HTTP/2 client may split `Cookie` into multiple header
+/// fields for HPACK compression. A proxy forwarding the request MUST concatenate
+/// them back into one `Cookie: a=1; b=2` (Go's `net/http` HTTP/2 server does this
+/// before the request reaches proxy logic). Pingora does NOT, so without this a
+/// split cookie reaches the backend as multiple `Cookie:` lines; frameworks that
+/// read only the first crumb then lose the session cookie -> forced logout. This
+/// is the Go↔Rust divergence behind the "Rust controller logs users out (Safari
+/// worst, Chrome random), Go works" report. See SPEC.md.
+fn coalesce_cookies(req: &mut RequestHeader) {
+    // 0 or 1 Cookie field: forward verbatim (the common HTTP/1.1 case).
+    if req.headers.get_all("cookie").iter().count() <= 1 {
+        return;
+    }
+    // >1 field: the client split it. Rejoin the non-empty crumbs with "; " (the
+    // cookie-pair separator) into a single header. `insert_header` replaces all
+    // existing `cookie` fields with the one joined value.
+    let joined = req
+        .headers
+        .get_all("cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let _ = req.insert_header("cookie", joined);
+}
+
 /// Parse a `Cookie` header into a name->value map (last write wins, matching Go's
 /// `Request.Cookies` behavior). Values are not unquoted (a minor divergence).
 fn parse_cookies(s: &str) -> std::collections::HashMap<String, String> {
@@ -1412,6 +1448,64 @@ mod tests {
         assert!(!summary.contains("token"), "query string must not appear");
         assert!(!summary.contains("s3cret"));
         assert!(!summary.contains('?'));
+    }
+
+    // --- HTTP/2 split-Cookie reassembly (RFC 7540 §8.1.2.5) ----------------
+    // Repro for the "Rust controller logs users out under HTTP/2 (Safari worst,
+    // Chrome random); Go works" report. Browsers split Cookie into multiple
+    // header fields over H2; the proxy must rejoin them before forwarding.
+
+    fn cookie_values(req: &RequestHeader) -> Vec<String> {
+        req.headers
+            .get_all("cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn coalesce_cookies_joins_split_h2_crumbs() {
+        // Three crumbs as an H2 client would send them; must become ONE header
+        // "a; b; c" (order preserved). A backend reading only the first crumb
+        // otherwise loses `session` -> forced logout. FAILS before the fix.
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.append_header("cookie", "session=abc").unwrap();
+        req.append_header("cookie", "csrf=xyz").unwrap();
+        req.append_header("cookie", "theme=dark").unwrap();
+
+        coalesce_cookies(&mut req);
+
+        assert_eq!(
+            cookie_values(&req),
+            vec!["session=abc; csrf=xyz; theme=dark"],
+            "split H2 Cookie crumbs must be rejoined into one '; '-separated header"
+        );
+    }
+
+    #[test]
+    fn coalesce_cookies_leaves_single_cookie_unchanged() {
+        // Guard: a single (already-joined) Cookie must pass through verbatim —
+        // no trailing "; ", no duplication.
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.append_header("cookie", "session=abc; csrf=xyz")
+            .unwrap();
+
+        coalesce_cookies(&mut req);
+
+        assert_eq!(cookie_values(&req), vec!["session=abc; csrf=xyz"]);
+    }
+
+    #[test]
+    fn coalesce_cookies_absent_stays_absent() {
+        // Guard: never synthesize an empty Cookie header when there was none.
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+
+        coalesce_cookies(&mut req);
+
+        assert!(
+            req.headers.get("cookie").is_none(),
+            "must not add a Cookie header when the request had none"
+        );
     }
 
     #[test]

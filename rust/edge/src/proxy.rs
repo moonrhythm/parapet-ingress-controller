@@ -170,6 +170,12 @@ impl ProxyHttp for EdgeProxy {
     /// A block short-circuits with the rule's status/message (returns true =
     /// response sent). parapet re-runs the full WAF authoritatively regardless.
     async fn request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<bool> {
+        // Reassemble HTTP/2 split Cookie crumbs into one header (RFC 7540
+        // §8.1.2.5) before the edge WAF reads cookies and before forwarding to
+        // parapet — Pingora, unlike Go's h2 server, doesn't. Done unconditionally
+        // (even with the WAF off) so parapet always receives a single Cookie.
+        coalesce_cookies(session.req_header_mut());
+
         let Some(waf) = &self.waf else {
             return Ok(false);
         };
@@ -408,6 +414,27 @@ fn resp_cacheable_decision(resp: &pingora::http::ResponseHeader) -> RespCacheabl
     resp_cacheable(cc.as_ref(), resp.clone(), false, &CACHE_DEFAULTS)
 }
 
+/// Reassemble HTTP/2 split `Cookie` header fields into one `Cookie: a=1; b=2`
+/// (RFC 7540 §8.1.2.5). Browsers split Cookie over H2 for HPACK compression;
+/// Pingora (unlike Go's h2 server) forwards the crumbs as-is, so without this a
+/// backend reading only the first crumb loses the session cookie. Mirrors the
+/// controller's `coalesce_cookies`. See ../../EDGE.md / SPEC.md.
+fn coalesce_cookies(req: &mut RequestHeader) {
+    if req.headers.get_all("cookie").iter().count() <= 1 {
+        return;
+    }
+    let joined = req
+        .headers
+        .get_all("cookie")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    let _ = req.insert_header("cookie", joined);
+}
+
 /// `k=v; k2=v2` → map (first value wins), mirroring the controller's parse_cookies.
 fn parse_cookies(s: &str) -> HashMap<String, String> {
     let mut m = HashMap::new();
@@ -519,6 +546,34 @@ mod tests {
             ("cache-control", "public, max-age=60"),
             ("vary", "accept-encoding"),
         ]));
+    }
+
+    #[test]
+    fn coalesce_cookies_joins_split_h2_crumbs() {
+        // HTTP/2 split Cookie crumbs must be rejoined into one header before the
+        // edge WAF reads them and before forwarding to parapet (RFC 7540 §8.1.2.5).
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        req.append_header("cookie", "session=abc").unwrap();
+        req.append_header("cookie", "csrf=xyz").unwrap();
+        coalesce_cookies(&mut req);
+        let got: Vec<&str> = req
+            .headers
+            .get_all("cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(got, vec!["session=abc; csrf=xyz"]);
+
+        // a single Cookie is untouched; an absent one is not synthesized
+        let mut single = RequestHeader::build("GET", b"/", None).unwrap();
+        single
+            .append_header("cookie", "session=abc; csrf=xyz")
+            .unwrap();
+        coalesce_cookies(&mut single);
+        assert_eq!(single.headers.get_all("cookie").iter().count(), 1);
+        let mut none = RequestHeader::build("GET", b"/", None).unwrap();
+        coalesce_cookies(&mut none);
+        assert!(none.headers.get("cookie").is_none());
     }
 
     #[test]

@@ -65,6 +65,21 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 3. routing → per-route: `allow-remote` → **zone WAF** → `redirect-https` → rate limits → body limit → basic-auth → forward-auth
 4. upstream proxy (with retry on connection failure + bad-addr skip)
 
+### Request header normalization (both implementations)
+
+Before the WAF reads the request and before forwarding upstream, an HTTP/2
+request's **`Cookie` header must be reassembled into a single field**. Per RFC
+7540 §8.1.2.5 an H2 client may split `Cookie` into multiple header fields for
+HPACK compression; a proxy must rejoin the crumbs with `"; "` into one
+`Cookie: a=1; b=2` so a backend (or the WAF) that reads only the first field
+doesn't lose cookies — a dropped session cookie shows up as **random forced
+logouts under HTTP/2**, browser-graded (Safari splits most aggressively).
+
+- **Go** gets this for free: `net/http`'s HTTP/2 server reassembles `Cookie`
+  before the request reaches proxy/middleware code.
+- **Rust** must do it explicitly — **Pingora does not** reassemble; the controller
+  and the edge proxy rejoin the crumbs in `request_filter` (`coalesce_cookies`).
+
 ## WAF
 
 Full design in **[WAF.md](WAF.md)**. Summary: a global baseline ruleset
