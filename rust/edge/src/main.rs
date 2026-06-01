@@ -111,7 +111,7 @@ fn build_cache() -> Option<proxy::EdgeCache> {
         .parse()
         .unwrap_or(8 << 20);
 
-    let dc = match diskcache::DiskCache::new(&dir, max_file) {
+    let dc = match diskcache::DiskCache::new(&dir) {
         Ok(dc) => dc,
         Err(e) => {
             tracing::error!(error = %e, dir, "edge cache: cannot init cache dir; caching disabled");
@@ -122,27 +122,34 @@ fn build_cache() -> Option<proxy::EdgeCache> {
     let eviction: &'static LruManager<8> =
         Box::leak(Box::new(LruManager::<8>::with_capacity(max_size, 1024)));
 
-    // Re-admit surviving entries (orphans/torn writes are reaped by scan()).
-    // admit() can return victims if we're already over the cap (e.g. the cap was
-    // lowered since last run) — delete those files synchronously.
-    let mut seeded = 0usize;
-    let mut evicted = 0usize;
-    for e in storage.scan() {
-        for v in eviction.admit(e.key, e.size, e.fresh_until) {
-            if storage.remove_blocking(&v) {
-                evicted += 1;
+    // Re-seed eviction from surviving entries OFF the startup critical path:
+    // scan() reads + decodes every .meta and can take seconds on a large cache,
+    // so run it on a background thread and start serving immediately. The byte
+    // cap simply lags until the scan finishes; in-flight writes are protected by
+    // the scan's mtime reap gate (see diskcache.rs). admit() may return victims
+    // if we're already over the cap (e.g. the cap was lowered) — delete those.
+    // storage + eviction are 'static, so the thread holds them for the lifetime.
+    std::thread::spawn(move || {
+        let start = std::time::SystemTime::now();
+        let mut seeded = 0usize;
+        let mut evicted = 0usize;
+        for e in storage.scan() {
+            for v in eviction.admit(e.key, e.size, e.fresh_until) {
+                if storage.remove_blocking(&v) {
+                    evicted += 1;
+                }
             }
+            seeded += 1;
         }
-        seeded += 1;
-    }
-    tracing::info!(
-        dir,
-        max_size,
-        max_file,
-        seeded,
-        evicted,
-        "edge cache enabled (disk-backed)"
-    );
+        let elapsed_secs = start.elapsed().map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        tracing::info!(
+            seeded,
+            evicted,
+            elapsed_secs,
+            "edge cache: startup scan complete"
+        );
+    });
+    tracing::info!(dir, max_size, max_file, "edge cache enabled (disk-backed)");
 
     // The cache lock collapses concurrent misses for one key into a single origin
     // fetch; the timeout bounds how long a waiting reader blocks on the writer.

@@ -244,11 +244,16 @@ cacheable object locally removes a full origin round trip. Enabled with
   (`rust/edge/src/diskcache.rs`). A disk cache survives restarts and isn't bounded
   by RSS (matters given the edge's memory-pressure history). Total size is bounded
   by an LRU eviction manager (`EDGE_CACHE_MAX_SIZE`); per-object size by
-  `EDGE_CACHE_MAX_FILE_SIZE`.
+  `EDGE_CACHE_MAX_FILE_SIZE`, enforced by pingora's own size tracker — a
+  `Content-Length` over the cap is simply not cached (the client still gets the
+  full response); an oversize **chunked** response is aborted mid-stream.
 - **Honor-origin policy.** Caches **only** when the origin opts in via response
   `Cache-Control`/`Expires` freshness — no forced or heuristic TTL. Refuses
   `private`/`no-store`, any `Set-Cookie`, and `Vary: *`. Honors `Vary` (keys per
   varied request header). `GET`/`HEAD` only; cacheable status codes per RFC.
+  **Client** request `Cache-Control` (`no-cache`/`no-store`) is **ignored by
+  design** — like a CDN, so a client can't bust the shared cache (a DoS vector);
+  origins needing freshness simply mark responses uncacheable.
 - **Cache lock.** Concurrent misses for one key collapse into a single origin
   fetch (no stampede).
 - **Observability.** Sets `X-Cache: HIT|MISS` (HIT = served from the edge cache,
@@ -264,10 +269,14 @@ cacheable object locally removes a full origin round trip. Enabled with
 
 Writes are temp-file + fsync + atomic `rename`, with the `.meta` written **last**
 so its presence implies a complete `.body`; a crash mid-write leaves only an
-orphan reaped on startup. The eviction manager's accounting is in-memory, so on
+orphan, reaped later. The eviction manager's accounting is in-memory, so on
 startup the edge **scans the cache dir and re-admits** surviving entries (the
 sidecar carries the `CompactCacheKey` for exactly this) — the byte cap holds
-across restarts, and orphans/torn writes are reaped.
+across restarts, and orphans/torn writes are reaped. The scan runs **in the
+background, off the serving path** (it reads every `.meta`, so it can take
+seconds on a large cache); the edge accepts traffic immediately and the byte cap
+simply lags until the scan completes. Reaping is age-gated so a concurrent
+in-flight commit is never deleted.
 
 ### WAF interaction (security note)
 

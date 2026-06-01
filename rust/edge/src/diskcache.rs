@@ -52,23 +52,23 @@ pub struct ScannedEntry {
 /// process-global.
 pub struct DiskCache {
     root: PathBuf,
-    /// Cap on a cached body buffered in memory during admission. A miss whose
-    /// body exceeds this is abandoned (not cached) so a single chunked response
-    /// can't blow up RSS. Responses with a `Content-Length` over the cap are
-    /// already rejected earlier in `response_cache_filter`.
-    max_body_bytes: usize,
     /// Monotonic suffix for temp files so concurrent writers never collide.
     seq: AtomicU64,
 }
 
+/// Minimum age before `scan()` will delete a stray/orphan/temp file. The scan
+/// runs concurrently with serving (off the startup critical path), so this
+/// guards against reaping a write that is mid-commit (body renamed in, `.meta`
+/// not yet) — real in-flight writes complete in milliseconds, far under this.
+const REAP_MIN_AGE_SECS: u64 = 60;
+
 impl DiskCache {
     /// Create the store rooted at `root`, ensuring `root/` and `root/tmp/` exist.
-    pub fn new(root: impl Into<PathBuf>, max_body_bytes: usize) -> std::io::Result<Self> {
+    pub fn new(root: impl Into<PathBuf>) -> std::io::Result<Self> {
         let root = root.into();
         std::fs::create_dir_all(root.join("tmp"))?;
         Ok(Self {
             root,
-            max_body_bytes,
             seq: AtomicU64::new(0),
         })
     }
@@ -91,7 +91,9 @@ impl DiskCache {
     /// caller can re-admit them into the eviction manager (whose accounting is
     /// in-memory and otherwise resets across restarts). Orphans — a `.meta`
     /// without its `.body`, an unreadable/unrecognised sidecar, or a stray
-    /// `.body`/temp file — are deleted. Best-effort: IO errors are logged and
+    /// `.body`/temp file — are deleted, but only once older than
+    /// `REAP_MIN_AGE_SECS` so a concurrent in-flight commit is never touched
+    /// (this runs off the startup critical path). Best-effort: IO errors are
     /// skipped, never fatal.
     pub fn scan(&self) -> Vec<ScannedEntry> {
         let mut out = Vec::new();
@@ -100,7 +102,8 @@ impl DiskCache {
         };
         for shard in shards.flatten() {
             let dir = shard.path();
-            // skip the tmp/ working dir: any file there is an aborted write.
+            // the tmp/ working dir holds only aborted writes (live writes rename
+            // out of it); reap the stale ones.
             if !dir.is_dir() || dir.file_name().is_some_and(|n| n == "tmp") {
                 if dir.file_name().is_some_and(|n| n == "tmp") {
                     reap_dir(&dir);
@@ -116,15 +119,15 @@ impl DiskCache {
                     match self.scan_one(&p) {
                         Some(entry) => out.push(entry),
                         None => {
-                            // unparseable/incomplete -> drop both sides
-                            let _ = std::fs::remove_file(&p);
-                            let _ = std::fs::remove_file(p.with_extension("body"));
+                            // unparseable/incomplete -> drop both sides (if stale)
+                            reap_if_stale(&p);
+                            reap_if_stale(&p.with_extension("body"));
                         }
                     }
                 } else if p.extension().is_some_and(|e| e == "body") {
                     // a body whose meta is gone is unusable; reaped if orphaned.
                     if !p.with_extension("meta").exists() {
-                        let _ = std::fs::remove_file(&p);
+                        reap_if_stale(&p);
                     }
                 }
             }
@@ -132,9 +135,9 @@ impl DiskCache {
         out
     }
 
-    /// Synchronously delete an asset's files. Used by the startup eviction scan,
-    /// which runs before the tokio runtime is serving. Returns whether anything
-    /// was removed.
+    /// Synchronously delete an asset's files. Used by the startup eviction scan
+    /// to drop entries the eviction manager just displaced. Returns whether
+    /// anything was removed.
     pub fn remove_blocking(&self, key: &CompactCacheKey) -> bool {
         let hash = key.combined();
         let m = std::fs::remove_file(self.meta_path(&hash)).is_ok();
@@ -155,12 +158,25 @@ impl DiskCache {
     }
 }
 
-/// Best-effort removal of every file in a directory (used to reap `tmp/`).
+/// Best-effort removal of every stale file in a directory (used to reap `tmp/`).
 fn reap_dir(dir: &Path) {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for e in entries.flatten() {
-            let _ = std::fs::remove_file(e.path());
+            reap_if_stale(&e.path());
         }
+    }
+}
+
+/// Delete `p` only if it hasn't been modified within `REAP_MIN_AGE_SECS` — i.e.
+/// it's not a write in progress. Best-effort.
+fn reap_if_stale(p: &Path) {
+    let stale = std::fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age.as_secs() >= REAP_MIN_AGE_SECS);
+    if stale {
+        let _ = std::fs::remove_file(p);
     }
 }
 
@@ -196,8 +212,8 @@ impl Storage for DiskCache {
             Err(_) => return Ok(None),
         };
         let hit = DiskHitHandler {
+            weight: body.len(),
             body: Some(body),
-            weight: meta_bytes.len(),
         };
         Ok(Some((meta, Box::new(hit))))
     }
@@ -216,7 +232,6 @@ impl Storage for DiskCache {
             hash,
             sidecar,
             buf: Vec::new(),
-            too_big: false,
             committed: false,
         }))
     }
@@ -259,11 +274,14 @@ impl Storage for DiskCache {
 }
 
 /// Serves a fully-read body from memory in a single chunk. The body file is read
-/// whole in `lookup` (bounded by the per-file size cap), so the handler holds no
-/// file descriptor across awaits — streaming straight off disk is a future
-/// optimization.
+/// whole in `lookup` (bounded by the per-file size cap pingora enforces), so the
+/// handler holds no file descriptor across awaits — streaming straight off disk
+/// is a future optimization.
 struct DiskHitHandler {
     body: Option<Bytes>,
+    /// Body length, captured at lookup. Used as the eviction weight; must match
+    /// the size reported at `admit`/scan time (body-only) or the manager's total
+    /// drifts on the first `access()` of each entry.
     weight: usize,
 }
 
@@ -283,8 +301,8 @@ impl HandleHit for DiskHitHandler {
     }
 
     fn get_eviction_weight(&self) -> usize {
-        // body + meta, so the eviction cap accounts for sidecar overhead too.
-        self.weight + self.body.as_ref().map_or(0, |b| b.len())
+        // body-only, matching admit()/scan() so the eviction total stays exact.
+        self.weight
     }
 
     fn as_any(&self) -> &(dyn Any + Send + Sync) {
@@ -298,40 +316,29 @@ impl HandleHit for DiskHitHandler {
 /// Buffers a cacheable response in memory, then commits it atomically in
 /// `finish()`. Dropped without `finish()` → the write is abandoned (no temp/dest
 /// files were created yet), matching the trait's "drop == failed write" contract.
+///
+/// The buffer is bounded by pingora's own max-file-size enforcement
+/// (`set_max_file_size_bytes`, wired in `request_cache_filter`): a response over
+/// the cap is rejected by Content-Length, or a chunked one is aborted mid-stream
+/// by pingora before it ever reaches `write_body`. So this handler never sees an
+/// over-cap body and needs no size logic of its own. (Streaming straight to the
+/// temp file instead of buffering is a future optimization.)
 struct DiskMissHandler {
     storage: &'static DiskCache,
     hash: String,
     sidecar: Vec<u8>,
     buf: Vec<u8>,
-    /// Set once the buffered body exceeds the cap; the entry is then abandoned.
-    too_big: bool,
     committed: bool,
 }
 
 #[async_trait]
 impl HandleMiss for DiskMissHandler {
     async fn write_body(&mut self, data: Bytes, _eof: bool) -> Result<()> {
-        // Never error here: the body is also being streamed to the client, so an
-        // error would abort the client response. Oversize just stops caching.
-        if !self.too_big {
-            if self.buf.len() + data.len() > self.storage.max_body_bytes {
-                self.too_big = true;
-                self.buf = Vec::new(); // release the partial buffer
-            } else {
-                self.buf.extend_from_slice(&data);
-            }
-        }
+        self.buf.extend_from_slice(&data);
         Ok(())
     }
 
     async fn finish(mut self: Box<Self>) -> Result<MissFinishType> {
-        if self.too_big {
-            // Abandon admission; the client already got the full body upstream.
-            return Error::e_explain(
-                ErrorType::InternalError,
-                "edge cache: body exceeded max file size, not cached",
-            );
-        }
         let size = self.buf.len();
         let body_dst = self.storage.body_path(&self.hash);
         let meta_dst = self.storage.meta_path(&self.hash);
@@ -475,7 +482,7 @@ mod tests {
     fn store(tag: &str) -> (&'static DiskCache, PathBuf) {
         let dir = std::env::temp_dir().join(format!("pedge-cache-test-{tag}"));
         let _ = std::fs::remove_dir_all(&dir);
-        let dc = Box::leak(Box::new(DiskCache::new(&dir, 1 << 20).unwrap()));
+        let dc = Box::leak(Box::new(DiskCache::new(&dir).unwrap()));
         (dc, dir)
     }
 
@@ -550,21 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn oversize_body_is_not_cached() {
-        let dir = std::env::temp_dir().join("pedge-cache-test-oversize");
-        let _ = std::fs::remove_dir_all(&dir);
-        let s: &'static DiskCache = Box::leak(Box::new(DiskCache::new(&dir, 8).unwrap()));
-        let key = CacheKey::new("acme.com", "GET https /big", "");
-        let mut miss = s.get_miss_handler(&key, &meta(60), &span()).await.unwrap();
-        miss.write_body(Bytes::from_static(b"0123456789"), true)
-            .await
-            .unwrap(); // 10 > 8 cap
-        assert!(miss.finish().await.is_err(), "oversize admission abandoned");
-        assert!(s.lookup(&key, &span()).await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn scan_reseeds_and_reaps_orphans() {
+    async fn scan_reseeds_and_reaps_stale_orphans_but_keeps_fresh() {
         let (s, dir) = store("scan");
         let key = CacheKey::new("acme.com", "GET https /s", "");
         let mut miss = s.get_miss_handler(&key, &meta(60), &span()).await.unwrap();
@@ -573,17 +566,36 @@ mod tests {
             .unwrap();
         miss.finish().await.unwrap();
 
-        // an orphan body (no meta) should be reaped by the scan.
-        let orphan = s.shard_dir(&CacheKey::new("a", "b", "").combined());
-        std::fs::create_dir_all(&orphan).unwrap();
-        let orphan_body = orphan.join("deadbeef.body");
-        std::fs::write(&orphan_body, b"x").unwrap();
+        let shard = s.shard_dir(&CacheKey::new("a", "b", "").combined());
+        std::fs::create_dir_all(&shard).unwrap();
+        // A STALE orphan body (no meta, backdated past the reap window) is reaped.
+        let stale = shard.join("deadbeef.body");
+        std::fs::write(&stale, b"x").unwrap();
+        backdate(&stale, REAP_MIN_AGE_SECS + 5);
+        // A FRESH orphan body (could be a write mid-commit) must be preserved.
+        let fresh = shard.join("c0ffee00.body");
+        std::fs::write(&fresh, b"y").unwrap();
 
         let entries = s.scan();
         assert_eq!(entries.len(), 1, "one complete entry re-seeded");
         assert_eq!(entries[0].size, 7);
         assert_eq!(entries[0].key, key.to_compact());
-        assert!(!orphan_body.exists(), "orphan body reaped");
+        assert!(!stale.exists(), "stale orphan reaped");
+        assert!(
+            fresh.exists(),
+            "fresh orphan (possible in-flight write) kept"
+        );
         let _ = dir;
+    }
+
+    /// Backdate a file's mtime by `secs` so the reap gate considers it stale.
+    fn backdate(p: &Path, secs: u64) {
+        let when = SystemTime::now() - std::time::Duration::from_secs(secs);
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
     }
 }

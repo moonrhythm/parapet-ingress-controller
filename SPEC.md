@@ -125,8 +125,9 @@ token** → allowed domains/zones. Contract-relevant invariants:
 - **Response cache (edge-only)** — the edge has an optional disk-backed HTTP
   response cache (`EDGE_CACHE_*`, off by default): **honor-origin** policy (caches
   only on explicit `Cache-Control`/`Expires` freshness; refuses
-  `private`/`no-store`/`Set-Cookie`/`Vary: *`), `GET`/`HEAD`, LRU-bounded,
-  restart-persistent, fail-static, `X-Cache: HIT|MISS`. **parapet does not cache**
+  `private`/`no-store`/`Set-Cookie`/`Vary: *`; ignores **client** request
+  `Cache-Control`, CDN-style), `GET`/`HEAD`, LRU-bounded, restart-persistent,
+  fail-static, `X-Cache: HIT|MISS`. **parapet does not cache**
   — there is no Go equivalent and no conformance obligation. A cache **hit** is
   served without contacting parapet, so parapet's authoritative WAF does not
   re-run on hits (only origin-opted-in public content is cached). See
