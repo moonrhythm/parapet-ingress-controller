@@ -147,6 +147,16 @@ token** → allowed domains/zones. Contract-relevant invariants:
   served without contacting parapet, so parapet's authoritative WAF does not
   re-run on hits (only origin-opted-in public content is cached). See
   [EDGE.md](EDGE.md#response-cache-at-the-edge).
+- **Cache purge (edge-only, design)** — invalidation is **pulled** from the
+  control plane (`GET`/`POST /v1/purges`, a per-edge-scoped journal + cursor),
+  mirroring cert/WAF distribution; no inbound port on the edge. Lazy **epoch**
+  invalidation (global / host / url-keyed-on-`host⊕uri`) is checked at lookup —
+  chosen because the on-disk hash mixes primary+`Vary` variance, so a URL's
+  variants can't be enumerated for eager deletion. Epochs use the **edge's own
+  clock** at apply time (no trusted CP timestamp; the cursor makes apply
+  idempotent); a background reaper reclaims disk. Scopes: exact-URL (all
+  variants), whole-host/zone, flush-all. Edge-only — no Go mirror, no conformance
+  obligation. See [EDGE.md](EDGE.md#purge--invalidation).
 
 ## Configuration (environment variables)
 
