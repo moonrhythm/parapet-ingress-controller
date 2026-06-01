@@ -173,9 +173,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cp_ca = std::env::var("EDGE_CP_CA")
         .ok()
         .and_then(|p| std::fs::read(p).ok());
-    let parapet_addr = env_or("EDGE_PARAPET_ADDR", "parapet:80");
-    let parapet_tls = env_or("EDGE_PARAPET_TLS", "false") == "true";
-    let parapet_sni = env_or("EDGE_PARAPET_SNI", "");
+    let parapet_addr = env_or("EDGE_UPSTREAM_ADDR", "parapet:80");
+    let parapet_tls = env_or("EDGE_UPSTREAM_TLS", "false") == "true";
+    let parapet_sni = env_or("EDGE_UPSTREAM_SNI", "");
     let refresh_secs: u64 = env_or("EDGE_REFRESH_INTERVAL", "300")
         .parse()
         .unwrap_or(300);

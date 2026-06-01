@@ -184,7 +184,7 @@ say "6. start the Rust edge (fetches cert + WAF rules; GeoIP from fixture DB)"
 EDGE_HTTPS_LISTEN="127.0.0.1:$EDGE_PORT" EDGE_HTTP_LISTEN="127.0.0.1:$EDGE_HTTP_PORT" \
   EDGE_CP_ENDPOINT="https://localhost:$CP_PORT" EDGE_CP_TOKEN="$TOKEN" \
   EDGE_CP_CA="$WORK/ca.crt" EDGE_DOMAINS="$DOMAIN" \
-  EDGE_PARAPET_ADDR="127.0.0.1:$UP_PORT" EDGE_PARAPET_TLS=false \
+  EDGE_UPSTREAM_ADDR="127.0.0.1:$UP_PORT" EDGE_UPSTREAM_TLS=false \
   EDGE_WAF_ENABLED=true \
   WAF_GEOIP_DB="$REPO/conformance/geoip/iplocate-country.mmdb" \
   WAF_ASN_DB="$REPO/conformance/geoip/iplocate-asn.mmdb" \

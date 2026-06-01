@@ -18,9 +18,9 @@
 #   EDGE_CP_CA        path to the CA cert that signs the control plane's server
 #                     cert (mounted read-only); unset if the CP cert is publicly
 #                     trusted or the CP runs plaintext http://
-#   EDGE_PARAPET_ADDR parapet:80
-#   EDGE_PARAPET_TLS  false
-#   EDGE_PARAPET_SNI  ""               SNI to present to parapet when re-encrypting
+#   EDGE_UPSTREAM_ADDR parapet:80
+#   EDGE_UPSTREAM_TLS  false
+#   EDGE_UPSTREAM_SNI  ""              SNI to present to the upstream when re-encrypting
 #   EDGE_REFRESH_INTERVAL  300
 #   EDGE_WAF_ENABLED  true
 #   WAF_GEOIP_DB      /geoip/ip-to-country.mmdb   (baked into the image; "" disables)
@@ -39,9 +39,9 @@ EDGE_NAME="${EDGE_NAME:-parapet-edge}"
 EDGE_LISTEN="${EDGE_LISTEN:-0.0.0.0:443}"
 EDGE_DOMAINS="${EDGE_DOMAINS:-}"
 EDGE_CP_ENDPOINT="${EDGE_CP_ENDPOINT:-https://controlplane:8443}"
-EDGE_PARAPET_ADDR="${EDGE_PARAPET_ADDR:-parapet:80}"
-EDGE_PARAPET_TLS="${EDGE_PARAPET_TLS:-false}"
-EDGE_PARAPET_SNI="${EDGE_PARAPET_SNI:-}"
+EDGE_UPSTREAM_ADDR="${EDGE_UPSTREAM_ADDR:-parapet:80}"
+EDGE_UPSTREAM_TLS="${EDGE_UPSTREAM_TLS:-false}"
+EDGE_UPSTREAM_SNI="${EDGE_UPSTREAM_SNI:-}"
 EDGE_REFRESH_INTERVAL="${EDGE_REFRESH_INTERVAL:-300}"
 EDGE_WAF_ENABLED="${EDGE_WAF_ENABLED:-true}"
 WAF_GEOIP_DB="${WAF_GEOIP_DB:-/geoip/ip-to-country.mmdb}"
@@ -63,9 +63,9 @@ args=(
   -e EDGE_DOMAINS="$EDGE_DOMAINS"
   -e EDGE_CP_ENDPOINT="$EDGE_CP_ENDPOINT"
   -e EDGE_CP_TOKEN="$EDGE_CP_TOKEN"
-  -e EDGE_PARAPET_ADDR="$EDGE_PARAPET_ADDR"
-  -e EDGE_PARAPET_TLS="$EDGE_PARAPET_TLS"
-  -e EDGE_PARAPET_SNI="$EDGE_PARAPET_SNI"
+  -e EDGE_UPSTREAM_ADDR="$EDGE_UPSTREAM_ADDR"
+  -e EDGE_UPSTREAM_TLS="$EDGE_UPSTREAM_TLS"
+  -e EDGE_UPSTREAM_SNI="$EDGE_UPSTREAM_SNI"
   -e EDGE_REFRESH_INTERVAL="$EDGE_REFRESH_INTERVAL"
   -e EDGE_WAF_ENABLED="$EDGE_WAF_ENABLED"
   -e WAF_GEOIP_DB="$WAF_GEOIP_DB"
