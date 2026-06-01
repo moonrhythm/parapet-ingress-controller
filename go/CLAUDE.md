@@ -42,7 +42,7 @@ state/                            # per-request state map (passed via context)
 debounce/                         # debounce helper used for reload coalescing
 edgecp/                           # edge control-plane lib (cert store, authz, reload, REST server)
 cmd/edge-controlplane/            # edge control-plane binary (see ../EDGE.md)
-edge/                             # edge proxy lib: certstore, cp (CP client), waf, refresh, forward, cache/
+edge/                             # edge proxy lib: certstore, cp (CP client), waf, refresh, forward (cache is parapet/pkg/cache)
 cmd/edge-proxy/                   # out-of-cluster edge proxy binary (parapet framework; see ../EDGE.md)
 Dockerfile                        # controller image (multi-stage Go build, CGO + cbrotli)
 Dockerfile.edge-controlplane      # control-plane image (pure Go, distroless/static)
@@ -59,8 +59,8 @@ control plane (`edge/cp.go`), terminates public TLS via a hot-swappable
 `cert.Table` (`edge/certstore.go`, self-signed fallback on SNI miss, on-demand
 fetch in serve-all mode), runs global + zone WAF (`edge/waf.go`, reusing
 `parapet/pkg/waf` + `wafrule` + `geoip` exactly like the controller), optionally
-caches responses on disk (`edge/cache/`, honor-origin, LRU, fail-static), and
-forwards to parapet (`edge/forward.go`). Refresh loops are fail-static
+optionally caches responses via `parapet/pkg/cache` (memory or disk backend,
+selected by `EDGE_CACHE_BACKEND`), and forwards to parapet (`edge/forward.go`). Refresh loops are fail-static
 (`edge/refresh.go`, `edge/wafrefresh.go`). It is **not** the controller — no k8s
 client, no Ingress watch — so it lives beside, not inside, the controller.
 

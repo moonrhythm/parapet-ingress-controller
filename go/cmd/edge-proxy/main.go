@@ -24,13 +24,13 @@ import (
 	"time"
 
 	"github.com/moonrhythm/parapet"
+	"github.com/moonrhythm/parapet/pkg/cache"
 	"github.com/moonrhythm/parapet/pkg/healthz"
 	"github.com/moonrhythm/parapet/pkg/host"
 	"github.com/moonrhythm/parapet/pkg/logger"
 	"github.com/moonrhythm/parapet/pkg/prom"
 
 	"github.com/moonrhythm/parapet-ingress-controller/go/edge"
-	"github.com/moonrhythm/parapet-ingress-controller/go/edge/cache"
 	"github.com/moonrhythm/parapet-ingress-controller/go/geoip"
 )
 
@@ -126,20 +126,30 @@ func main() {
 		go edge.RunWafRefresh(ctx, cp, ewaf, refreshInterval)
 	}
 
-	// Optional disk-backed response cache (off by default).
+	// Optional response cache (off by default), from parapet/pkg/cache. The
+	// backend is disk (default; survives restarts, bounded by on-disk bytes) or
+	// memory (EDGE_CACHE_BACKEND=memory; bodies in RAM, lost on restart).
 	var respCache *cache.Cache
 	if envOr("EDGE_CACHE_ENABLED", "false") == "true" {
-		cfg := cache.Config{
-			Dir:         envOr("EDGE_CACHE_DIR", "/var/cache/parapet-edge"),
-			MaxSize:     envInt64("EDGE_CACHE_MAX_SIZE", 1<<30),
-			MaxFileSize: envInt64("EDGE_CACHE_MAX_FILE_SIZE", 8<<20),
+		maxSize := envInt64("EDGE_CACHE_MAX_SIZE", 1<<30)
+		maxFile := envInt64("EDGE_CACHE_MAX_FILE_SIZE", 8<<20)
+		var storage cache.Storage
+		switch envOr("EDGE_CACHE_BACKEND", "disk") {
+		case "memory":
+			storage = cache.NewMemory(maxSize)
+			slog.Info("edge cache enabled (in-memory)", "max_size", maxSize, "max_file", maxFile)
+		default: // disk
+			dir := envOr("EDGE_CACHE_DIR", "/var/cache/parapet-edge")
+			d, err := cache.NewDisk(dir, maxSize)
+			if err != nil {
+				slog.Error("edge cache: cannot init cache dir; caching disabled", "dir", dir, "error", err)
+			} else {
+				storage = d
+				slog.Info("edge cache enabled (disk-backed)", "dir", dir, "max_size", maxSize, "max_file", maxFile)
+			}
 		}
-		c, err := cache.New(cfg)
-		if err != nil {
-			slog.Error("edge cache: cannot init cache dir; caching disabled", "dir", cfg.Dir, "error", err)
-		} else {
-			respCache = c
-			slog.Info("edge cache enabled (disk-backed)", "dir", cfg.Dir, "max_size", cfg.MaxSize, "max_file", cfg.MaxFileSize)
+		if storage != nil {
+			respCache = cache.New(storage, cache.Options{MaxFileSize: maxFile})
 		}
 	}
 
@@ -174,7 +184,7 @@ func main() {
 		m.Use(forwardGeoHeaders(country, asn))
 	}
 	if respCache != nil {
-		m.Use(respCache.Middleware())
+		m.Use(respCache)
 	}
 	m.Use(forwarder)
 

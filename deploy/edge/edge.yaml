@@ -80,11 +80,14 @@ spec:
               value: /geoip/ip-to-country.mmdb
             - name: WAF_ASN_DB
               value: /geoip/ip-to-asn.mmdb
-            # Optional disk-backed response cache (off by default). Enable it and
-            # mount a writable volume at EDGE_CACHE_DIR (see the cache volume
-            # below). honor-origin policy; LRU-bounded; restart-persistent.
+            # Optional response cache (off by default), from parapet/pkg/cache.
+            # honor-origin policy; LRU-bounded. Backend = disk (default;
+            # restart-persistent; mount a writable volume at EDGE_CACHE_DIR, see
+            # the cache volume below) or memory (bodies in RAM, lost on restart).
             - name: EDGE_CACHE_ENABLED
               value: "false"
+            # - name: EDGE_CACHE_BACKEND        # disk (default) | memory
+            #   value: "disk"
             - name: EDGE_CACHE_DIR
               value: /var/cache/parapet-edge
             # - name: EDGE_CACHE_MAX_SIZE       # total on-disk bytes (default 1 GiB)

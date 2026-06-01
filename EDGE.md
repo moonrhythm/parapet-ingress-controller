@@ -99,8 +99,9 @@ keys**, so it must never be on the public LoadBalancer. See
   evaluation, and `go/geoip` for `request.country`/`request.asn`. Maintains an
   in-memory cert store refreshed from `GET /v1/certs?sni=…` (`go/edge/certstore.go`,
   `go/edge/cp.go`), runs global + zone WAF (`go/edge/waf.go`), optionally caches
-  responses on disk (`go/edge/cache/`), and forwards to parapet with
-  `X-Forwarded-*` (`go/edge/forward.go`). Keys live in memory only, never on disk.
+  responses via `parapet/pkg/cache` (memory or disk, selected by
+  `EDGE_CACHE_BACKEND`), and forwards to parapet with `X-Forwarded-*`
+  (`go/edge/forward.go`). Keys live in memory only, never on disk.
 
 ## Authorization (bearer token, two endpoints)
 
@@ -263,25 +264,28 @@ close to clients and (above) can be 200–300 ms from the cluster, so serving a
 cacheable object locally removes a full origin round trip. Enabled with
 `EDGE_CACHE_ENABLED=true`.
 
-> **Edge-only feature.** The parapet *controller* does not cache, so this is not a
-> parapet-core behavior change and carries no controller mirror or `conformance/`
-> obligation — it lives only in the edge (`go/edge/cache`). Recorded as an edge
-> divergence in [`SPEC.md`](SPEC.md).
+> **Reusable parapet feature.** The cache is **`parapet/pkg/cache`** — a
+> general response-cache middleware with a pluggable storage backend — not
+> edge-specific code. The parapet *controller* doesn't enable it, so it carries no
+> controller mirror or `conformance/` obligation; the edge is just its first
+> consumer. Recorded as an edge divergence in [`SPEC.md`](SPEC.md).
 
 ### What it does
 
-- **Disk-backed.** Hand-rolled in `go/edge/cache` (parapet has no caching layer):
-  a middleware wrapping the upstream forwarder that stores bodies on disk with a
-  JSON `.meta` sidecar. A disk cache survives restarts and isn't bounded by RSS
-  (matters given the edge's memory-pressure history). Total size is bounded by an
-  in-memory **LRU** keyed on body bytes (`EDGE_CACHE_MAX_SIZE`); per-object size by
-  `EDGE_CACHE_MAX_FILE_SIZE`. A `Content-Length` over the cap is simply not cached
-  (the client still gets the full response). A GET is cached **only with a
-  `Content-Length`** and committed only once written bytes == `Content-Length` —
-  so a truncated response (client disconnect, upstream error) is never stored;
-  a chunked (no-`Content-Length`) GET passes through uncached (Go's
-  `httputil.ReverseProxy` gives no clean end-of-stream signal to a wrapping
-  `ResponseWriter`). HEAD has no body and is unaffected.
+- **Pluggable backend (`parapet/pkg/cache`).** A middleware wrapping the upstream
+  forwarder, with two storage backends selected by `EDGE_CACHE_BACKEND`:
+  **`disk`** (default — sharded files + a JSON `.meta` sidecar; the body is
+  **streamed** to a temp file, so it survives restarts and isn't bounded by RSS,
+  which matters given the edge's memory-pressure history) and **`memory`** (bodies
+  in RAM, lost on restart). Total size is bounded by an **LRU** keyed on body
+  bytes (`EDGE_CACHE_MAX_SIZE`); per-object size by `EDGE_CACHE_MAX_FILE_SIZE`. A
+  `Content-Length` over the cap is simply not cached (the client still gets the
+  full response). A GET is cached **only with a `Content-Length`** and committed
+  only once written bytes == `Content-Length` — so a truncated response (client
+  disconnect, upstream error) is never stored; a chunked (no-`Content-Length`) GET
+  passes through uncached (Go's `httputil.ReverseProxy` gives no clean
+  end-of-stream signal to a wrapping `ResponseWriter`). HEAD has no body and is
+  unaffected.
 - **Honor-origin policy.** Caches **only** when the origin opts in via response
   `Cache-Control`/`Expires` freshness — no forced or heuristic TTL. Refuses
   `private`/`no-store`/`no-cache`, any `Set-Cookie`, and `Vary: *`. Honors `Vary`
@@ -334,7 +338,8 @@ authorization-sensitive responses publicly cacheable.
 
 ```
 EDGE_CACHE_ENABLED       on/off (default false)
-EDGE_CACHE_DIR           cache root (default /var/cache/parapet-edge)
+EDGE_CACHE_BACKEND       disk | memory (default disk)
+EDGE_CACHE_DIR           cache root, disk backend only (default /var/cache/parapet-edge)
 EDGE_CACHE_MAX_SIZE      total bytes cap, LRU-evicted (default 1073741824 = 1 GiB)
 EDGE_CACHE_MAX_FILE_SIZE per-object bytes cap (default 8388608 = 8 MiB)
 EDGE_CACHE_PURGE_POLL_INTERVAL   poll GET /v1/purges (default 10s; lower than the
@@ -356,7 +361,7 @@ connection/byte/runtime metrics).
 
 > **Status: design only — not implemented** (in neither the edge nor the control
 > plane). The mechanism below was sketched against the former Rust/pingora cache;
-> the equivalent will be built in `go/edge/cache` (lazy epochs checked in the
+> the equivalent will be built in `parapet/pkg/cache` (lazy epochs checked in the
 > lookup gate + a background reaper) when Phase 5 lands. The CP `/v1/purges`
 > endpoints do not exist yet either.
 
