@@ -5,13 +5,15 @@
 #
 # This is a production-style launcher, NOT a test. It does not build anything and
 # does not stand up a control plane or upstream — point it at a real, reachable
-# control plane and parapet.
+# control plane and parapet. The edge is a Go binary (go/cmd/edge-proxy).
 #
 # Required:
 #   EDGE_CP_TOKEN     the edge's bearer token (authorizes its domains)
 # Common (defaults match edge.yaml; override as needed):
 #   EDGE_IMAGE        gcr.io/moonrhythm-containers/parapet-ingress-controller:edge-latest
-#   EDGE_LISTEN       0.0.0.0:443      (container-internal; also the published port)
+#   EDGE_HTTPS_LISTEN 0.0.0.0:443      (container-internal; also the published port)
+#   EDGE_HTTP_LISTEN  ""               plaintext listener; "" disables it (this
+#                                      single-port launcher publishes only HTTPS)
 #   EDGE_DOMAINS      ""               comma-separated SNIs this edge serves;
 #                                      EMPTY = serve ALL domains (on-demand cert fetch)
 #   EDGE_CP_ENDPOINT  https://controlplane:8443
@@ -25,7 +27,7 @@
 #   EDGE_WAF_ENABLED  true
 #   WAF_GEOIP_DB      /geoip/ip-to-country.mmdb   (baked into the image; "" disables)
 #   WAF_ASN_DB        /geoip/ip-to-asn.mmdb       (baked into the image; "" disables)
-#   RUST_LOG          info
+#   EDGE_METRICS_LISTEN  :9187        (Prometheus metrics; "" disables)
 #   EDGE_NAME         parapet-edge     docker container name
 #   DOCKER_RUN_ARGS   extra args inserted into `docker run` (e.g. "--network host")
 #
@@ -36,7 +38,8 @@ set -euo pipefail
 
 EDGE_IMAGE="${EDGE_IMAGE:-gcr.io/moonrhythm-containers/parapet-ingress-controller:edge-latest}"
 EDGE_NAME="${EDGE_NAME:-parapet-edge}"
-EDGE_LISTEN="${EDGE_LISTEN:-0.0.0.0:443}"
+EDGE_HTTPS_LISTEN="${EDGE_HTTPS_LISTEN:-0.0.0.0:443}"
+EDGE_HTTP_LISTEN="${EDGE_HTTP_LISTEN:-}"
 EDGE_DOMAINS="${EDGE_DOMAINS:-}"
 EDGE_CP_ENDPOINT="${EDGE_CP_ENDPOINT:-https://controlplane:8443}"
 EDGE_UPSTREAM_ADDR="${EDGE_UPSTREAM_ADDR:-parapet:80}"
@@ -46,20 +49,21 @@ EDGE_REFRESH_INTERVAL="${EDGE_REFRESH_INTERVAL:-300}"
 EDGE_WAF_ENABLED="${EDGE_WAF_ENABLED:-true}"
 WAF_GEOIP_DB="${WAF_GEOIP_DB:-/geoip/ip-to-country.mmdb}"
 WAF_ASN_DB="${WAF_ASN_DB:-/geoip/ip-to-asn.mmdb}"
-RUST_LOG="${RUST_LOG:-info}"
+EDGE_METRICS_LISTEN="${EDGE_METRICS_LISTEN-:9187}"
 
 if [ -z "${EDGE_CP_TOKEN:-}" ]; then
   echo "EDGE_CP_TOKEN is required (the edge's bearer token)" >&2
   exit 1
 fi
 
-# Publish the host port matching the container's listen port (host:container).
-listen_port="${EDGE_LISTEN##*:}"
+# Publish the host port matching the container's HTTPS listen port (host:container).
+listen_port="${EDGE_HTTPS_LISTEN##*:}"
 
 args=(
   run --rm --name "$EDGE_NAME"
   -p "${listen_port}:${listen_port}"
-  -e EDGE_LISTEN="$EDGE_LISTEN"
+  -e EDGE_HTTPS_LISTEN="$EDGE_HTTPS_LISTEN"
+  -e EDGE_HTTP_LISTEN="$EDGE_HTTP_LISTEN"
   -e EDGE_DOMAINS="$EDGE_DOMAINS"
   -e EDGE_CP_ENDPOINT="$EDGE_CP_ENDPOINT"
   -e EDGE_CP_TOKEN="$EDGE_CP_TOKEN"
@@ -70,7 +74,7 @@ args=(
   -e EDGE_WAF_ENABLED="$EDGE_WAF_ENABLED"
   -e WAF_GEOIP_DB="$WAF_GEOIP_DB"
   -e WAF_ASN_DB="$WAF_ASN_DB"
-  -e RUST_LOG="$RUST_LOG"
+  -e EDGE_METRICS_LISTEN="$EDGE_METRICS_LISTEN"
 )
 
 # Mount the control-plane CA read-only and tell the edge where it is, if given.

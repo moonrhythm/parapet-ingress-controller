@@ -1,5 +1,7 @@
-# Edge proxy (Rust/Pingora) — terminates public TLS locally with cert+key fetched
-# from the in-cluster control plane, and forwards to parapet. See ../../EDGE.md.
+# Edge proxy (Go, on the parapet framework) — terminates public TLS locally with
+# a cert+key fetched from the in-cluster control plane, runs the global + zone WAF
+# (early-drop), optionally caches responses on disk, and forwards to parapet. See
+# ../../EDGE.md. (Migrated off Rust/Pingora; image is now go/Dockerfile.edge.)
 #
 # The edge typically runs OUTSIDE the cluster (closer to clients). This manifest
 # is for the case where you run it in a *separate* edge cluster / node pool; adapt
@@ -59,7 +61,7 @@ spec:
             - name: EDGE_CP_CA
               value: /cp-ca/ca.crt
             # Where to forward (the in-cluster parapet, reached via the same private
-            # path). Plaintext h2c by default; set EDGE_UPSTREAM_TLS=true to
+            # path). Plaintext HTTP/1.1 by default; set EDGE_UPSTREAM_TLS=true to
             # re-encrypt across an untrusted hop.
             - name: EDGE_UPSTREAM_ADDR
               value: "parapet-ingress-controller.parapet-ingress-controller.svc:80"
@@ -67,7 +69,7 @@ spec:
               value: "false"
             - name: EDGE_REFRESH_INTERVAL
               value: "300"
-            # Phase 2: run the global WAF at the edge (early-drop; parapet stays
+            # Run the global + zone WAF at the edge (early-drop; parapet stays
             # authoritative). Fetched from the control plane's GET /v1/waf.
             - name: EDGE_WAF_ENABLED
               value: "true"
@@ -78,17 +80,56 @@ spec:
               value: /geoip/ip-to-country.mmdb
             - name: WAF_ASN_DB
               value: /geoip/ip-to-asn.mmdb
-            - name: RUST_LOG
-              value: "info"
+            # Optional response cache (off by default), from parapet/pkg/cache.
+            # honor-origin policy; LRU-bounded. Backend = disk (default;
+            # restart-persistent; mount a writable volume at EDGE_CACHE_DIR, see
+            # the cache volume below) or memory (bodies in RAM, lost on restart).
+            - name: EDGE_CACHE_ENABLED
+              value: "false"
+            # - name: EDGE_CACHE_BACKEND        # disk (default) | memory
+            #   value: "disk"
+            - name: EDGE_CACHE_DIR
+              value: /var/cache/parapet-edge
+            # - name: EDGE_CACHE_MAX_SIZE       # total on-disk bytes (default 1 GiB)
+            #   value: "1073741824"
+            # - name: EDGE_CACHE_MAX_FILE_SIZE  # per-object bytes (default 8 MiB)
+            #   value: "8388608"
+            # Prometheus metrics endpoint (connections / bytes / Go runtime). Set
+            # "" to disable.
+            - name: EDGE_METRICS_LISTEN
+              value: ":9187"
           ports:
             - name: https
               containerPort: 443
             - name: http
               containerPort: 80
+            - name: metrics
+              containerPort: 9187
+          # Probes hit /healthz on the plaintext listener; parapet's healthz only
+          # answers when the Host is a bare IP (the kubelet probes by pod IP), so
+          # it never shadows a real vhost. Readiness flips green after the first
+          # cert load, and to 503 during graceful shutdown.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz?ready=1
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
           volumeMounts:
             - name: cp-ca
               mountPath: /cp-ca
               readOnly: true
+            # Writable cache dir (only used when EDGE_CACHE_ENABLED=true). emptyDir
+            # is fine — the cache is just an optimization and re-warms; swap for a
+            # PVC to persist across pod restarts.
+            - name: cache
+              mountPath: /var/cache/parapet-edge
           resources:
             requests:
               cpu: 100m
@@ -97,6 +138,8 @@ spec:
         - name: cp-ca
           secret:
             secretName: parapet-edge-cp-ca # ca.crt the edge uses to verify the control plane
+        - name: cache
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

@@ -7,8 +7,9 @@ plane**. Design and contract: [`../../EDGE.md`](../../EDGE.md).
   + `NetworkPolicy`). Runs in the controller's namespace, reuses its
   ServiceAccount (needs `get/list/watch secrets`). **Distributes private keys** —
   ClusterIP only, locked to edge source IPs; never on the public LB.
-- `edge.yaml` — the Rust/Pingora edge (`Deployment` + `LoadBalancer Service`).
-  Terminates public TLS; the public-facing tier.
+- `edge.yaml` — the Go edge proxy (`Deployment` + `LoadBalancer Service`).
+  Terminates public TLS; the public-facing tier. (Migrated off Rust/Pingora; the
+  image is now built from `go/Dockerfile.edge`.)
 
 ## Required secrets
 
@@ -44,33 +45,37 @@ Each edge's `EDGE_DOMAINS` and its token's allow-set should match its shard. The
 isolation (an edge only holds *its* domains' keys) only holds if edges are
 sharded by domain — see [`../../EDGE.md`](../../EDGE.md) "The tradeoff".
 
-## WAF (Phase 2)
+## WAF (global + zones)
 
 Set `EDGE_WAF_ENABLED=true` on the edge and `CP_WAF_ENABLED=true` +
-`POD_NAMESPACE` on the control plane to distribute the **global** WAF baseline
-(`GET /v1/waf`) and run it at the edge as an early-drop layer. parapet still
-re-runs the full WAF authoritatively — the edge is the lower trust tier, so a
-stale/disabled edge never means an unprotected origin. The edge reuses the same
-CEL engine as parapet (conformance-guarded), so rules block identically.
+`POD_NAMESPACE` on the control plane to distribute the **global** baseline and the
+tenant **zones** (`GET /v1/waf`) and run them at the edge as an early-drop layer.
+parapet still re-runs the full WAF authoritatively — the edge is the lower trust
+tier, so a stale/disabled edge never means an unprotected origin. The edge reuses
+the same CEL engine as parapet (`parapet/pkg/waf`, conformance-guarded), so rules
+block identically. Zone resolution at the edge is host-level (the control plane
+derives `host → zoneKey` from Ingress objects, scoped to the edge's domains);
+path-precise zone resolution stays parapet's authoritative job.
 
 GeoIP/ASN (`request.country` / `request.asn`) resolve at the edge from the true
 client IP via `WAF_GEOIP_DB` / `WAF_ASN_DB` (the edge image bakes both at the
 default paths). The edge also forwards `X-Forwarded-Country` / `X-Forwarded-ASN`
-to parapet. Tenant **zones** are not distributed yet (Phase 3).
+to parapet.
 
-## End-to-end smoke tests
+## Response cache (optional)
 
-Two cluster-free harnesses wire the real control plane (`KUBERNETES_BACKEND=fs`)
-+ real edge + a dummy upstream and assert TLS termination, global/zone/GeoIP WAF
-blocks, and SNI fallback (identical assertions):
+Set `EDGE_CACHE_ENABLED=true` (and mount a writable `EDGE_CACHE_DIR`) to enable
+the disk-backed honor-origin response cache — see [`../../EDGE.md`](../../EDGE.md)
+"Response cache at the edge". Off by default; `X-Cache: HIT|MISS`.
 
-- `e2e/run.sh` — builds local binaries (`go build` / `cargo build`) and runs them
-  as processes. Fast; needs a Go + Rust toolchain.
-- `e2e/run-docker.sh` — builds the actual shipped images
-  (`go/Dockerfile.edge-controlplane`, `rust/Dockerfile.edge`) and runs them as
-  containers on a shared Docker network. Slower (compiles in-image) but exercises
-  the real images. Needs Docker (BuildKit). `EDGE_E2E_BUILD=0` reuses existing
-  images; `CP_IMAGE` / `EDGE_IMAGE` override the tags.
+## End-to-end smoke test
+
+`e2e/run.sh` is a cluster-free harness that builds the local Go binaries
+(`go build ./cmd/edge-controlplane` + `go build ./cmd/edge-proxy`) and wires the
+real control plane (`KUBERNETES_BACKEND=fs`) + real edge + a dummy upstream,
+asserting TLS termination, the http listener, global/zone/GeoIP WAF blocks, the
+disk cache (MISS→HIT), and SNI fallback. Fast; needs only a Go toolchain plus
+`openssl`, `curl`, `python3`, and `nc`.
 
 ## Rotation
 

@@ -1,0 +1,57 @@
+# syntax=docker/dockerfile:1
+#
+# Edge proxy (Go). The out-of-cluster parapet edge: terminates public TLS locally
+# with a cert+key fetched from the in-cluster control plane, runs the global +
+# zone WAF, optionally caches responses on disk, and forwards to parapet. See
+# ../EDGE.md. Pure Go (no CGO/brotli) — builds static and runs on
+# distroless/static. Build context is this `go/` directory:
+#
+#     docker build -f go/Dockerfile.edge -t parapet-edge go/
+FROM golang:1.26.3-trixie AS build
+
+ARG VERSION
+ARG GOAMD64
+
+ENV CGO_ENABLED=0
+ENV GOAMD64=$GOAMD64
+
+WORKDIR /workspace
+ADD go.mod go.sum ./
+RUN go mod download
+
+ADD . .
+RUN go build \
+		-o edge-proxy \
+		-ldflags "-w -s -X main.version=$VERSION" \
+		./cmd/edge-proxy
+
+# ---- GeoIP databases ----
+# The edge is the first hop, so it resolves request.country / request.asn from the
+# true client IP. Bake both IPLocate MMDBs (CC BY-SA 4.0 — keep the attribution to
+# iplocate.io) so WAF_GEOIP_DB / WAF_ASN_DB default paths exist, mirroring the
+# controller image. The ip-to-asn DB is large (~74 MB) — pass --build-arg
+# ASN_DB_URL= (empty) to skip it; an empty URL bakes none (the dir still exists).
+FROM debian:trixie-slim AS geoip
+ARG GEOIP_DB_URL=https://github.com/iplocate/ip-address-databases/raw/main/ip-to-country/ip-to-country.mmdb
+ARG ASN_DB_URL=https://github.com/iplocate/ip-address-databases/raw/main/ip-to-asn/ip-to-asn.mmdb
+RUN mkdir -p /geoip && \
+	if [ -n "$GEOIP_DB_URL" ] || [ -n "$ASN_DB_URL" ]; then \
+		apt-get update && apt-get -y install --no-install-recommends curl ca-certificates; \
+	fi && \
+	if [ -n "$GEOIP_DB_URL" ]; then curl -fsSL "$GEOIP_DB_URL" -o /geoip/ip-to-country.mmdb; fi && \
+	if [ -n "$ASN_DB_URL" ]; then curl -fsSL "$ASN_DB_URL" -o /geoip/ip-to-asn.mmdb; fi && \
+	ls -l /geoip
+
+# ---- runtime ----
+# distroless/static provides CA roots + tzdata; the default (root) variant — not
+# :nonroot — so the edge can bind the privileged :443 / :80 ports, matching the
+# former Rust edge image.
+FROM gcr.io/distroless/static-debian12
+
+COPY --from=build /workspace/edge-proxy /usr/local/bin/edge-proxy
+COPY --from=geoip /geoip/ /geoip/
+
+# HTTPS (public TLS terminated here), plaintext HTTP, and the metrics endpoint.
+EXPOSE 443 80 9187
+
+ENTRYPOINT ["/usr/local/bin/edge-proxy"]

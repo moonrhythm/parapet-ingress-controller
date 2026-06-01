@@ -2,6 +2,14 @@
 //! (cert+key fetched from the in-cluster control plane and cached in memory) and
 //! forwards to parapet. See ../../EDGE.md. Phase 1: cert distribution + TLS +
 //! forwarding. Phases 2–3 add edge WAF.
+//!
+//! DORMANT (since the Go edge migration): the edge was reimplemented in Go on the
+//! parapet framework at `go/cmd/edge-proxy` (+ `go/edge`), after recurring bugs in
+//! pingora 0.8 (the patched-vendored connection-pool / H2-idle leaks). This crate
+//! is no longer built, tested, deployed, or shipped by CI — `deploy/` and the
+//! `:edge-<sha>` image now come from the Go edge. It remains a `rust/` workspace
+//! member (still compiles) for reference/history; remove it once the Go edge has
+//! soaked in production. See EDGE.md "Implementation history".
 
 mod certstore;
 mod cp;

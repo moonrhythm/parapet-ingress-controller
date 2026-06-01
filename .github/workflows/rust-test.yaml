@@ -57,7 +57,7 @@ jobs:
       # Debug build — verifies the binary links with all features. The optimized
       # release artifact (fat LTO, slow) is built and pushed by rust-build.yaml.
       - run: cargo build -p parapet-ingress-controller --features proxy,cluster --bin parapet-ingress-controller
-      # The edge proxy is a workspace member (openssl backend, reuses controller).
-      - run: cargo clippy -p parapet-edge --all-targets -- -D warnings
-      - run: cargo test -p parapet-edge
-      - run: cargo build -p parapet-edge --bin parapet-edge
+      # NOTE: the Rust edge (parapet-edge) was migrated to Go (go/cmd/edge-proxy)
+      # and is now dormant — see EDGE.md. Its clippy/test/build steps were dropped
+      # here; rust/edge stays in the tree (a workspace member that still compiles)
+      # but is no longer built, tested, or shipped by CI.

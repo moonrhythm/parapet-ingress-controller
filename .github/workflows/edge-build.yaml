@@ -5,8 +5,9 @@ name: edge-build
 # module prefix on the tag (mirroring the existing `:<sha>` Go / `:rust-<sha>`
 # Rust streams):
 #   controlplane-<sha>  — the Go control plane (go/Dockerfile.edge-controlplane)
-#   edge-<sha>          — the Rust edge proxy   (rust/Dockerfile.edge)
-# See EDGE.md. Triggered when either side — or the edge manifests — change.
+#   edge-<sha>          — the Go edge proxy    (go/Dockerfile.edge)
+# Both are now Go (the edge was migrated off Rust/Pingora; rust/edge is dormant).
+# See EDGE.md. Triggered when the Go module or the edge manifests change.
 # Auth/registries mirror go-build / rust-build.
 on:
   push:
@@ -14,7 +15,6 @@ on:
       - main
     paths:
       - 'go/**'
-      - 'rust/**'
       - 'deploy/edge/**'
       - '.github/workflows/edge-build.yaml'
   # Also build + push on PRs (tagged with the PR's commit SHA) so a PR image can
@@ -22,7 +22,6 @@ on:
   pull_request:
     paths:
       - 'go/**'
-      - 'rust/**'
       - 'deploy/edge/**'
       - '.github/workflows/edge-build.yaml'
   workflow_dispatch: {}
@@ -92,13 +91,12 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           provenance: false
-          context: rust
-          file: rust/Dockerfile.edge
+          context: go
+          file: go/Dockerfile.edge
           push: true
-          cache-from: type=gha,scope=edge
-          cache-to: type=gha,mode=max,scope=edge
           build-args: |
-            TARGET_CPU=x86-64-v3
+            VERSION=${{ github.sha }}
+            GOAMD64=v3
           tags: |
             us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:edge-${{ github.sha }}
             asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:edge-${{ github.sha }}

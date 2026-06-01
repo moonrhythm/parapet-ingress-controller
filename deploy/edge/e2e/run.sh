@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# Cross-language end-to-end smoke test for the edge + control plane, with NO
+# Cross-component end-to-end smoke test for the edge + control plane, with NO
 # Kubernetes cluster. It wires the REAL binaries together:
 #
-#   client --TLS--> rust edge --(fetches cert+key + WAF rules)--> go control plane
-#                       │                                              (fs backend)
-#                       └--(forwards, if not WAF-blocked)--> dummy upstream ("parapet")
+#   client --TLS--> go edge --(fetches cert+key + WAF rules)--> go control plane
+#                      │                                              (fs backend)
+#                      └--(forwards, if not WAF-blocked)--> dummy upstream ("parapet")
 #
 # It proves:
 #   Phase 1 — the edge fetches a cert+key it does NOT have locally from the
 #     control plane (bearer-authorized), terminates TLS with it, forwards upstream.
 #   Phase 2 — the edge fetches the GLOBAL WAF ruleset and blocks a matching
 #     request at the edge (early drop) before it reaches the upstream.
+#   Phase 3 — a tenant ZONE bound to the host (via an Ingress annotation) blocks
+#     at the edge (host->zone resolution + zone distribution).
+#   Phase 4 — the optional disk-backed response cache serves a cacheable object
+#     locally on the second request (X-Cache: MISS then HIT).
 #
-# The control plane reads cert + WAF ConfigMap from static manifests via
-# KUBERNETES_BACKEND=fs, so no cluster is needed.
+# Both the edge and the control plane are Go binaries (go/cmd/edge-proxy and
+# go/cmd/edge-controlplane). The control plane reads cert + WAF ConfigMap from
+# static manifests via KUBERNETES_BACKEND=fs, so no cluster is needed.
 #
 # Usage:  deploy/edge/e2e/run.sh
-# Requires: openssl, curl, python3, nc, and a Go + Rust toolchain. Exit 0 = pass.
+# Requires: openssl, curl, python3, nc, and a Go toolchain. Exit 0 = pass.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -146,19 +151,24 @@ EOF
 printf '{"%s":["%s"]}' "$TOKEN" "$DOMAIN" > "$WORK/tokens.json"
 
 # ---------------------------------------------------------------------------
-say "3. build binaries"
+say "3. build binaries (Go edge + Go control plane)"
 ( cd "$REPO/go" && go build -o "$WORK/edge-controlplane" ./cmd/edge-controlplane ) \
   || fail "go build control plane"
-( cd "$REPO/rust" && cargo build --quiet -p parapet-edge --bin parapet-edge \
-  && cp "$REPO/rust/target/debug/parapet-edge" "$WORK/parapet-edge" ) \
-  || fail "cargo build edge"
+( cd "$REPO/go" && go build -o "$WORK/parapet-edge" ./cmd/edge-proxy ) \
+  || fail "go build edge"
 
 # ---------------------------------------------------------------------------
 say "4. start dummy upstream (stands in for parapet)"
 python3 -c "
 import http.server, socketserver
 class H(http.server.BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
     def do_GET(self):
+        if self.path == '/cacheme':
+            body=b'cacheable-body'
+            self.send_response(200); self.send_header('content-length',str(len(body)))
+            self.send_header('cache-control','public, max-age=60')
+            self.end_headers(); self.wfile.write(body); return
         body=b'hello-from-upstream'
         self.send_response(200); self.send_header('content-length',str(len(body)))
         # Echo the proto the edge forwarded so the test can assert http vs https.
@@ -178,17 +188,18 @@ KUBERNETES_BACKEND=fs KUBERNETES_FS="$WORK/manifests" \
   "$WORK/edge-controlplane" > "$WORK/cp.log" 2>&1 & PIDS+=($!)
 wait_for_port "$CP_PORT" "control plane"
 
-say "6. start the Rust edge (fetches cert + WAF rules; GeoIP from fixture DB)"
+say "6. start the Go edge (fetches cert + WAF rules; GeoIP from fixture DB; cache on)"
 # Point the edge at the conformance GeoIP fixtures so request.country resolves at
 # the edge. Loopback (127.0.0.1) is unmapped in the country fixture → "XX".
 EDGE_HTTPS_LISTEN="127.0.0.1:$EDGE_PORT" EDGE_HTTP_LISTEN="127.0.0.1:$EDGE_HTTP_PORT" \
+  EDGE_METRICS_LISTEN="" \
   EDGE_CP_ENDPOINT="https://localhost:$CP_PORT" EDGE_CP_TOKEN="$TOKEN" \
   EDGE_CP_CA="$WORK/ca.crt" EDGE_DOMAINS="$DOMAIN" \
   EDGE_UPSTREAM_ADDR="127.0.0.1:$UP_PORT" EDGE_UPSTREAM_TLS=false \
   EDGE_WAF_ENABLED=true \
+  EDGE_CACHE_ENABLED=true EDGE_CACHE_DIR="$WORK/cache" \
   WAF_GEOIP_DB="$REPO/conformance/geoip/iplocate-country.mmdb" \
   WAF_ASN_DB="$REPO/conformance/geoip/iplocate-asn.mmdb" \
-  RUST_LOG=info \
   "$WORK/parapet-edge" > "$WORK/edge.log" 2>&1 & PIDS+=($!)
 wait_for_port "$EDGE_PORT" edge
 wait_for_port "$EDGE_HTTP_PORT" "edge http"
@@ -247,6 +258,17 @@ ZONE="$(curl -s -o "$WORK/zone.body" -w '%{http_code}' --cacert "$WORK/ca.crt" \
 [ "$ZONE" = "403" ] || { cat "$WORK/edge.log" >&2; fail "/zoneblocked: want 403, got $ZONE"; }
 grep -q "blocked-by-zone" "$WORK/zone.body" || fail "/zoneblocked: missing zone WAF message"
 echo "  ✓ tenant zone (host→zone bound) blocked /zoneblocked at the edge"
+
+# Phase 4: the disk cache serves a cacheable object locally on the 2nd request.
+curl -s -D "$WORK/c1.hdr" --cacert "$WORK/ca.crt" --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" \
+  "https://$DOMAIN:$EDGE_PORT/cacheme" >/dev/null || fail "curl /cacheme (1) failed"
+grep -qiE "^x-cache: MISS[[:space:]]*$" "$WORK/c1.hdr" \
+  || { cat "$WORK/c1.hdr" >&2; fail "first /cacheme should be X-Cache: MISS"; }
+curl -s -D "$WORK/c2.hdr" --cacert "$WORK/ca.crt" --resolve "$DOMAIN:$EDGE_PORT:127.0.0.1" \
+  "https://$DOMAIN:$EDGE_PORT/cacheme" >/dev/null || fail "curl /cacheme (2) failed"
+grep -qiE "^x-cache: HIT[[:space:]]*$" "$WORK/c2.hdr" \
+  || { cat "$WORK/c2.hdr" >&2; fail "second /cacheme should be X-Cache: HIT"; }
+echo "  ✓ disk cache served /cacheme from the edge on the 2nd request (MISS→HIT)"
 
 # Negative: unknown SNI serves the self-signed fallback (CA validation must fail).
 if curl -sf --cacert "$WORK/ca.crt" --resolve "other.local:$EDGE_PORT:127.0.0.1" \
