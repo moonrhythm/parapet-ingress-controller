@@ -111,10 +111,14 @@ func (conn *trackBackendConn) Close() error {
 	return conn.Conn.Close()
 }
 
+// ReadFrom implements io.ReaderFrom so the sendfile/splice fast path
+// (io.Copy(conn, r), used by the transport when flushing request bodies)
+// stays zero-copy. Data flows from r into the socket — i.e. it is written
+// to the backend — so it counts toward writes, not reads.
 func (conn *trackBackendConn) ReadFrom(r io.Reader) (n int64, err error) {
 	n, err = conn.Conn.(io.ReaderFrom).ReadFrom(r)
 	if n > 0 {
-		conn.m.reads.Add(float64(n))
+		conn.m.writes.Add(float64(n))
 	}
 	if err != nil {
 		conn.trackClose()
