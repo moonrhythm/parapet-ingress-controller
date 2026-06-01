@@ -5,18 +5,25 @@ runs the WAF, fronting the in-cluster parapet ingress controller. A small
 in-cluster **control plane** distributes, per edge, only the certificates (and
 private keys) and WAF rules for the domains that edge serves.
 
-> Status: **design + Phase 1 in progress.** The control plane is **Go**
-> (`go/cmd/edge-controlplane`, reusing `go/cert`, `go/k8s`, `go/wafrule`); the
-> edge is **Rust** (`rust/edge`, Pingora). They share **only a language-neutral
-> HTTP/JSON contract** (below) — no shared library, so the two languages are
-> fully decoupled. Per [`CLAUDE.md`](CLAUDE.md) the contract changes here first.
+> Status: **Phases 1–4 implemented** (cert distribution, WAF distribution + edge
+> global eval, zones at edge, disk response cache); Phase 5 (purge) is design only.
+> Both the control plane (`go/cmd/edge-controlplane`, reusing `go/cert`, `go/k8s`,
+> `go/wafrule`) and the **edge** (`go/cmd/edge-proxy` + `go/edge`, on the parapet
+> framework) are **Go**. They share **only a language-neutral HTTP/JSON contract**
+> (below) on the wire. Per [`CLAUDE.md`](CLAUDE.md) the contract changes here first.
 
-> **Language split.** The control plane reads k8s objects and is a natural fit
-> for the Go controller's existing cert/k8s/wafrule packages, so it lives in
-> `go/`. The edge needs Pingora, so it stays in `rust/`. Nothing is shared in
-> code — the HTTP/JSON API is the entire interface. (An earlier iteration put a
-> gRPC control plane in `rust/controlplane`; that was superseded when the design
-> moved off keyless and to a Go REST service.)
+> **Both Go (was: Go control plane + Rust edge).** The edge was originally
+> Rust/Pingora (`rust/edge`) so the control plane and edge shared *nothing* in code
+> — only the HTTP/JSON API. After recurring bugs in pingora 0.8 (the
+> patched-vendored connection-pool / H2-idle leaks; see `rust/Cargo.toml`
+> `[patch.crates-io]`), the edge was **migrated to Go** on the parapet framework,
+> reusing the controller's `cert`/`wafrule`/`geoip` packages and `parapet/pkg/waf`.
+> `rust/edge` stays in the tree but is **dormant** (not built/tested/shipped by CI).
+> The control plane and edge still share only the wire contract — no shared
+> in-process state — but, both being Go, they now draw on the same libraries. See
+> [Implementation history](#implementation-history). (An even earlier iteration put
+> a gRPC control plane in `rust/controlplane`; that was superseded when the design
+> moved off keyless to a Go REST service.)
 
 > **Design note — this replaced an earlier *keyless* design.** Keyless TLS (the
 > private key stays in-cluster; the edge calls back to sign each handshake) puts
@@ -42,26 +49,28 @@ traffic); the cluster stays the source of truth:
 3. **The cluster stays authoritative for WAF.** The edge is a *lower* trust tier,
    so its WAF is an early-drop optimization; parapet re-runs the full WAF inside.
    A buggy, stale, or compromised edge can never mean an *unprotected* origin.
-4. **One WAF language everywhere.** The edge reuses `controller::waf` (cel-rust)
-   verbatim, so it's a third consumer of the same CEL contract the
-   [`conformance/`](conformance/) corpus already guards — no reimplementation.
+4. **One WAF engine everywhere.** The edge reuses `parapet/pkg/waf` (the same Go
+   CEL engine the controller uses) + `go/wafrule`, so rule semantics are identical
+   by construction and it shares the [`conformance/`](conformance/) corpus via the
+   Go surface — no reimplementation.
 
 ## Topology
 
 ```
                               ┌─ in cluster ──────────────────────────────┐
-client ──TLS──► edge (Pingora, outside k8s)                               │
+client ──TLS──► edge (Go/parapet, outside k8s)                            │
                   │ terminates public TLS *locally* (holds cert+key)      │
                   │ runs global + zone WAF (early drop)                   │
+                  │ optional disk response cache                          │
                   │                                                       │
                   ├── HTTPS GET (bearer token) ─► controlplane :8443      │
-                  │     GET /v1/certs/{sni} → cert+key+ETag (allowed SNI) │
-                  │     GET /v1/waf         → rules for edge domains (Ph.2)│
+                  │     GET /v1/certs?sni=… → cert+key+ETag (allowed SNI) │
+                  │     GET /v1/waf         → rules for edge domains      │
                   │   authz: bearer token → allowed domains/zones         │
                   │   reads: TLS Secrets, WAF ConfigMaps, Ingresses       │
                   │   refreshed on a timer; cached in memory only         │
                   │                                                       │
-                  └── data: h2c :80 / re-encrypt :443 ──► parapet ───► svc │
+                  └── data: HTTP/1.1 :80 / re-encrypt :443 ─► parapet ─► svc│
                         (sets X-Forwarded-For/-Proto/-Country/-ASN)        │
                         parapet re-runs WAF authoritatively + routes       │
                               └──────────────────────────────────────────┘
@@ -71,7 +80,7 @@ client ──TLS──► edge (Pingora, outside k8s)                           
 
 | Channel | From → to | Protocol | Exposure |
 |---|---|---|---|
-| **Data plane** | edge → parapet `:80`/`:443` | HTTP (h2c) or re-encrypted TLS | private path |
+| **Data plane** | edge → parapet `:80`/`:443` | HTTP/1.1 or re-encrypted TLS | private path |
 | **Control plane** | edge → controlplane `:8443` | HTTPS GET (server-TLS + bearer token) | private path, edge sources only |
 
 Separate ports on separate Services. The control plane distributes **private
@@ -82,14 +91,16 @@ keys**, so it must never be on the public LoadBalancer. See
 
 - **`go/cmd/edge-controlplane/`** (Go) — in-cluster HTTPS REST server. Reuses the
   Go controller's k8s client (`go/k8s`), cert table (`go/cert`), WAF rule parser
-  (`go/wafrule`), and route/zone logic. Serves `GET /v1/certs/{sni}` (cert+key)
+  (`go/wafrule`), and route/zone logic. Serves `GET /v1/certs?sni=…` (cert+key)
   and `GET /v1/waf` (rules). Not on the request path.
-- **`rust/edge/`** (Rust) — a Pingora proxy (openssl TLS backend, same as the
-  controller). Reuses `controller::cert::{Table, LoadedCert}` for SNI resolution
-  and the `TlsAccept::certificate_callback` pattern from
-  `controller::proxy::cert` to install the matched cert+key locally. Maintains an
-  in-memory cert store refreshed from `GET /v1/certs?sni=…`, and (Phase 2+)
-  `controller::waf` for CEL evaluation. Forwards to parapet with `X-Forwarded-*`.
+- **`go/cmd/edge-proxy/` + `go/edge/`** (Go) — a parapet-framework proxy. Reuses
+  `go/cert.Table` for SNI resolution (plugged into `tls.Config.GetCertificate`,
+  self-signed fallback on a miss), `go/wafrule` + `parapet/pkg/waf` for CEL
+  evaluation, and `go/geoip` for `request.country`/`request.asn`. Maintains an
+  in-memory cert store refreshed from `GET /v1/certs?sni=…` (`go/edge/certstore.go`,
+  `go/edge/cp.go`), runs global + zone WAF (`go/edge/waf.go`), optionally caches
+  responses on disk (`go/edge/cache/`), and forwards to parapet with
+  `X-Forwarded-*` (`go/edge/forward.go`). Keys live in memory only, never on disk.
 
 ## Authorization (bearer token, two endpoints)
 
@@ -106,9 +117,12 @@ check gates both endpoints:
 - `GET /v1/waf` → return only the zones / host-map entries for the token's domains.
 
 Server-side TLS is mandatory here: it encrypts the token **and the returned
-private key** in flight and lets the edge authenticate the control plane. Tokens
-are revocable (drop from the table) and rotatable, and requests are rate-limited
-to blunt enumeration.
+private key** in flight and lets the edge authenticate the control plane. The
+edge **enforces this**: it refuses to start if `EDGE_CP_ENDPOINT` is not
+`https://`, unless `EDGE_CP_ALLOW_PLAINTEXT=true` explicitly opts into a plaintext
+control plane on a trusted private network (matching the control plane's own
+optional plaintext mode). Tokens are revocable (drop from the table) and
+rotatable, and requests are rate-limited to blunt enumeration.
 
 > **Token risk (because this endpoint hands out private keys).** A leaked bearer
 > token exposes every key in that token's allowed set until it's revoked — the
@@ -176,11 +190,12 @@ the monotonic rollout counter surfaced for observability.
    `If-None-Match` with its cached ETag.
 2. The control plane authorizes the edge's token against the SNI, reads the
    cert+key from the k8s Secret, and returns it (or `304`).
-3. The edge parses the PEM into an openssl chain+key (cached via
-   `LoadedCert::parsed()`) and **atomically swaps** it into its in-memory
-   `cert::Table`. Keys are **never written to disk**.
-4. A handshake reads the live table and installs the matched cert+key locally —
-   no control-plane interaction on the handshake path.
+3. The edge parses the PEM into a `tls.Certificate` (`tls.X509KeyPair`) and
+   **atomically swaps** the rebuilt SNI index into its in-memory `cert.Table`
+   (`go/edge/certstore.go`). Keys are **never written to disk**.
+4. A handshake reads the live table via `tls.Config.GetCertificate` and serves the
+   matched cert+key locally — no control-plane interaction on the handshake path
+   (except the first handshake per new SNI in serve-all mode).
 
 **Pinned vs serve-all.** `EDGE_DOMAINS` lists the SNIs to pre-fetch (the edge's
 shard); a handshake for anything else gets the self-signed fallback. Leaving
@@ -212,9 +227,13 @@ are handled. The edge runs **global + zone** WAF as a first layer:
    `request.country` / `request.asn` work for edge-evaluated rules. When a DB is
    loaded the edge also forwards `X-Forwarded-Country` / `X-Forwarded-ASN` to
    parapet (overwriting any client value), matching the controller's upstream
-   behavior. With no DB loaded, `country` is `""` and `asn` is `0` (the field is
-   always present, so a rule never errors) — such a rule simply won't early-drop
-   at the edge, but parapet still re-runs it authoritatively.
+   behavior — including forwarding `X-Forwarded-ASN: 0` and `X-Forwarded-Country:
+   XX` for an unplaceable IP when the DB is loaded (the Go edge follows the Go
+   controller here; the former Rust edge omitted the ASN header when `asn==0`).
+   With no DB loaded, `country` is `""` and `asn` is `0` and neither header is
+   forwarded (the field is always present in the rule map, so a rule never errors)
+   — such a rule simply won't early-drop at the edge, but parapet still re-runs it
+   authoritatively.
 2. **Global WAF** (always) → block early on match.
 3. Resolve the zone from the `host_zone_map` → **zone WAF** → block on match.
 4. If not blocked, forward to parapet with `X-Forwarded-For/-Proto/-Country/-ASN`.
@@ -244,52 +263,63 @@ close to clients and (above) can be 200–300 ms from the cluster, so serving a
 cacheable object locally removes a full origin round trip. Enabled with
 `EDGE_CACHE_ENABLED=true`.
 
-> **Edge-only feature.** The edge is Rust-only by design (see *Language split*);
-> there is no Go edge, so this is **not** a parapet-core behavior change and
-> carries no `go/` mirror or `conformance/` obligation. parapet itself does not
-> cache. Recorded as an edge divergence in [`SPEC.md`](SPEC.md).
+> **Edge-only feature.** The parapet *controller* does not cache, so this is not a
+> parapet-core behavior change and carries no controller mirror or `conformance/`
+> obligation — it lives only in the edge (`go/edge/cache`). Recorded as an edge
+> divergence in [`SPEC.md`](SPEC.md).
 
 ### What it does
 
-- **Disk-backed.** Pingora 0.8 ships only an in-memory `MemCache` ("testing");
-  there is no disk Storage in the OSS release (cloudflare/pingora#210), so the
-  edge implements the `pingora::cache::Storage` trait against the filesystem
-  (`rust/edge/src/diskcache.rs`). A disk cache survives restarts and isn't bounded
-  by RSS (matters given the edge's memory-pressure history). Total size is bounded
-  by an LRU eviction manager (`EDGE_CACHE_MAX_SIZE`); per-object size by
-  `EDGE_CACHE_MAX_FILE_SIZE`, enforced by pingora's own size tracker — a
-  `Content-Length` over the cap is simply not cached (the client still gets the
-  full response); an oversize **chunked** response is aborted mid-stream.
+- **Disk-backed.** Hand-rolled in `go/edge/cache` (parapet has no caching layer):
+  a middleware wrapping the upstream forwarder that stores bodies on disk with a
+  JSON `.meta` sidecar. A disk cache survives restarts and isn't bounded by RSS
+  (matters given the edge's memory-pressure history). Total size is bounded by an
+  in-memory **LRU** keyed on body bytes (`EDGE_CACHE_MAX_SIZE`); per-object size by
+  `EDGE_CACHE_MAX_FILE_SIZE`. A `Content-Length` over the cap is simply not cached
+  (the client still gets the full response). A GET is cached **only with a
+  `Content-Length`** and committed only once written bytes == `Content-Length` —
+  so a truncated response (client disconnect, upstream error) is never stored;
+  a chunked (no-`Content-Length`) GET passes through uncached (Go's
+  `httputil.ReverseProxy` gives no clean end-of-stream signal to a wrapping
+  `ResponseWriter`). HEAD has no body and is unaffected.
 - **Honor-origin policy.** Caches **only** when the origin opts in via response
   `Cache-Control`/`Expires` freshness — no forced or heuristic TTL. Refuses
-  `private`/`no-store`, any `Set-Cookie`, and `Vary: *`. Honors `Vary` (keys per
-  varied request header). `GET`/`HEAD` only; cacheable status codes per RFC.
-  **Client** request `Cache-Control` (`no-cache`/`no-store`) is **ignored by
-  design** — like a CDN, so a client can't bust the shared cache (a DoS vector);
-  origins needing freshness simply mark responses uncacheable.
+  `private`/`no-store`/`no-cache`, any `Set-Cookie`, and `Vary: *`. Honors `Vary`
+  (keys per varied request header). `GET`/`HEAD` only; a conservative set of
+  cacheable status codes. **Client** request `Cache-Control` (`no-cache`/
+  `no-store`) is **ignored by design** — like a CDN, so a client can't bust the
+  shared cache (a DoS vector); origins needing freshness simply mark responses
+  uncacheable.
 - **Cache lock.** Concurrent misses for one key collapse into a single origin
-  fetch (no stampede).
+  fetch (no stampede): the first request fills while streaming to its own client
+  and to disk; others wait (≤ a 2s timeout) then read the just-filled entry, or
+  fall through to their own fetch if it turned out uncacheable.
 - **Observability.** Sets `X-Cache: HIT|MISS` (HIT = served from the edge cache,
-  MISS = fetched from parapet). No metrics endpoint yet — the edge exposes none.
+  MISS = fetched from parapet). Cache hit/miss counts are not yet a Prometheus
+  metric; the edge does expose a `:9187` metrics endpoint (connections, bytes, Go
+  runtime) — `EDGE_METRICS_LISTEN`, set `""` to disable.
 
 ### On-disk layout (sharded by hash)
 
 ```
-<EDGE_CACHE_DIR>/<aa>/<hash>.body   response body bytes
-<EDGE_CACHE_DIR>/<aa>/<hash>.meta   framed sidecar: CacheMeta + CompactCacheKey
-<EDGE_CACHE_DIR>/tmp/<hash>.<seq>.* in-progress writes, atomically renamed
+<EDGE_CACHE_DIR>/<aa>/<variant>.body   response body bytes
+<EDGE_CACHE_DIR>/<aa>/<variant>.meta   JSON sidecar: status, headers, vary, created, fresh-until, size
+<EDGE_CACHE_DIR>/tmp/<variant>.<seq>   in-progress writes, atomically renamed
 ```
 
-Writes are temp-file + fsync + atomic `rename`, with the `.meta` written **last**
-so its presence implies a complete `.body`; a crash mid-write leaves only an
-orphan, reaped later. The eviction manager's accounting is in-memory, so on
-startup the edge **scans the cache dir and re-admits** surviving entries (the
-sidecar carries the `CompactCacheKey` for exactly this) — the byte cap holds
-across restarts, and orphans/torn writes are reaped. The scan runs **in the
-background, off the serving path** (it reads every `.meta`, so it can take
-seconds on a large cache); the edge accepts traffic immediately and the byte cap
-simply lags until the scan completes. Reaping is age-gated so a concurrent
-in-flight commit is never deleted.
+`variant` = `hash(primary ⊕ Vary-variance)`, where `primary = hash(host + method
++ scheme + uri)` and the variance is the request's values for the response's
+`Vary` headers; `<aa>` is the first 2 hex chars (shard). Writes are temp-file +
+fsync + atomic `rename`, with the `.meta` written **last** so its presence implies
+a complete `.body`; a crash mid-write leaves only an orphan, reaped later. The LRU
+accounting is in-memory, so on startup the edge **scans the cache dir and
+re-admits** surviving entries (each `.meta` carries the body size + the primary's
+`Vary` names, re-learned for keying) — the byte cap holds across restarts, and
+orphans/torn writes/expired entries are reaped. The scan runs **in the background,
+off the serving path** (it reads every `.meta`, so it can take seconds on a large
+cache); the edge accepts traffic immediately and the byte cap simply lags until
+the scan completes. Reaping is age-gated so a concurrent in-flight commit is never
+deleted.
 
 ### WAF interaction (security note)
 
@@ -312,12 +342,23 @@ EDGE_CACHE_PURGE_POLL_INTERVAL   poll GET /v1/purges (default 10s; lower than th
 EDGE_CACHE_PURGE_SWEEP_INTERVAL  background reaper cadence (default 300s)
 ```
 
+`EDGE_CACHE_PURGE_POLL_INTERVAL` / `EDGE_CACHE_PURGE_SWEEP_INTERVAL` belong to the
+**design-only** purge feature below and are **not read by any code yet**.
+
 A fetch/IO error on the read path **fails static** (degrades to a cache miss →
 serve from origin), never erroring the client request. **Not yet:**
 stale-while-revalidate / stale-if-error, Range/partial caching, per-route policy
-via Ingress annotations, and cache metrics + a `:9187` listener.
+via Ingress annotations, chunked-GET caching (a GET needs a `Content-Length`),
+and cache hit/miss Prometheus metrics (the `:9187` listener exists for
+connection/byte/runtime metrics).
 
 ### Purge / invalidation
+
+> **Status: design only — not implemented** (in neither the edge nor the control
+> plane). The mechanism below was sketched against the former Rust/pingora cache;
+> the equivalent will be built in `go/edge/cache` (lazy epochs checked in the
+> lookup gate + a background reaper) when Phase 5 lands. The CP `/v1/purges`
+> endpoints do not exist yet either.
 
 Invalidation is **pulled from the control plane**, exactly like cert and WAF
 distribution: an operator publishes a purge once at the control plane and every
@@ -394,7 +435,7 @@ natural later addition.
 ```
 edge           :443   public TLS (terminated locally)       EDGE_HTTPS_LISTEN
                :80    public plaintext (on; ""=disable)     EDGE_HTTP_LISTEN
-parapet        :80    data (h2c from edge)                 unchanged role, now behind edge
+parapet        :80    data (HTTP/1.1 from edge)            unchanged role, now behind edge
                :443   data (re-encrypt from edge)
                :9187  metrics
 controlplane   :8443  HTTPS GET (server-TLS + bearer)       NEW — Go, own Service
@@ -408,8 +449,9 @@ controlplane   :8443  HTTPS GET (server-TLS + bearer)       NEW — Go, own Serv
 `EDGE_HTTP_LISTEN` (default `0.0.0.0:80`; set to `""` to disable) adds a second,
 plaintext listener to the same proxy service. The edge **does not** redirect
 http→https itself; it forwards the request to parapet with `X-Forwarded-Proto:
-http` (the scheme is detected per connection from the TLS digest, so the TLS
-listener still forwards `https`). parapet's per-ingress `redirect-https` plugin
+http` (the scheme is set from the terminating listener — `r.TLS`, surfaced as
+`X-Forwarded-Proto` by the parapet server — so the TLS listener still forwards
+`https`). parapet's per-ingress `redirect-https` plugin
 then makes the decision — 301 to https, or serve — exactly as it does without the
 edge. The global/zone WAF runs on this listener too. Keeping the redirect policy
 in the core means it stays a single source of truth (annotation-driven, with the
@@ -449,22 +491,45 @@ edge *can* be co-located, prefer keyless (recoverable in git history).
 
 ## Conformance
 
-The edge reuses `controller::waf`, so it passes the existing
-[`conformance/waf-cel-corpus.md`](conformance/waf-cel-corpus.md) by construction.
+The edge reuses `parapet/pkg/waf` (the controller's Go CEL engine), so it passes
+the existing [`conformance/waf-cel-corpus.md`](conformance/waf-cel-corpus.md) by
+construction — via the same Go surface the controller is checked against.
 The HTTPS API and the "edge evaluates global+zone WAF identically to parapet,
 which remains authoritative" property are recorded in [`SPEC.md`](SPEC.md).
 
 ## Build layout
 
-- **Control plane** is a Go binary in the existing `go/` module
-  (`go/cmd/edge-controlplane`), reusing `go/cert`, `go/k8s`, `go/wafrule`. Built
-  and tested with the Go toolchain (`cd go && go test ./... && go vet ./...`).
-- **Edge** is a Rust binary using Pingora's **openssl** TLS backend (the
-  controller's backend), so it's a normal member of the `rust/` workspace — no
-  separate workspace, no boringssl. It depends on `controller` with the `proxy`
-  feature (for `cert::LoadedCert::parsed()` + later `waf`).
+- **Control plane** is a Go binary in the `go/` module
+  (`go/cmd/edge-controlplane`, image `go/Dockerfile.edge-controlplane`), reusing
+  `go/cert`, `go/k8s`, `go/wafrule`.
+- **Edge** is a Go binary in the same `go/` module (`go/cmd/edge-proxy` + the
+  `go/edge` lib, image `go/Dockerfile.edge`), on the parapet framework, reusing
+  `go/cert`, `go/wafrule`, `go/geoip`, and `parapet/pkg/waf`. Pure Go (no CGO/
+  brotli) → static binary on `distroless/static`, with the IPLocate GeoIP MMDBs
+  baked like the controller image.
 
-The two never link; the HTTP/JSON contract above is their entire interface.
+Both build/test with the Go toolchain (`cd go && go test ./... && go vet ./...`).
+They never share in-process state; the HTTP/JSON contract above is their entire
+runtime interface (they do share Go libraries at compile time).
+
+`.github/workflows/edge-build.yaml` builds both images (tags `:controlplane-<sha>`
+and `:edge-<sha>`); `edge-e2e.yaml` runs the cluster-free smoke test
+(`deploy/edge/e2e/run.sh`). Image tag prefixes are component-keyed (not
+language-keyed), so `:edge-<sha>` carried over the Rust→Go migration unchanged.
+
+## Implementation history
+
+The edge was originally **Rust/Pingora** (`rust/edge`, openssl backend, a
+`rust/` workspace member depending on the `controller` crate). It was migrated to
+**Go** on the parapet framework after recurring memory bugs in pingora 0.8 —
+notably the per-peer `ConnectionPool` leak (cloudflare/pingora#748) and the
+downstream HTTP/2 idle-connection leak, both worked around with patched-vendored
+crates (`rust/Cargo.toml` `[patch.crates-io]`) but not fully resolved upstream.
+The Go edge reuses the controller's Go libraries (`cert`, `wafrule`, `geoip`,
+`parapet/pkg/waf`), so it shares the WAF/GeoIP contract by construction and gets
+HTTP/2 `Cookie` reassembly for free from `net/http`. `rust/edge` remains in the
+tree but is **dormant** — not built, tested, deployed, or shipped by CI; remove it
+once the Go edge has soaked in production.
 
 ## Phasing
 

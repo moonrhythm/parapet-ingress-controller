@@ -9,7 +9,7 @@ vars, and metric names.
 - **[`rust/`](rust/)** — the Pingora (Rust) implementation. Guidance: [`rust/README.md`](rust/README.md).
 - **[`SPEC.md`](SPEC.md)** — the shared contract (annotations, env, metrics, per-request order, Go↔Rust divergences). **Source of truth: change behavior here first.**
 - **[`WAF.md`](WAF.md)** — the WAF design (shared across both).
-- **[`EDGE.md`](EDGE.md)** — the out-of-cluster edge proxy (Rust/Pingora) + in-cluster control plane (Go, REST cert+key + WAF distribution). Phase 1 implemented.
+- **[`EDGE.md`](EDGE.md)** — the out-of-cluster edge proxy (Go, parapet framework) + in-cluster control plane (Go, REST cert+key + WAF distribution). Phases 1–4 implemented.
 - **[`conformance/`](conformance/)** — language-neutral fixtures both implementations must satisfy (e.g. the WAF CEL corpus).
 
 > Neither implementation is "the migration target" anymore — they are both
@@ -32,17 +32,21 @@ go/                     # Go implementation — module .../parapet-ingress-contr
   metric/  state/  debounce/  wafrule/  retry.go  Dockerfile  Makefile
   edgecp/               #   edge control-plane lib (cert store, authz, reload, REST server)
   cmd/edge-controlplane/ #  edge control-plane binary (see EDGE.md)
+  edge/                 #   edge proxy lib (cert store, CP client, WAF, disk cache)
+  cmd/edge-proxy/       #   out-of-cluster edge proxy binary (parapet framework; see EDGE.md)
 rust/                   # Rust implementation
   README.md  controller/  Dockerfile  PHASE*.md  bench/  spike/
-  edge/                 #   out-of-cluster Pingora edge proxy (openssl; workspace member)
+  edge/                 #   DORMANT former Pingora edge proxy (migrated to go/cmd/edge-proxy)
 ```
 
-> **Edge control plane.** The control plane is **Go** (`go/cmd/edge-controlplane`
-> + `go/edgecp`), reusing `go/cert`/`go/k8s`/`go/wafrule`; it serves per-edge
-> cert+key (and, later, WAF rules) over an HTTPS REST + bearer-token API. The
-> **edge** (`rust/edge`) is a normal `rust/` workspace member on the openssl
-> backend. They share only the HTTP/JSON contract — no shared code. See
-> [`EDGE.md`](EDGE.md).
+> **Edge control plane + edge.** Both are **Go**. The control plane
+> (`go/cmd/edge-controlplane` + `go/edgecp`) reuses `go/cert`/`go/k8s`/`go/wafrule`
+> and serves per-edge cert+key + WAF rules over an HTTPS REST + bearer-token API.
+> The **edge** (`go/cmd/edge-proxy` + `go/edge`, on the parapet framework) reuses
+> `go/cert`/`go/wafrule`/`go/geoip` + `parapet/pkg/waf`. They share only the
+> HTTP/JSON contract on the wire. The edge was migrated off Rust/Pingora after
+> recurring pingora 0.8 bugs; `rust/edge` stays in the tree but is **dormant** (not
+> built/tested/shipped by CI). See [`EDGE.md`](EDGE.md).
 
 ## Working in this repo
 

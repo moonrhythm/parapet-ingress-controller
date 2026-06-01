@@ -1,20 +1,19 @@
 name: edge-e2e
 
-# Cluster-free cross-language smoke test: real Go control plane (fs backend) +
-# real Rust edge + dummy upstream, wired by deploy/edge/e2e/run.sh. Proves the
-# edge fetches a cert+key from the control plane (bearer-authorized), terminates
-# TLS locally with it, and forwards to the upstream. See EDGE.md.
+# Cluster-free smoke test: real Go control plane (fs backend) + real Go edge +
+# dummy upstream, wired by deploy/edge/e2e/run.sh. Proves the edge fetches a
+# cert+key + WAF rules from the control plane (bearer-authorized), terminates TLS
+# locally, runs the global/zone/GeoIP WAF, serves the disk cache, and forwards to
+# the upstream. Both binaries are Go now. See EDGE.md.
 on:
   push:
     paths:
       - 'go/**'
-      - 'rust/**'
       - 'deploy/edge/e2e/**'
       - '.github/workflows/edge-e2e.yaml'
   pull_request:
     paths:
       - 'go/**'
-      - 'rust/**'
       - 'deploy/edge/e2e/**'
       - '.github/workflows/edge-e2e.yaml'
 
@@ -27,15 +26,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.3'
-      - name: Install native build deps (pingora openssl backend)
+      - name: Install test deps (openssl, curl, python3, nc)
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake clang pkg-config libssl-dev netcat-openbsd
-      - run: rm -f rust/.cargo/config.toml # macOS-only OPENSSL_DIR override
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.95.0
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust
+          sudo apt-get install -y --no-install-recommends openssl curl python3 netcat-openbsd ca-certificates
       - run: bash deploy/edge/e2e/run.sh

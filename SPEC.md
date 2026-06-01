@@ -76,9 +76,11 @@ doesn't lose cookies — a dropped session cookie shows up as **random forced
 logouts under HTTP/2**, browser-graded (Safari splits most aggressively).
 
 - **Go** gets this for free: `net/http`'s HTTP/2 server reassembles `Cookie`
-  before the request reaches proxy/middleware code.
+  before the request reaches proxy/middleware code — this covers both the Go
+  controller and the Go edge proxy.
 - **Rust** must do it explicitly — **Pingora does not** reassemble; the controller
-  and the edge proxy rejoin the crumbs in `request_filter` (`coalesce_cookies`).
+  rejoins the crumbs in `request_filter` (`coalesce_cookies`). (The former Rust
+  edge did the same; the edge is now Go and inherits the free reassembly.)
 
 ## WAF
 
@@ -113,11 +115,13 @@ untouched.
 ## Edge control plane (cert+key + WAF distribution)
 
 Full design in **[EDGE.md](EDGE.md)**. An optional out-of-cluster **edge** proxy
-(`rust/edge`, Pingora) terminates public TLS **locally** and runs the WAF. A
-**Go** in-cluster **control plane** (`go/cmd/edge-controlplane`) distributes, per
-edge, the cert+key and WAF rules for that edge's domains over an **HTTPS REST**
-API (`GET /v1/certs?sni=…`, `GET /v1/waf`) authenticated by a **per-edge bearer
-token** → allowed domains/zones. Contract-relevant invariants:
+(`go/cmd/edge-proxy`, on the parapet framework) terminates public TLS **locally**
+and runs the WAF. A **Go** in-cluster **control plane** (`go/cmd/edge-controlplane`)
+distributes, per edge, the cert+key and WAF rules for that edge's domains over an
+**HTTPS REST** API (`GET /v1/certs?sni=…`, `GET /v1/waf`) authenticated by a
+**per-edge bearer token** → allowed domains/zones. (The edge was migrated off the
+former Rust/Pingora implementation, `rust/edge`, now dormant.) Contract-relevant
+invariants:
 
 - **Cert+key distribution (not keyless)** — the edge holds the cert+key for its
   allowed domains and terminates TLS locally (no per-handshake round trip; certs
@@ -128,35 +132,41 @@ token** → allowed domains/zones. Contract-relevant invariants:
   early-drop layer, but parapet **re-runs the full WAF** inside and resolves
   zones from its own router. Edge-vs-parapet zone-resolution drift is non-fatal
   (parapet corrects it). Never disable parapet's WAF for edge traffic.
-- **Same WAF contract** — the edge reuses the `rust/` CEL engine, so it's a third
-  consumer of the [`conformance/`](conformance/) corpus; rule semantics are
-  identical by construction. Rules ship as YAML over the wire.
+- **Same WAF contract** — the edge reuses **`parapet/pkg/waf`** (the same Go CEL
+  engine the controller uses) and `go/wafrule`, so rule semantics are identical by
+  construction and it shares the [`conformance/`](conformance/) corpus via the Go
+  surface. Rules ship as YAML over the wire.
 - **Separate channel** — control plane on its own port/Service (`:8443`), HTTPS +
   bearer token, reachable only by edges over a private path, never on the public
   LoadBalancer.
-- **Language split** — control plane is **Go** (reuses `go/cert`, `go/k8s`,
-  `go/wafrule`); edge is **Rust** (Pingora). They share only the HTTP/JSON
-  contract — no shared library.
+- **Both Go** — control plane and edge are both Go. The control plane reuses
+  `go/cert`, `go/k8s`, `go/wafrule`; the edge reuses `go/cert`, `go/wafrule`,
+  `go/geoip`, and `parapet/pkg/waf`. They still share only the HTTP/JSON contract
+  on the wire (no shared in-process state), though both being Go they now draw on
+  the same libraries. (Earlier the edge was Rust/Pingora and shared nothing in
+  code; it was migrated to Go — see EDGE.md "Implementation history".)
 - **Response cache (edge-only)** — the edge has an optional disk-backed HTTP
   response cache (`EDGE_CACHE_*`, off by default): **honor-origin** policy (caches
   only on explicit `Cache-Control`/`Expires` freshness; refuses
-  `private`/`no-store`/`Set-Cookie`/`Vary: *`; ignores **client** request
-  `Cache-Control`, CDN-style), `GET`/`HEAD`, LRU-bounded, restart-persistent,
-  fail-static, `X-Cache: HIT|MISS`. **parapet does not cache**
-  — there is no Go equivalent and no conformance obligation. A cache **hit** is
-  served without contacting parapet, so parapet's authoritative WAF does not
-  re-run on hits (only origin-opted-in public content is cached). See
+  `private`/`no-store`/`no-cache`/`Set-Cookie`/`Vary: *`; ignores **client**
+  request `Cache-Control`, CDN-style), `GET`/`HEAD`, LRU-bounded, restart-
+  persistent, fail-static, `X-Cache: HIT|MISS`. This is an **edge-only** feature:
+  the parapet controller does not cache, so there is no controller equivalent and
+  no conformance obligation. A cache **hit** is served without contacting parapet,
+  so parapet's authoritative WAF does not re-run on hits (only origin-opted-in
+  public content is cached). One Go-edge nuance vs the former Rust edge: a GET is
+  cached only with a `Content-Length` within the per-object cap (chunked GETs pass
+  through uncached, to never store a truncated body). See
   [EDGE.md](EDGE.md#response-cache-at-the-edge).
 - **Cache purge (edge-only, design)** — invalidation is **pulled** from the
   control plane (`GET`/`POST /v1/purges`, a per-edge-scoped journal + cursor),
   mirroring cert/WAF distribution; no inbound port on the edge. Lazy **epoch**
-  invalidation (global / host / url-keyed-on-`host⊕uri`) is checked at lookup —
-  chosen because the on-disk hash mixes primary+`Vary` variance, so a URL's
-  variants can't be enumerated for eager deletion. Epochs use the **edge's own
-  clock** at apply time (no trusted CP timestamp; the cursor makes apply
-  idempotent); a background reaper reclaims disk. Scopes: exact-URL (all
-  variants), whole-host/zone, flush-all. Edge-only — no Go mirror, no conformance
-  obligation. See [EDGE.md](EDGE.md#purge--invalidation).
+  invalidation (global / host / url-keyed-on-`host⊕uri`) is checked at lookup.
+  Epochs use the **edge's own clock** at apply time (no trusted CP timestamp; the
+  cursor makes apply idempotent); a background reaper reclaims disk. Scopes:
+  exact-URL (all variants), whole-host/zone, flush-all. Edge-only — no controller
+  mirror, no conformance obligation. **Design only — not implemented** in either
+  the edge or the control plane. See [EDGE.md](EDGE.md#purge--invalidation).
 
 ## Configuration (environment variables)
 
