@@ -29,18 +29,24 @@ type Forwarder struct {
 
 // NewForwarder builds a forwarder to addr (host:port). useTLS selects re-encrypt
 // (TLS) vs plaintext HTTP/1.1; sni is the SNI/Host presented when re-encrypting
-// (ignored otherwise; "" lets the transport default to addr's host).
+// (ignored otherwise; "" lets the transport default to addr's host). getClientCert,
+// when non-nil (and useTLS), presents the edge's data-plane mTLS client cert on the
+// re-encrypt handshake so the core can CA-only-trust this edge (EDGE_DATAPLANE_MTLS).
 //
 // The plaintext hop is HTTP/1.1, matching the former Rust edge (pingora's
 // HttpPeer with tls=false defaults to HTTP/1.1, not h2c); parapet's :80 accepts
 // it. Re-encrypt uses TLS with InsecureSkipVerify (a cluster-internal hop,
-// matching the controller's upstream posture).
-func NewForwarder(addr string, useTLS bool, sni string) *Forwarder {
+// matching the controller's upstream posture) — the edge authenticates ITSELF to
+// the core with its client cert; it does not yet verify the core's server cert.
+func NewForwarder(addr string, useTLS bool, sni string, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error)) *Forwarder {
 	var tr http.RoundTripper
 	if useTLS {
 		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // cluster-internal hop, matches the controller's upstream posture
 		if sni != "" {
 			tlsConfig.ServerName = sni
+		}
+		if getClientCert != nil {
+			tlsConfig.GetClientCertificate = getClientCert
 		}
 		// HTTPSTransport sets r.URL.Scheme = "https" and dials r.URL.Host with TLS.
 		tr = &upstream.HTTPSTransport{TLSClientConfig: tlsConfig}

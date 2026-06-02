@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"bytes"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -149,6 +150,58 @@ func (c *CpClient) FetchWaf(currentEtag string) (WafFetch, error) {
 	default:
 		return WafFetch{}, fmt.Errorf("control plane returned %d for /v1/waf", resp.StatusCode)
 	}
+}
+
+// EdgeCertFetch is the outcome of a data-plane client-cert issuance.
+type EdgeCertFetch struct {
+	ChainPEM []byte // leaf-first chain (leaf + edge CA); pair with the locally-held key
+	NotAfter string // RFC3339, for renewal scheduling
+	Serial   string
+}
+
+type edgeCertReqBody struct {
+	CSRPEM string `json:"csr_pem"`
+}
+
+type edgeCertRespBody struct {
+	ChainPEM string `json:"chain_pem"`
+	NotAfter string `json:"not_after"`
+	Serial   string `json:"serial"`
+}
+
+// FetchEdgeCert posts a CSR to POST /v1/edge-cert and returns the signed chain. The
+// edge holds the matching private key locally; only the public-key CSR and the
+// chain transit. Any non-200 is an error the caller handles fail-static (keeps the
+// last-good in-memory cert).
+func (c *CpClient) FetchEdgeCert(csrPEM []byte) (EdgeCertFetch, error) {
+	reqBody, err := json.Marshal(edgeCertReqBody{CSRPEM: string(csrPEM)})
+	if err != nil {
+		return EdgeCertFetch{}, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.base+"/v1/edge-cert", bytes.NewReader(reqBody))
+	if err != nil {
+		return EdgeCertFetch{}, fmt.Errorf("request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return EdgeCertFetch{}, fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return EdgeCertFetch{}, fmt.Errorf("control plane returned %d for /v1/edge-cert", resp.StatusCode)
+	}
+	var body edgeCertRespBody
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxCertBody)).Decode(&body); err != nil {
+		return EdgeCertFetch{}, fmt.Errorf("decode: %w", err)
+	}
+	return EdgeCertFetch{
+		ChainPEM: []byte(body.ChainPEM),
+		NotAfter: body.NotAfter,
+		Serial:   body.Serial,
+	}, nil
 }
 
 // do issues an authorized GET, optionally with If-None-Match. The body must be
