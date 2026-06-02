@@ -4,42 +4,80 @@ import (
 	"strings"
 )
 
-// Authz maps a per-edge bearer token to the set of domains that edge may fetch
-// (certs and, in Phase 2, WAF zones). Deny by default. Phase 1 loads the table
-// from static config; a later phase can source it from a k8s Secret/ConfigMap.
-//
-// The bearer token is the edge's credential over server-side HTTPS — see
-// EDGE.md "Authorization". A leaked token exposes only that token's allowed
-// domains until revoked, so tokens should be short-lived/rotated and scoped.
+// Entry is one edge's registry record: its data-plane identity (id, stamped into
+// the leaf SAN for audit/WAF-zone attribution — never load-bearing for trust under
+// the CA-only model), the domains it may fetch certs/WAF for, and a disabled
+// tombstone. A disabled (or absent) entry is treated as UNKNOWN everywhere — a full
+// lockout (no mint, no /v1/certs, no /v1/waf). Blacklisting (disabled:true) stops
+// FUTURE minting only; the already-minted leaf is revoked by CA rotation. See
+// EDGE-AUTOTRUST.md "Revocation = CA rotation".
+type Entry struct {
+	ID       string
+	Domains  []string
+	Disabled bool
+}
+
+// Authz maps a per-edge bearer token to its registry Entry. Deny by default; a
+// disabled or unknown token is denied identically (callers distinguish only
+// 401 vs 403 via Known/Allowed, never disabled-vs-absent).
 type Authz struct {
-	// token -> allowed domain patterns (exact or single-label wildcard "*.x.com")
-	tokens map[string][]string
+	entries map[string]Entry
 }
 
-// NewAuthz builds the table from a token→domains map. Domain patterns are
-// lowercased; matching mirrors cert.Table (exact, then single-label wildcard),
-// plus a bare "*" catch-all that authorizes the token for every host.
+// NewAuthz builds the table from the legacy token→domains shape (no id, never
+// disabled). Retained for the existing cert/WAF distribution path and tests.
 func NewAuthz(tokens map[string][]string) *Authz {
-	t := make(map[string][]string, len(tokens))
+	entries := make(map[string]Entry, len(tokens))
 	for tok, domains := range tokens {
-		ds := make([]string, 0, len(domains))
-		for _, d := range domains {
-			ds = append(ds, strings.ToLower(strings.TrimSpace(d)))
-		}
-		t[tok] = ds
+		entries[tok] = Entry{Domains: normalizeDomains(domains)}
 	}
-	return &Authz{tokens: t}
+	return NewAuthzEntries(entries)
 }
 
-// Allowed reports whether the token is known and authorized for host. An unknown
-// token (or empty host) is denied. A token whose domain list contains a bare "*"
-// is authorized for every (non-empty) host — the catch-all for a serve-all edge
-// that may front any domain (pure anycast/failover, where per-edge sharding buys
-// nothing; see EDGE.md). The returned bool is the only signal — callers must not
-// distinguish "unknown token" from "known but unauthorized" to the client beyond
-// 401 vs 403 (handled in the server).
+// NewAuthzEntries builds the table from the richer registry shape
+// ({id, domains, disabled}). Domains are lowercased/trimmed; the id is
+// lowercased/trimmed for canonical SAN derivation.
+func NewAuthzEntries(entries map[string]Entry) *Authz {
+	t := make(map[string]Entry, len(entries))
+	for tok, e := range entries {
+		t[tok] = Entry{
+			ID:       strings.ToLower(strings.TrimSpace(e.ID)),
+			Domains:  normalizeDomains(e.Domains),
+			Disabled: e.Disabled,
+		}
+	}
+	return &Authz{entries: t}
+}
+
+func normalizeDomains(domains []string) []string {
+	ds := make([]string, 0, len(domains))
+	for _, d := range domains {
+		ds = append(ds, strings.ToLower(strings.TrimSpace(d)))
+	}
+	return ds
+}
+
+// lookup is the single chokepoint: a missing OR disabled token is "not found", so
+// Known/Allowed/Identity all treat a blacklisted edge as fully locked out.
+func (a *Authz) lookup(token string) (Entry, bool) {
+	e, ok := a.entries[token]
+	if !ok || e.Disabled {
+		return Entry{}, false
+	}
+	return e, true
+}
+
+// Known reports whether the token exists and is not disabled (for 401-vs-403).
+func (a *Authz) Known(token string) bool {
+	_, ok := a.lookup(token)
+	return ok
+}
+
+// Allowed reports whether the token is known (non-disabled) and authorized for
+// host. Matching mirrors cert.Table: exact, single-label wildcard, plus a bare "*"
+// catch-all that authorizes every host.
 func (a *Authz) Allowed(token, host string) bool {
-	domains, ok := a.tokens[token]
+	e, ok := a.lookup(token)
 	if !ok {
 		return false
 	}
@@ -47,14 +85,14 @@ func (a *Authz) Allowed(token, host string) bool {
 	if name == "" {
 		return false
 	}
-	for _, d := range domains {
+	for _, d := range e.Domains {
 		if d == "*" || d == name {
 			return true
 		}
 	}
 	if i := strings.IndexByte(name, '.'); i >= 0 {
 		wildcard := "*" + name[i:]
-		for _, d := range domains {
+		for _, d := range e.Domains {
 			if d == wildcard {
 				return true
 			}
@@ -63,8 +101,13 @@ func (a *Authz) Allowed(token, host string) bool {
 	return false
 }
 
-// Known reports whether a token exists at all (for 401 vs 403 distinction).
-func (a *Authz) Known(token string) bool {
-	_, ok := a.tokens[token]
-	return ok
+// Identity returns the token's edge id (for SAN stamping on /v1/edge-cert). It
+// returns ok=false for an unknown/disabled token, or one with no id grant — so a
+// token without an explicit identity cannot mint a data-plane leaf (403).
+func (a *Authz) Identity(token string) (string, bool) {
+	e, ok := a.lookup(token)
+	if !ok || e.ID == "" {
+		return "", false
+	}
+	return e.ID, true
 }

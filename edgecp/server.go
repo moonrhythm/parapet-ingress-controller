@@ -4,19 +4,34 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // Server is the edge control-plane HTTP API. It authorizes each request by the
 // edge's bearer token (see Authz), then serves the cert+key for an allowed SNI.
-// WAF distribution (GET /v1/waf) is added via WithWAF. See ../EDGE.md.
+// WAF distribution (GET /v1/waf) is added via WithWAF; data-plane client-cert
+// issuance (POST /v1/edge-cert) and the tokenless trust bundle
+// (GET /v1/trust-bundle) via WithSigner. See ../EDGE.md.
 type Server struct {
 	certs *CertStore
 	authz *Authz
 	waf   *WafStore // optional (nil = WAF distribution disabled, /v1/waf → 404)
+
+	// signer mints data-plane leaves and provides the trust bundle. nil ⇒
+	// /v1/edge-cert 404s and /v1/trust-bundle 503s (not yet initialized). It is an
+	// atomic.Pointer so a future CA rotation can hot-swap it without restarting.
+	signer atomic.Pointer[Signer]
+	// gen is the trust-bundle generation, bumped whenever the signer (and thus the
+	// CA bundle) changes; genNotify is closed-and-replaced on each bump to wake
+	// long-poll waiters. See handleTrustBundle.
+	gen       atomic.Uint64
+	genMu     sync.Mutex
+	genNotify chan struct{}
 }
 
 func NewServer(certs *CertStore, authz *Authz) *Server {
-	return &Server{certs: certs, authz: authz}
+	return &Server{certs: certs, authz: authz, genNotify: make(chan struct{})}
 }
 
 // WithWAF enables the global-ruleset endpoint (Phase 2). Returns the server for
@@ -26,11 +41,31 @@ func (s *Server) WithWAF(waf *WafStore) *Server {
 	return s
 }
 
+// WithSigner enables data-plane client-cert issuance and trust distribution.
+// Returns the server for chaining.
+func (s *Server) WithSigner(sg *Signer) *Server {
+	s.SetSigner(sg)
+	return s
+}
+
+// SetSigner installs (or hot-swaps, on rotation) the active Signer and bumps the
+// trust-bundle generation, waking any long-poll waiters. Safe to call concurrently.
+func (s *Server) SetSigner(sg *Signer) {
+	s.genMu.Lock()
+	defer s.genMu.Unlock()
+	s.signer.Store(sg)
+	s.gen.Add(1)
+	close(s.genNotify)
+	s.genNotify = make(chan struct{})
+}
+
 // Handler returns the mux. Mount behind HTTPS (the API ships private keys).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/certs", s.handleCert)
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
+	mux.HandleFunc("POST /v1/edge-cert", s.handleEdgeCert)
+	mux.HandleFunc("GET /v1/trust-bundle", s.handleTrustBundle)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	return mux
 }
