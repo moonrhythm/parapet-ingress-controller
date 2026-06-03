@@ -45,6 +45,34 @@ Each edge's `EDGE_DOMAINS` and its token's allow-set should match its shard. The
 isolation (an edge only holds *its* domains' keys) only holds if edges are
 sharded by domain — see [`../../EDGE.md`](../../EDGE.md) "The tradeoff".
 
+## Edge auto-trust (CA-only mTLS, provided-CA mode)
+
+Lets the in-cluster core trust a newly-deployed edge automatically — no
+`TRUST_PROXY` edit, no core restart. Full design: [`../../EDGE-AUTOTRUST.md`](../../EDGE-AUTOTRUST.md).
+This is the **provided-CA** path (managed-CA self-bootstrap is a follow-on).
+
+1. Create a **dedicated, single-purpose edge CA** (clientAuth-issuing; ideally
+   `NameConstraints` permitting only `spiffe://parapet.moonrhythm.io/edge/*`) as a
+   `kubernetes.io/tls` Secret `parapet-edge-ca`, and mount it on the **control
+   plane** (`EDGE_CA_CERT`/`EDGE_CA_KEY`, see `controlplane.yaml`). The CP then
+   signs short-lived edge client certs (`POST /v1/edge-cert`) and serves the public
+   CA in the tokenless `GET /v1/trust-bundle`.
+2. Give each edge a **data-plane identity** by adding an `id` to its registry
+   entry: `{"<token>": {"id": "acme-edge-1", "domains": ["acme.com"]}}` (a bare
+   array still works for cert/WAF fetch, but grants no identity, so no `/v1/edge-cert`).
+3. On the **edge**, set `EDGE_DATAPLANE_MTLS=true`, `EDGE_UPSTREAM_TLS=true`, and
+   point `EDGE_UPSTREAM_ADDR` at the core's `:443` (see `edge.yaml` / the
+   `run-edge-docker.sh` env). The edge generates its key in memory, fetches a leaf,
+   and presents it on the re-encrypt hop.
+4. On the **core**, set `EDGE_TRUST_CP_ENDPOINT` (the CP, `https://` only) and
+   `EDGE_TRUST_CP_CA` (the CP **server** CA — mandatory, verified) and mount that CA
+   (see `../deployment.yaml`). The core pulls the edge CA and trusts any client cert
+   chaining to it; a no-cert client (Cloudflare/browser) still works (CIDR-only).
+
+Revocation in this mode is by leaf expiry (`EDGE_CLIENTCERT_TTL`, default 7d) or CA
+rotation; the `disabled` registry tombstone stops re-issuance. The convergence-gated
+rotation + `revoke --edge` tool are follow-ons.
+
 ## WAF (global + zones)
 
 Set `EDGE_WAF_ENABLED=true` on the edge and `CP_WAF_ENABLED=true` +

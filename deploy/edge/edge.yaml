@@ -67,6 +67,16 @@ spec:
               value: "parapet-ingress-controller.parapet-ingress-controller.svc:80"
             - name: EDGE_UPSTREAM_TLS
               value: "false"
+            # --- Edge auto-trust: present a CP-issued mTLS client cert to the core ---
+            # The edge fetches a short-lived data-plane client cert from the control
+            # plane (POST /v1/edge-cert, key in memory only) and presents it when it
+            # re-encrypts to the core; the core CA-only-trusts it (no TRUST_PROXY edit,
+            # no restart). Requires EDGE_UPSTREAM_TLS=true and the upstream pointed at
+            # the core's :443. The edge's token entry needs an "id" grant on the CP.
+            # See ../../EDGE-AUTOTRUST.md. To enable, set EDGE_UPSTREAM_TLS=true,
+            # EDGE_UPSTREAM_ADDR to the core :443, and uncomment:
+            # - name: EDGE_DATAPLANE_MTLS
+            #   value: "true"
             - name: EDGE_REFRESH_INTERVAL
               value: "300"
             # Run the global + zone WAF at the edge (early-drop; parapet stays

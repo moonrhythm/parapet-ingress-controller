@@ -49,6 +49,20 @@ spec:
             #   {"<token>": ["acme.com", "*.acme.com"], ...}
             - name: CP_TOKENS_FILE
               value: /tokens/tokens.json
+            # --- Edge auto-trust: data-plane client-cert issuance (provided-CA mode) ---
+            # Mount a DEDICATED, single-purpose edge CA (clientAuth-issuing, ideally
+            # NameConstrained to spiffe://parapet.moonrhythm.io/edge/*). The CP then
+            # signs short-lived edge client certs (POST /v1/edge-cert) and serves the
+            # PUBLIC CA in the tokenless trust bundle (GET /v1/trust-bundle). Grant a
+            # data-plane identity per edge by adding an "id" to its registry entry:
+            #   {"<token>": {"id": "acme-edge-1", "domains": ["acme.com"]}}
+            # Then uncomment the edge-ca volume + mount below. See ../../EDGE-AUTOTRUST.md.
+            # - name: EDGE_CA_CERT
+            #   value: /edge-ca/tls.crt
+            # - name: EDGE_CA_KEY
+            #   value: /edge-ca/tls.key
+            # - name: EDGE_CLIENTCERT_TTL
+            #   value: 168h
           ports:
             - name: https
               containerPort: 8443
@@ -73,6 +87,9 @@ spec:
             - name: edge-tokens
               mountPath: /tokens
               readOnly: true
+            # - name: edge-ca           # provided-mode issuance (see EDGE_CA_CERT above)
+            #   mountPath: /edge-ca
+            #   readOnly: true
           resources:
             requests:
               cpu: 50m
@@ -84,6 +101,9 @@ spec:
         - name: edge-tokens
           secret:
             secretName: edge-controlplane-tokens # Opaque Secret with key tokens.json
+        # - name: edge-ca
+        #   secret:
+        #     secretName: parapet-edge-ca # kubernetes.io/tls Secret: the dedicated edge CA cert+key
 ---
 apiVersion: v1
 kind: Service

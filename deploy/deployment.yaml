@@ -51,6 +51,16 @@ spec:
           value: "4000"
         - name: PROFILER
           value: "false"
+        # --- Edge auto-trust (CA-only mTLS): pull the edge CA from the control plane ---
+        # The core then trusts any client cert chaining to that edge CA, in addition
+        # to TRUST_PROXY above — so a newly-deployed edge is trusted with no env edit
+        # and no restart. EDGE_TRUST_CP_CA is the CP SERVER CA (mandatory, verified;
+        # no plaintext, no skip-verify). Mount it (e.g. Secret edge-controlplane-ca)
+        # at /cp-trust-ca and uncomment. See EDGE-AUTOTRUST.md.
+        # - name: EDGE_TRUST_CP_ENDPOINT
+        #   value: https://edge-controlplane.parapet-ingress-controller.svc:8443
+        # - name: EDGE_TRUST_CP_CA
+        #   value: /cp-trust-ca/ca.crt
         # Opt into the WAF. GeoIP filtering (request.country / request.asn) then works
         # out of the box: the images bake both IPLocate DBs and WAF_GEOIP_DB /
         # WAF_ASN_DB default to them. Set those to "" to disable a lookup, or to a
