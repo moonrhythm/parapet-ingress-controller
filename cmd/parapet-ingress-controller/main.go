@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"log/slog"
@@ -27,6 +28,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
+	"github.com/moonrhythm/parapet-ingress-controller/trust"
 )
 
 var version = "HEAD"
@@ -211,12 +213,12 @@ func main() {
 	}
 	m.Use(ctrl)
 
-	var trustProxy parapet.Conditional
+	var cidrTrust parapet.Conditional
 	{
 		p := config.String("TRUST_PROXY")
 		switch p {
 		case "true":
-			trustProxy = parapet.Trusted()
+			cidrTrust = parapet.Trusted()
 		case "false", "":
 		default:
 			// parse CIDRs
@@ -232,7 +234,48 @@ func main() {
 				}
 			}
 
-			trustProxy = parapet.TrustCIDRs(list)
+			cidrTrust = parapet.TrustCIDRs(list)
+		}
+	}
+
+	// Edge auto-trust (CA-only mTLS). When EDGE_TRUST_CP_ENDPOINT is set, the core
+	// pulls the edge CA from the control plane (GET /v1/trust-bundle, tokenless,
+	// over MANDATORY verified server-TLS) and trusts any client-cert chain verified
+	// to it — in addition to the static TRUST_PROXY CIDRs. See EDGE-AUTOTRUST.md.
+	var trustMgr *trust.Manager
+	if ep := config.String("EDGE_TRUST_CP_ENDPOINT"); ep != "" {
+		if !strings.HasPrefix(ep, "https://") {
+			slog.Error("EDGE_TRUST_CP_ENDPOINT must be https:// (the trust channel has no plaintext mode, ever)", "endpoint", ep)
+			os.Exit(1)
+		}
+		caPath := config.String("EDGE_TRUST_CP_CA")
+		caPEM, err := os.ReadFile(caPath)
+		if err != nil {
+			slog.Error("EDGE_TRUST_CP_CA must be set and readable — it is the mandatory server-TLS anchor that makes the tokenless trust channel safe", "path", caPath, "error", err)
+			os.Exit(1)
+		}
+		tc, err := trust.NewClient(ep, caPEM)
+		if err != nil {
+			slog.Error("edge trust client", "error", err)
+			os.Exit(1)
+		}
+		trustMgr = trust.NewManager()
+		pollInterval := time.Duration(config.IntDefault("EDGE_TRUST_CP_POLL_INTERVAL", 300)) * time.Second
+		go trustMgr.Run(context.Background(), tc, pollInterval)
+		slog.Info("edge auto-trust enabled (CA-only mTLS)", "endpoint", ep)
+	}
+
+	// The installed-once trust predicate: static CIDR OR (with auto-trust) a client
+	// cert cryptographically verified to the edge CA. The verification happens in
+	// the TLS handshake (ClientCAs from trustMgr), so the closure is a single
+	// non-empty check — no SAN lookup, no allow-set.
+	trustProxy := cidrTrust
+	if trustMgr != nil {
+		trustProxy = func(r *http.Request) bool {
+			if cidrTrust != nil && cidrTrust(r) {
+				return true
+			}
+			return r.TLS != nil && len(r.TLS.VerifiedChains) > 0
 		}
 	}
 
@@ -278,6 +321,37 @@ func main() {
 			os.Exit(1)
 		}
 
+		tlsConfig := &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			Certificates:   []tls.Certificate{cert},
+			GetCertificate: ctrl.GetCertificate,
+		}
+		// Edge auto-trust: accept (and verify) an optional edge client cert. The
+		// SNI cert table (GetCertificate) is untouched; ClientCAs comes from the
+		// hot-reloaded trust bundle per handshake via GetConfigForClient. Before the
+		// bundle loads, request-but-don't-verify so the cold-start window degrades
+		// to CIDR-only instead of aborting edge handshakes.
+		if trustMgr != nil {
+			selfSigned := cert
+			getCert := ctrl.GetCertificate
+			mgr := trustMgr
+			tlsConfig.ClientAuth = tls.RequestClientCert
+			tlsConfig.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+				c := &tls.Config{
+					MinVersion:     tls.VersionTLS12,
+					Certificates:   []tls.Certificate{selfSigned},
+					GetCertificate: getCert,
+				}
+				if pool := mgr.ClientCAs(); pool != nil {
+					c.ClientCAs = pool
+					c.ClientAuth = tls.VerifyClientCertIfGiven
+				} else {
+					c.ClientAuth = tls.RequestClientCert
+				}
+				return c, nil
+			}
+		}
+
 		s := &parapet.Server{
 			Addr:               ":" + httpsPort,
 			MaxHeaderBytes:     httpServerMaxHeaderBytes,
@@ -288,11 +362,7 @@ func main() {
 			WaitBeforeShutdown: waitBeforeShutdown,
 			Handler:            http.NotFoundHandler(),
 			ShareProtoSlice:    true,
-			TLSConfig: &tls.Config{
-				MinVersion:     tls.VersionTLS12,
-				Certificates:   []tls.Certificate{cert},
-				GetCertificate: ctrl.GetCertificate,
-			},
+			TLSConfig:          tlsConfig,
 		}
 		prom.Connections(s)
 		prom.Networks(s)

@@ -70,6 +70,11 @@ func main() {
 	upstreamAddr := envOr("EDGE_UPSTREAM_ADDR", "parapet:80")
 	upstreamTLS := envOr("EDGE_UPSTREAM_TLS", "false") == "true"
 	upstreamSNI := envOr("EDGE_UPSTREAM_SNI", "")
+	dataplaneMTLS := envOr("EDGE_DATAPLANE_MTLS", "false") == "true"
+	if dataplaneMTLS && !upstreamTLS {
+		slog.Error("EDGE_DATAPLANE_MTLS=true requires EDGE_UPSTREAM_TLS=true (a client cert can only ride TLS)")
+		os.Exit(1)
+	}
 	refreshInterval := time.Duration(envInt64("EDGE_REFRESH_INTERVAL", 300)) * time.Second
 	if refreshInterval <= 0 { // a 0/negative value would panic time.NewTicker
 		refreshInterval = 300 * time.Second
@@ -114,6 +119,17 @@ func main() {
 	}
 	go edge.RunCertRefresh(ctx, cp, store, domains, refreshInterval)
 
+	// Optional data-plane mTLS: fetch a CP-issued client cert (CA-only trust), hold
+	// it in memory (never on disk), refresh on a timer, and present it on the
+	// re-encrypt hop. The leaf private key is generated here and never leaves.
+	var clientCertStore *edge.ClientCertStore
+	if dataplaneMTLS {
+		clientCertStore = edge.NewClientCertStore()
+		edge.RefreshEdgeCertOnce(cp, clientCertStore) // best-effort; fail-static
+		go edge.RunEdgeCertRefresh(ctx, cp, clientCertStore, refreshInterval)
+		slog.Info("edge: data-plane mTLS enabled (CP-issued client cert)")
+	}
+
 	// Optional edge WAF (early-drop; parapet stays authoritative). GeoIP/ASN are
 	// resolved from the TRUE client IP (the edge is the first hop).
 	var ewaf *edge.EdgeWAF
@@ -153,7 +169,11 @@ func main() {
 		}
 	}
 
-	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamSNI)
+	var getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
+	if clientCertStore != nil {
+		getClientCert = clientCertStore.GetClientCertificate
+	}
+	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamSNI, getClientCert)
 
 	if metricsListen != "" {
 		go func() {
@@ -194,15 +214,24 @@ func main() {
 	// serve-all mode there is no pre-fetch, so it's ready immediately (certs are
 	// fetched on demand). If the initial load failed (control plane down), a
 	// background poll flips readiness once the periodic refresh lands a cert.
-	if serveAll || store.Loaded() {
+	// Readiness needs a usable public cert AND, when data-plane mTLS is on, a loaded
+	// client cert (so the LB never routes to an edge that would be untrusted by the
+	// core — fail-closed; serve-all does not bypass the client-cert gate).
+	edgeReady := func() bool {
+		if dataplaneMTLS && !clientCertStore.Loaded() {
+			return false
+		}
+		return serveAll || store.Loaded()
+	}
+	if edgeReady() {
 		health.SetReady(true)
 	} else {
 		go func() {
-			for !store.Loaded() {
+			for !edgeReady() {
 				time.Sleep(2 * time.Second)
 			}
 			health.SetReady(true)
-			slog.Info("edge: ready (first cert loaded)")
+			slog.Info("edge: ready (certs loaded)")
 		}()
 	}
 
