@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["spike", "controller", "edge"]
+members = ["spike", "controller"]
 # Vendored, patched copies of pingora-core and pingora-pool (see [patch.crates-io]
 # below). Excluded from the workspace so they build with their own crates.io deps,
 # not ours.

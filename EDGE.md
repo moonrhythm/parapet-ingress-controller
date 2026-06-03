@@ -18,8 +18,8 @@ private keys) and WAF rules for the domains that edge serves.
 > patched-vendored connection-pool / H2-idle leaks; see `rust/Cargo.toml`
 > `[patch.crates-io]`), the edge was **migrated to Go** on the parapet framework,
 > reusing the controller's `cert`/`wafrule`/`geoip` packages and `parapet/pkg/waf`.
-> `rust/edge` stays in the tree but is **dormant** (not built/tested/shipped by CI).
-> The control plane and edge still share only the wire contract — no shared
+> `rust/edge` has since been **removed** (it soaked in production; recoverable from
+> git history). The control plane and edge still share only the wire contract — no shared
 > in-process state — but, both being Go, they now draw on the same libraries. See
 > [Implementation history](#implementation-history). (An even earlier iteration put
 > a gRPC control plane in `rust/controlplane`; that was superseded when the design
@@ -532,9 +532,10 @@ downstream HTTP/2 idle-connection leak, both worked around with patched-vendored
 crates (`rust/Cargo.toml` `[patch.crates-io]`) but not fully resolved upstream.
 The Go edge reuses the controller's Go libraries (`cert`, `wafrule`, `geoip`,
 `parapet/pkg/waf`), so it shares the WAF/GeoIP contract by construction and gets
-HTTP/2 `Cookie` reassembly for free from `net/http`. `rust/edge` remains in the
-tree but is **dormant** — not built, tested, deployed, or shipped by CI; remove it
-once the Go edge has soaked in production.
+HTTP/2 `Cookie` reassembly for free from `net/http`. `rust/edge` was **removed**
+after the Go edge soaked in production — it is recoverable from git history if
+needed. (The Rust **controller** implementation stays in `rust/`; only the Rust
+*edge* was retired.)
 
 ## Phasing
 

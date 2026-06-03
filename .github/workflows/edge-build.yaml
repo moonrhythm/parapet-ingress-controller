@@ -6,7 +6,7 @@ name: edge-build
 # Rust streams):
 #   controlplane-<sha>  — the Go control plane (Dockerfile.edge-controlplane)
 #   edge-<sha>          — the Go edge proxy    (Dockerfile.edge)
-# Both are now Go (the edge was migrated off Rust/Pingora; rust/edge is dormant).
+# Both are now Go (the edge was migrated off Rust/Pingora; rust/edge has been removed).
 # See EDGE.md. Triggered when the Go module or the edge manifests change.
 # Auth/registries mirror go-build / rust-build.
 on:
