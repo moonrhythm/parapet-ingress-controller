@@ -42,31 +42,89 @@ const (
 // the call site (the serving CP's CA-secret read-watch), so Sign/CAID/Bundle never
 // mutate.
 type Signer struct {
-	caCert *x509.Certificate
-	caKey  crypto.Signer
-	bundle []byte // the CA public cert(s), PEM (leaf-first if a chain); served as ca_pem
-	caID   string
-	ttl    time.Duration
-	skew   time.Duration
+	caCert     *x509.Certificate // the ACTIVE signing cert (its key signs leaves)
+	caKey      crypto.Signer     // the ACTIVE signing key (matches caCert)
+	bundle     []byte            // every CA public cert, PEM (OLD++NEW during overlap); served as ca_pem
+	bundlePool *x509.CertPool    // roots over `bundle`, for Sign()'s post-sign chain self-verify
+	caID       string
+	ttl        time.Duration
+	skew       time.Duration
 }
 
-// NewProvidedSigner builds a Signer from a mounted CA cert+key (provided mode:
-// EDGE_CA_CERT / EDGE_CA_KEY). It validates that the CA is usable for issuing
-// clientAuth leaves and returns a descriptive error otherwise. caExtraPEM, if
-// non-empty, is appended to the served bundle (an overlap OLD++NEW set during
-// rotation); a malformed extra block is rejected (all-or-nothing).
+// NewProvidedSigner builds a Signer from a single mounted CA cert+key (provided
+// mode: EDGE_CA_CERT / EDGE_CA_KEY, and the back-compat single-cert managed path).
+// It is NewProvidedSignerActive with no explicit active fingerprint — the active
+// cert is selected by matching the key's public key (unambiguous for a single CA).
 func NewProvidedSigner(certPEM, keyPEM []byte, ttl, skew time.Duration) (*Signer, []string, error) {
-	caCert, err := parseCACert(certPEM)
-	if err != nil {
-		return nil, nil, err
-	}
+	return NewProvidedSignerActive(certPEM, keyPEM, "", ttl, skew)
+}
+
+// NewProvidedSignerActive builds a Signer from a CA bundle that may hold more than
+// one CERTIFICATE block (an OLD++NEW overlap during rotation) plus the single
+// private key that signs new leaves. It selects the ACTIVE signing cert as the
+// block whose public key matches keyPEM; when activeFP != "" that block's
+// SHA-256 (hex) must also equal activeFP, pinning the active cert to the caller's
+// intent (the serving reloader derives it from the tls-active annotation). It
+// errors loudly on no match or an ambiguous match (two key-matching blocks) rather
+// than silently falling back to the first block.
+//
+// The whole bundle is served as ca_pem (BundlePEM) so the core trusts every CA in
+// it; only the active pair signs. A non-empty input whose CERTIFICATE blocks don't
+// all parse is rejected (all-or-nothing, mirroring the core's strictPool), so a
+// malformed concat fails here at the producer rather than being silently kept by a
+// downstream last-good guard.
+func NewProvidedSignerActive(bundlePEM, keyPEM []byte, activeFP string, ttl, skew time.Duration) (*Signer, []string, error) {
 	key, err := parsePrivateKey(keyPEM)
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse CA key: %w", err)
 	}
-	if !publicKeyMatches(caCert.PublicKey, key.Public()) {
-		return nil, nil, fmt.Errorf("CA cert and key do not match")
+
+	// Walk every CERTIFICATE block: parse all-or-nothing, fingerprint each, and
+	// re-encode into a guaranteed well-formed served bundle.
+	var (
+		certs    []*x509.Certificate
+		fps      []string
+		rebuilt  []byte
+		keyPub   = key.Public()
+		activeIx = -1
+	)
+	rest := bundlePEM
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		c, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse CA bundle cert: %w", err)
+		}
+		sum := sha256.Sum256(block.Bytes)
+		fp := hex.EncodeToString(sum[:])
+		if publicKeyMatches(c.PublicKey, keyPub) && (activeFP == "" || fp == activeFP) {
+			if activeIx >= 0 {
+				return nil, nil, fmt.Errorf("CA key matches more than one cert in the bundle (ambiguous active cert)")
+			}
+			activeIx = len(certs)
+		}
+		certs = append(certs, c)
+		fps = append(fps, fp)
+		rebuilt = append(rebuilt, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: block.Bytes})...)
 	}
+	if len(certs) == 0 {
+		return nil, nil, fmt.Errorf("CA bundle has no certificates")
+	}
+	if activeIx < 0 {
+		if activeFP != "" {
+			return nil, nil, fmt.Errorf("CA key matches no cert with fingerprint %s in the bundle", activeFP)
+		}
+		return nil, nil, fmt.Errorf("CA key matches no cert in the bundle")
+	}
+
+	caCert := certs[activeIx]
 	if ttl <= 0 {
 		ttl = DefaultClientCertTTL
 	}
@@ -74,17 +132,22 @@ func NewProvidedSigner(certPEM, keyPEM []byte, ttl, skew time.Duration) (*Signer
 		skew = DefaultClientCertSkew
 	}
 	warnings := validateEdgeCA(caCert)
-	id, err := caBundleID(certPEM)
+	id, err := caBundleID(rebuilt)
 	if err != nil {
 		return nil, nil, err
 	}
+	pool := x509.NewCertPool()
+	for _, c := range certs {
+		pool.AddCert(c)
+	}
 	return &Signer{
-		caCert: caCert,
-		caKey:  key,
-		bundle: append([]byte(nil), certPEM...),
-		caID:   id,
-		ttl:    ttl,
-		skew:   skew,
+		caCert:     caCert,
+		caKey:      key,
+		bundle:     rebuilt,
+		bundlePool: pool,
+		caID:       id,
+		ttl:        ttl,
+		skew:       skew,
 	}, warnings, nil
 }
 
@@ -143,6 +206,21 @@ func (s *Signer) Sign(pub crypto.PublicKey, id string) (chainPEM []byte, notAfte
 	}
 	if err = assertLeafShape(leaf, san); err != nil {
 		return nil, time.Time{}, "", fmt.Errorf("self-check: %w", err)
+	}
+	// Chain self-verify: the freshly-minted leaf MUST chain to the bundle we serve
+	// as ca_pem. A wrong active-cert/active-key pairing (the signing key's cert is
+	// not in the served bundle) produces a leaf the core would reject — fail closed
+	// here rather than shipping a dead cert.
+	pool := s.bundlePool
+	if pool == nil {
+		pool = x509.NewCertPool()
+		pool.AppendCertsFromPEM(s.bundle)
+	}
+	if _, err = leaf.Verify(x509.VerifyOptions{
+		Roots:     pool,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return nil, time.Time{}, "", fmt.Errorf("self-check verify: leaf does not chain to served bundle: %w", err)
 	}
 
 	var buf strings.Builder
@@ -285,6 +363,27 @@ func publicKeyMatches(certPub, keyPub crypto.PublicKey) bool {
 		return eq.Equal(keyPub)
 	}
 	return false
+}
+
+// certBundleFPs returns the SHA-256 (hex) of every CERTIFICATE block in order.
+// The serving reloader uses positional fingerprints (OLD first, NEW last) to pin
+// the active cert it hands NewProvidedSignerActive.
+func certBundleFPs(certPEM []byte) []string {
+	var fps []string
+	rest := certPEM
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		sum := sha256.Sum256(block.Bytes)
+		fps = append(fps, hex.EncodeToString(sum[:]))
+	}
+	return fps
 }
 
 // caBundleID computes the trust-bundle ca_id: a hex fingerprint over the sorted

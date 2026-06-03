@@ -18,16 +18,27 @@ type Server struct {
 	authz *Authz
 	waf   *WafStore // optional (nil = WAF distribution disabled, /v1/waf → 404)
 
-	// signer mints data-plane leaves and provides the trust bundle. nil ⇒
-	// /v1/edge-cert 404s and /v1/trust-bundle 503s (not yet initialized). It is an
-	// atomic.Pointer so a future CA rotation can hot-swap it without restarting.
-	signer atomic.Pointer[Signer]
-	// gen is the trust-bundle generation, bumped whenever the signer (and thus the
-	// CA bundle) changes; genNotify is closed-and-replaced on each bump to wake
+	// signerState is the (signer, generation) snapshot, replaced WHOLESALE by
+	// SetSigner so a reader Loads both halves coherently (never a torn signer-from-A
+	// + gen-from-B). nil ⇒ /v1/edge-cert 404s and /v1/trust-bundle 503s (issuance
+	// not yet initialized). It is an atomic.Pointer so a CA rotation can hot-swap it
+	// without restarting. genNotify is closed-and-replaced on each bump to wake
 	// long-poll waiters. See handleTrustBundle.
-	gen       atomic.Uint64
-	genMu     sync.Mutex
-	genNotify chan struct{}
+	signerState atomic.Pointer[signerGen]
+	genMu       sync.Mutex
+	genNotify   chan struct{}
+
+	// issuanceExpected gates readiness: once set (issuance was configured), the
+	// readiness probe 503s until a signer has actually loaded, so an edge isn't
+	// pointed at a CP that can't yet issue/serve the trust bundle.
+	issuanceExpected atomic.Bool
+}
+
+// signerGen is an immutable (signer, generation) pair. SetSigner replaces the whole
+// value under genMu; readers Load it once and read both fields from the same value.
+type signerGen struct {
+	sg  *Signer
+	gen uint64
 }
 
 func NewServer(certs *CertStore, authz *Authz) *Server {
@@ -49,15 +60,37 @@ func (s *Server) WithSigner(sg *Signer) *Server {
 }
 
 // SetSigner installs (or hot-swaps, on rotation) the active Signer and bumps the
-// trust-bundle generation, waking any long-poll waiters. Safe to call concurrently.
+// trust-bundle generation, waking any long-poll waiters. The (signer, gen) pair is
+// stored as one immutable value so concurrent readers never tear it. Safe to call
+// concurrently.
 func (s *Server) SetSigner(sg *Signer) {
 	s.genMu.Lock()
 	defer s.genMu.Unlock()
-	s.signer.Store(sg)
-	s.gen.Add(1)
+	var prev uint64
+	if st := s.signerState.Load(); st != nil {
+		prev = st.gen
+	}
+	s.signerState.Store(&signerGen{sg: sg, gen: prev + 1})
 	close(s.genNotify)
 	s.genNotify = make(chan struct{})
 }
+
+// CurrentCAID returns the live signer's ca_id, or "" if no signer is loaded. The
+// serving reloader compares it to a rebuilt candidate to gate SetSigner (a no-op
+// re-list must not churn the generation).
+func (s *Server) CurrentCAID() string {
+	if st := s.signerState.Load(); st != nil && st.sg != nil {
+		return st.sg.CAID()
+	}
+	return ""
+}
+
+// SignerLoaded reports whether a signer has been installed (issuance is live).
+func (s *Server) SignerLoaded() bool { return s.signerState.Load() != nil }
+
+// ExpectIssuance marks that issuance was configured, so readiness gates on a loaded
+// signer. Call once at startup when an edge CA (managed or provided) is wired.
+func (s *Server) ExpectIssuance() { s.issuanceExpected.Store(true) }
 
 // Handler returns the mux. Mount behind HTTPS (the API ships private keys).
 func (s *Server) Handler() http.Handler {
@@ -76,9 +109,15 @@ func (s *Server) Handler() http.Handler {
 // list from the cluster succeeded), else 503 — so an edge isn't pointed at a
 // control plane that can't yet serve certs.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("ready") == "1" && !s.certs.Loaded() {
-		http.Error(w, "not ready", http.StatusServiceUnavailable)
-		return
+	if r.URL.Query().Get("ready") == "1" {
+		if !s.certs.Loaded() {
+			http.Error(w, "not ready: certs", http.StatusServiceUnavailable)
+			return
+		}
+		if s.issuanceExpected.Load() && !s.SignerLoaded() {
+			http.Error(w, "not ready: signer", http.StatusServiceUnavailable)
+			return
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 }

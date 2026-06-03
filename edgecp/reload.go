@@ -18,11 +18,15 @@ import (
 type Reloader struct {
 	store     *CertStore
 	namespace string
-	debounce  time.Duration
+	// skipSecret, if set, is the edge CA Secret's name: never load it as a tenant
+	// serving cert. The CA Secret is Opaque so the type filter already excludes it;
+	// this makes the SignerReloader its sole consumer (belt-and-suspenders).
+	skipSecret string
+	debounce   time.Duration
 }
 
-func NewReloader(store *CertStore, namespace string) *Reloader {
-	return &Reloader{store: store, namespace: namespace, debounce: 300 * time.Millisecond}
+func NewReloader(store *CertStore, namespace, skipSecret string) *Reloader {
+	return &Reloader{store: store, namespace: namespace, skipSecret: skipSecret, debounce: 300 * time.Millisecond}
 }
 
 // Start does the initial load and then watches Secrets, reloading on change.
@@ -94,6 +98,9 @@ func (r *Reloader) reload(ctx context.Context) error {
 	var pairs []PEMPair
 	for i := range secrets {
 		s := &secrets[i]
+		if r.skipSecret != "" && s.Name == r.skipSecret {
+			continue // the edge CA Secret is owned by the SignerReloader, not a tenant cert
+		}
 		if s.Type != v1.SecretTypeTLS {
 			continue
 		}
