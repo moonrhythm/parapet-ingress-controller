@@ -120,7 +120,7 @@ and runs the WAF. A **Go** in-cluster **control plane** (`cmd/edge-controlplane`
 distributes, per edge, the cert+key and WAF rules for that edge's domains over an
 **HTTPS REST** API (`GET /v1/certs?sni=…`, `GET /v1/waf`) authenticated by a
 **per-edge bearer token** → allowed domains/zones. (The edge was migrated off the
-former Rust/Pingora implementation, `rust/edge`, now dormant.) Contract-relevant
+former Rust/Pingora implementation, `rust/edge`, since removed.) Contract-relevant
 invariants:
 
 - **Cert+key distribution (not keyless)** — the edge holds the cert+key for its
