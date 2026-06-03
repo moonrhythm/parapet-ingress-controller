@@ -14,8 +14,10 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/apimachinery/pkg/watch"
 )
@@ -233,6 +235,36 @@ func (c *fsClient) GetSecrets(ctx context.Context, namespace string) ([]v1.Secre
 func (c *fsClient) WatchSecrets(ctx context.Context, namespace string) (watch.Interface, error) {
 	ch := make(chan watch.Event)
 	return watch.NewProxyWatcher(ch), nil
+}
+
+// GetSecret returns a copy of the named secret, or a NotFound error. The fs backend
+// is for local dev / tests; namespace is matched only when the fixture sets one.
+func (c *fsClient) GetSecret(ctx context.Context, namespace, name string) (*v1.Secret, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for i := range c.secrets {
+		s := &c.secrets[i]
+		if s.Name == name && (namespace == "" || s.Namespace == "" || s.Namespace == namespace) {
+			cp := s.DeepCopy()
+			return cp, nil
+		}
+	}
+	return nil, apierrors.NewNotFound(schema.GroupResource{Resource: "secrets"}, name)
+}
+
+// UpdateSecret replaces (or appends) the secret in memory. Best-effort and NON-CAS
+// (no resourceVersion semantics) — dev-only; the cluster backend is the real CAS.
+func (c *fsClient) UpdateSecret(ctx context.Context, namespace string, secret *v1.Secret) (*v1.Secret, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := range c.secrets {
+		if c.secrets[i].Name == secret.Name {
+			c.secrets[i] = *secret.DeepCopy()
+			return secret.DeepCopy(), nil
+		}
+	}
+	c.secrets = append(c.secrets, *secret.DeepCopy())
+	return secret.DeepCopy(), nil
 }
 
 func (c *fsClient) GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error) {

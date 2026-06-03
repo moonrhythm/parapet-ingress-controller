@@ -49,14 +49,24 @@ spec:
             #   {"<token>": ["acme.com", "*.acme.com"], ...}
             - name: CP_TOKENS_FILE
               value: /tokens/tokens.json
-            # --- Edge auto-trust: data-plane client-cert issuance (provided-CA mode) ---
-            # Mount a DEDICATED, single-purpose edge CA (clientAuth-issuing, ideally
-            # NameConstrained to spiffe://parapet.moonrhythm.io/edge/*). The CP then
-            # signs short-lived edge client certs (POST /v1/edge-cert) and serves the
-            # PUBLIC CA in the tokenless trust bundle (GET /v1/trust-bundle). Grant a
-            # data-plane identity per edge by adding an "id" to its registry entry:
+            # --- Edge auto-trust: data-plane client-cert issuance ---
+            # The CP signs short-lived edge client certs (POST /v1/edge-cert) and
+            # serves the PUBLIC edge CA in the tokenless trust bundle
+            # (GET /v1/trust-bundle). Grant a data-plane identity per edge by adding
+            # an "id" to its registry entry:
             #   {"<token>": {"id": "acme-edge-1", "domains": ["acme.com"]}}
-            # Then uncomment the edge-ca volume + mount below. See ../../EDGE-AUTOTRUST.md.
+            # See ../../EDGE-AUTOTRUST.md. Two ways to supply the edge CA:
+            #
+            # MANAGED (recommended): a run-once bootstrap Job self-generates the CA
+            # into the parapet-edge-ca Secret (apply ca-bootstrap.yaml). No mounted
+            # CA, no cert-manager — a Docker edge needs only its token. Uncomment:
+            # - name: EDGE_CA_SECRET
+            #   value: parapet-edge-ca
+            #
+            # PROVIDED (operator's own PKI): mount a DEDICATED, single-purpose edge
+            # CA (clientAuth-issuing, ideally NameConstrained to
+            # spiffe://parapet.moonrhythm.io/edge/*) and uncomment the edge-ca volume
+            # + mount below.
             # - name: EDGE_CA_CERT
             #   value: /edge-ca/tls.crt
             # - name: EDGE_CA_KEY
