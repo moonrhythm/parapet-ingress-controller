@@ -45,18 +45,23 @@ Each edge's `EDGE_DOMAINS` and its token's allow-set should match its shard. The
 isolation (an edge only holds *its* domains' keys) only holds if edges are
 sharded by domain — see [`../../EDGE.md`](../../EDGE.md) "The tradeoff".
 
-## Edge auto-trust (CA-only mTLS, provided-CA mode)
+## Edge auto-trust (CA-only mTLS)
 
 Lets the in-cluster core trust a newly-deployed edge automatically — no
 `TRUST_PROXY` edit, no core restart. Full design: [`../../EDGE-AUTOTRUST.md`](../../EDGE-AUTOTRUST.md).
-This is the **provided-CA** path (managed-CA self-bootstrap is a follow-on).
 
-1. Create a **dedicated, single-purpose edge CA** (clientAuth-issuing; ideally
-   `NameConstraints` permitting only `spiffe://parapet.moonrhythm.io/edge/*`) as a
-   `kubernetes.io/tls` Secret `parapet-edge-ca`, and mount it on the **control
-   plane** (`EDGE_CA_CERT`/`EDGE_CA_KEY`, see `controlplane.yaml`). The CP then
-   signs short-lived edge client certs (`POST /v1/edge-cert`) and serves the public
-   CA in the tokenless `GET /v1/trust-bundle`.
+1. Supply the **edge CA** to the control plane, one of two ways:
+   - **Managed (recommended):** `kubectl apply -f ca-bootstrap.yaml` — a run-once
+     Job self-generates a dedicated, single-purpose, NameConstrained edge CA into
+     the `parapet-edge-ca` Secret (adopt-if-present, never regenerate), and set
+     `EDGE_CA_SECRET=parapet-edge-ca` on the CP (see `controlplane.yaml`). **No
+     cert-manager, no hand-mounted CA — a Docker edge needs only its token.**
+   - **Provided (existing PKI):** create the dedicated CA yourself (clientAuth-issuing;
+     ideally `NameConstraints` to `spiffe://parapet.moonrhythm.io/edge/*`) as the
+     `parapet-edge-ca` Secret and mount it on the CP (`EDGE_CA_CERT`/`EDGE_CA_KEY`).
+
+   Either way the CP signs short-lived edge client certs (`POST /v1/edge-cert`) and
+   serves the public CA in the tokenless `GET /v1/trust-bundle`.
 2. Give each edge a **data-plane identity** by adding an `id` to its registry
    entry: `{"<token>": {"id": "acme-edge-1", "domains": ["acme.com"]}}` (a bare
    array still works for cert/WAF fetch, but grants no identity, so no `/v1/edge-cert`).

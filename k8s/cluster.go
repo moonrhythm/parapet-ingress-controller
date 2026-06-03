@@ -50,6 +50,14 @@ func (c *clusterClient) WatchSecrets(ctx context.Context, namespace string) (wat
 	return c.client.CoreV1().Secrets(namespace).Watch(ctx, metav1.ListOptions{})
 }
 
+func (c *clusterClient) GetSecret(ctx context.Context, namespace, name string) (*v1.Secret, error) {
+	return c.client.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c *clusterClient) UpdateSecret(ctx context.Context, namespace string, secret *v1.Secret) (*v1.Secret, error) {
+	return c.client.CoreV1().Secrets(namespace).Update(ctx, secret, metav1.UpdateOptions{})
+}
+
 func (c *clusterClient) GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error) {
 	list, err := c.client.CoreV1().Endpoints(namespace).List(ctx, metav1.ListOptions{})
 	if err != nil {

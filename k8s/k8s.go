@@ -55,6 +55,8 @@ var client interface {
 	GetIngresses(ctx context.Context, namespace string) ([]networking.Ingress, error)
 	GetSecrets(ctx context.Context, namespace string) ([]v1.Secret, error)
 	WatchSecrets(ctx context.Context, namespace string) (watch.Interface, error)
+	GetSecret(ctx context.Context, namespace, name string) (*v1.Secret, error)
+	UpdateSecret(ctx context.Context, namespace string, secret *v1.Secret) (*v1.Secret, error)
 	GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error)
 	WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error)
 	GetConfigMaps(ctx context.Context, namespace, labelSelector string) ([]v1.ConfigMap, error)
@@ -89,6 +91,18 @@ func GetSecrets(ctx context.Context, namespace string) ([]v1.Secret, error) {
 // WatchSecrets watches secrets for given namespace
 func WatchSecrets(ctx context.Context, namespace string) (watch.Interface, error) {
 	return client.WatchSecrets(ctx, namespace)
+}
+
+// GetSecret fetches one secret by namespace+name (preserving resourceVersion for
+// optimistic-concurrency updates). Used by the edge-CA bootstrap.
+func GetSecret(ctx context.Context, namespace, name string) (*v1.Secret, error) {
+	return client.GetSecret(ctx, namespace, name)
+}
+
+// UpdateSecret writes a secret back (a resourceVersion compare-and-swap on the
+// cluster backend). Used ONLY by the edge-CA bootstrap/rotation path.
+func UpdateSecret(ctx context.Context, namespace string, secret *v1.Secret) (*v1.Secret, error) {
+	return client.UpdateSecret(ctx, namespace, secret)
 }
 
 // GetEndpoints lists all endpoints

@@ -1,0 +1,104 @@
+# Managed-CA bootstrap for edge auto-trust (EDGE-AUTOTRUST.md).
+#
+# A run-once Job has the control-plane binary self-generate the edge CA and persist
+# it to the parapet-edge-ca Secret (adopt-if-present, NEVER regenerate). The serving
+# control plane then loads that CA (set EDGE_CA_SECRET=parapet-edge-ca on the CP
+# Deployment, see controlplane.yaml) and signs edge client certs + serves the trust
+# bundle. With this, a Docker edge needs only its token — no hand-mounted CA.
+#
+# Apply this BEFORE (or alongside) the control plane. The CP self-heals if it starts
+# first (it polls for the CA), but ordering the Job first avoids the cold-start gap.
+# Under Helm/Argo, make the Job a pre-install/pre-upgrade hook (annotations below).
+---
+# The CA Secret, pre-created EMPTY. RBAC can scope `update` to a named Secret but
+# NOT `create`, so the operator pre-creates the stub and the Job only updates it.
+# Opaque (not kubernetes.io/tls) because some clusters reject an empty tls.crt on a
+# kubernetes.io/tls create; our code reads the keys by name regardless of type.
+apiVersion: v1
+kind: Secret
+type: Opaque
+metadata:
+  name: parapet-edge-ca
+  namespace: parapet-ingress-controller
+  annotations:
+    # Do NOT let GitOps prune or re-blank the CP-populated CA — that would distrust
+    # the whole fleet. Argo: keep + ignore /data drift. (Flux: set a comparable
+    # field-manager / ignore policy.)
+    argocd.argoproj.io/sync-options: Prune=false
+    argocd.argoproj.io/compare-options: IgnoreExtraneous
+data: {} # populated once by the bootstrap Job (tls.crt + tls.key + a guard annotation)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: edge-controlplane-bootstrap
+  namespace: parapet-ingress-controller
+---
+# Scoped write: get + update on ONLY the parapet-edge-ca Secret. No create, no
+# delete, no other secrets. (The serving CP reads the CA via its existing
+# namespace-wide secrets list/watch, so it needs no extra grant.)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: edge-controlplane-bootstrap
+  namespace: parapet-ingress-controller
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["parapet-edge-ca"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: edge-controlplane-bootstrap
+  namespace: parapet-ingress-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: edge-controlplane-bootstrap
+subjects:
+  - kind: ServiceAccount
+    name: edge-controlplane-bootstrap
+    namespace: parapet-ingress-controller
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: edge-controlplane-bootstrap-ca
+  namespace: parapet-ingress-controller
+  # Helm: uncomment to run as a pre-install/pre-upgrade hook (ordered before the CP).
+  # annotations:
+  #   "helm.sh/hook": pre-install,pre-upgrade
+  #   "helm.sh/hook-weight": "-5"
+  #   "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+  #   "argocd.argoproj.io/hook": PreSync
+spec:
+  backoffLimit: 5
+  ttlSecondsAfterFinished: 600 # reap the finished Job so the next sync doesn't recreate a stale one
+  template:
+    metadata:
+      name: edge-controlplane-bootstrap-ca
+    spec:
+      serviceAccountName: edge-controlplane-bootstrap
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          # Same image as the control plane (the bootstrap mode is a flag on it).
+          image: gcr.io/moonrhythm-containers/parapet-ingress-controller:controlplane-latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: EDGE_CA_BOOTSTRAP
+              value: "true"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # - name: EDGE_CA_SECRET     # default parapet-edge-ca
+            #   value: parapet-edge-ca
+            # - name: EDGE_CA_TTL        # generated edge CA lifetime (default ~2y)
+            #   value: 17520h
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
