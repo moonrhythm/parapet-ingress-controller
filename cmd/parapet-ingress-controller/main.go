@@ -326,30 +326,11 @@ func main() {
 			Certificates:   []tls.Certificate{cert},
 			GetCertificate: ctrl.GetCertificate,
 		}
-		// Edge auto-trust: accept (and verify) an optional edge client cert. The
-		// SNI cert table (GetCertificate) is untouched; ClientCAs comes from the
-		// hot-reloaded trust bundle per handshake via GetConfigForClient. Before the
-		// bundle loads, request-but-don't-verify so the cold-start window degrades
-		// to CIDR-only instead of aborting edge handshakes.
+		// Edge auto-trust: verify an optional edge client cert against the
+		// hot-reloaded edge-CA pool (CA-only trust). The SNI cert table is untouched.
+		// See trust.Manager.ServerTLSConfig for the cold-start / per-handshake logic.
 		if trustMgr != nil {
-			selfSigned := cert
-			getCert := ctrl.GetCertificate
-			mgr := trustMgr
-			tlsConfig.ClientAuth = tls.RequestClientCert
-			tlsConfig.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
-				c := &tls.Config{
-					MinVersion:     tls.VersionTLS12,
-					Certificates:   []tls.Certificate{selfSigned},
-					GetCertificate: getCert,
-				}
-				if pool := mgr.ClientCAs(); pool != nil {
-					c.ClientCAs = pool
-					c.ClientAuth = tls.VerifyClientCertIfGiven
-				} else {
-					c.ClientAuth = tls.RequestClientCert
-				}
-				return c, nil
-			}
+			tlsConfig = trustMgr.ServerTLSConfig(ctrl.GetCertificate, []tls.Certificate{cert})
 		}
 
 		s := &parapet.Server{

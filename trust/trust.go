@@ -117,6 +117,43 @@ func (m *Manager) CAID() string {
 	return ""
 }
 
+// ServerTLSConfig builds the core's :443 *tls.Config so it verifies an OPTIONAL
+// edge client cert against the live, hot-reloaded CA pool — CA-only trust. The SNI
+// server cert is unchanged: getCertificate (the controller's cert table) and the
+// self-signed fallback are served exactly as before. Per handshake, ClientCAs is
+// loaded fresh from the manager; before the bundle loads (pool nil) it
+// requests-but-does-not-verify (tls.RequestClientCert) so the cold-start window
+// degrades to CIDR-only rather than aborting edge handshakes. Once loaded it is
+// tls.VerifyClientCertIfGiven (no cert → fine; a presented cert must verify to the
+// edge CA, else the handshake aborts). A verified cert populates
+// r.TLS.VerifiedChains, which the per-request trust predicate keys on.
+func (m *Manager) ServerTLSConfig(
+	getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error),
+	fallback []tls.Certificate,
+) *tls.Config {
+	base := &tls.Config{
+		MinVersion:     tls.VersionTLS12,
+		Certificates:   fallback,
+		GetCertificate: getCertificate,
+		ClientAuth:     tls.RequestClientCert,
+	}
+	base.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		c := &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			Certificates:   fallback,
+			GetCertificate: getCertificate,
+		}
+		if pool := m.ClientCAs(); pool != nil {
+			c.ClientCAs = pool
+			c.ClientAuth = tls.VerifyClientCertIfGiven
+		} else {
+			c.ClientAuth = tls.RequestClientCert
+		}
+		return c, nil
+	}
+	return base
+}
+
 // apply validate-then-swaps a bundle: strict all-or-nothing PEM parse (a non-empty
 // input that yields fewer certs than CERTIFICATE blocks is rejected; never a partial
 // AppendCertsFromPEM), forward-only (reject generation <= current), then atomic swap.
