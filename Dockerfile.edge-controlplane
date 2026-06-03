@@ -5,7 +5,7 @@
 # over HTTPS REST. See EDGE.md. Build context is the repo root:
 #
 #     docker build -f Dockerfile.edge-controlplane -t parapet-edge-controlplane .
-FROM golang:1.26.3-trixie AS build
+FROM golang:1.26.4-trixie AS build
 
 ARG VERSION
 ARG GOAMD64

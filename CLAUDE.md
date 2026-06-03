@@ -137,7 +137,7 @@ fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
 combined `make test` (Go + Rust) target.
 
 ### Docker image
-- Builder: `golang:1.26.3-trixie` with `libbrotli-dev` (CGO enabled, `-tags=cbrotli`)
+- Builder: `golang:1.26.4-trixie` with `libbrotli-dev` (CGO enabled, `-tags=cbrotli`)
 - Runtime: `debian:trixie-slim` with `libbrotli1` and `ca-certificates`
 - Build args: `VERSION` (injected as `main.version`), `GOAMD64` (v3 default, v1 for compatibility image)
 
@@ -153,7 +153,7 @@ All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`) so they 
 
 ```
 module github.com/moonrhythm/parapet-ingress-controller
-go 1.26.3
+go 1.26.4
 ```
 
 The module lives at the repo root, so `go install` targets are `…/parapet-ingress-controller/cmd/parapet-ingress-controller`. (The Rust implementation lives in `rust/`; the repo hosts two implementations of one behavior contract.) Key dependencies: `github.com/moonrhythm/parapet`, `k8s.io/client-go`, `go.opentelemetry.io`, `github.com/prometheus/client_golang`, `cloud.google.com/go/profiler`.
