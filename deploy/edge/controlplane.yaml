@@ -113,7 +113,7 @@ spec:
             secretName: edge-controlplane-tokens # Opaque Secret with key tokens.json
         # - name: edge-ca
         #   secret:
-        #     secretName: parapet-edge-ca # kubernetes.io/tls Secret: the dedicated edge CA cert+key
+        #     secretName: parapet-edge-ca # Opaque Secret: the dedicated edge CA cert+key (see deploy/edge/ca-bootstrap.yaml)
 ---
 apiVersion: v1
 kind: Service

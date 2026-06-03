@@ -36,11 +36,12 @@ type edgeCertResponse struct {
 // Absent signer ⇒ 404 (issuance not configured). The private key never appears here
 // — the edge holds it; only chain_pem is returned.
 func (s *Server) handleEdgeCert(w http.ResponseWriter, r *http.Request) {
-	sg := s.signer.Load()
-	if sg == nil {
+	st := s.signerState.Load()
+	if st == nil {
 		http.Error(w, "issuance not configured", http.StatusNotFound)
 		return
 	}
+	sg := st.sg
 	token, ok := bearer(r)
 	if !ok || !s.authz.Known(token) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -108,14 +109,15 @@ type trustBundleResponse struct {
 // blocks until the generation advances past <since> or watchTimeout elapses → 304.
 // Absent signer ⇒ 503 (not-yet-initialized; the core retries).
 func (s *Server) handleTrustBundle(w http.ResponseWriter, r *http.Request) {
-	if s.signer.Load() == nil {
+	st := s.signerState.Load()
+	if st == nil {
 		http.Error(w, "trust bundle not yet initialized", http.StatusServiceUnavailable)
 		return
 	}
 
 	if r.URL.Query().Get("watch") == "1" {
 		since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
-		if s.gen.Load() <= since {
+		if st.gen <= since {
 			s.genMu.Lock()
 			notify := s.genNotify
 			s.genMu.Unlock()
@@ -125,15 +127,17 @@ func (s *Server) handleTrustBundle(w http.ResponseWriter, r *http.Request) {
 			case <-r.Context().Done():
 				return
 			}
+			// Re-load the snapshot: a SetSigner may have advanced it while we blocked.
+			st = s.signerState.Load()
 		}
 	}
 
-	sg := s.signer.Load()
-	if sg == nil {
+	if st == nil {
 		http.Error(w, "trust bundle not yet initialized", http.StatusServiceUnavailable)
 		return
 	}
-	gen := s.gen.Load()
+	sg := st.sg
+	gen := st.gen
 	resp := trustBundleResponse{
 		Generation: gen,
 		CAPEM:      string(sg.BundlePEM()),

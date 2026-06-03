@@ -52,6 +52,7 @@ func main() {
 	caKeyPath := os.Getenv("EDGE_CA_KEY")                   // provided-mode edge CA private key
 	caSecret := os.Getenv("EDGE_CA_SECRET")                 // managed-mode edge CA Secret in POD_NAMESPACE; "" + no provided files = issuance off
 	bootstrapCA := os.Getenv("EDGE_CA_BOOTSTRAP") == "true" // run-once: self-generate the CA into its Secret, then exit
+	rotateCA := os.Getenv("EDGE_CA_ROTATE") == "true"       // run-once: stage a NEW CA alongside OLD (overlap), then exit
 	caTTL := DefaultDuration("EDGE_CA_TTL", edgecp.DefaultCATTL)
 	clientCertTTL := DefaultDuration("EDGE_CLIENTCERT_TTL", edgecp.DefaultClientCertTTL)
 	clientCertSkew := DefaultDuration("EDGE_CLIENTCERT_SKEW", edgecp.DefaultClientCertSkew)
@@ -77,6 +78,34 @@ func main() {
 			os.Exit(1)
 		}
 		slog.Info("edge CA bootstrapped/adopted", "secret", podNamespace+"/"+name)
+		os.Exit(0)
+	}
+
+	// Run-once CA rotation (a Job): stage a NEW CA alongside OLD (tls.crt =
+	// OLD++NEW, NEW key in tls-new.key, phase=overlap, active=old), then exit. This
+	// is non-destructive — OLD stays trusted and active; the serving CPs hot-reload
+	// the wider bundle and the core trusts it with no change. Like bootstrap it
+	// neither serves nor needs tokens/TLS.
+	if rotateCA {
+		name := caSecret
+		if name == "" {
+			name = "parapet-edge-ca"
+		}
+		if podNamespace == "" {
+			slog.Error("EDGE_CA_ROTATE requires POD_NAMESPACE (the CA Secret's namespace)")
+			os.Exit(1)
+		}
+		if err := k8s.Init(); err != nil {
+			slog.Error("k8s init", "err", err)
+			os.Exit(1)
+		}
+		bundle, err := edgecp.RotateCA(context.Background(), k8sRW{}, podNamespace, name, caTTL)
+		if err != nil {
+			slog.Error("rotate edge CA", "err", err)
+			os.Exit(1)
+		}
+		slog.Info("edge CA rotated to overlap (OLD++NEW staged; OLD still active)",
+			"secret", podNamespace+"/"+name, "bundle_bytes", len(bundle))
 		os.Exit(0)
 	}
 
@@ -117,7 +146,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	reloader := edgecp.NewReloader(store, watchNamespace)
+	reloader := edgecp.NewReloader(store, watchNamespace, caSecret)
 	go reloader.Start(ctx)
 
 	server := edgecp.NewServer(store, authz)
@@ -151,67 +180,37 @@ func main() {
 		for _, msg := range warnings {
 			slog.Warn("edge CA: " + msg)
 		}
+		server.ExpectIssuance()
 		server = server.WithSigner(signer)
 		slog.Info("edge control plane: data-plane issuance enabled (provided CA)",
 			"ca_id", signer.CAID(), "leaf_ttl", clientCertTTL)
+		// NOTE: rotating a mounted (provided) CA requires remounting EDGE_CA_CERT/KEY
+		// and restarting this process — there is no fsnotify here. Managed mode (below)
+		// hot-reloads via the CA-Secret watch.
 
 	case caSecret != "":
 		if podNamespace == "" {
 			slog.Error("managed edge CA (EDGE_CA_SECRET) requires POD_NAMESPACE")
 			os.Exit(1)
 		}
-		// Install the signer from the CA Secret the bootstrap Job populated. If it
-		// isn't there yet (CP started before the Job), poll and install when it
-		// lands — so the CP self-heals without a restart.
-		installSigner := func() bool {
-			// Read via the namespace-wide list the CP already has (list/watch), so
-			// serving needs no extra `get` grant — only the bootstrap Job (its own
-			// scoped SA) writes the CA.
-			secs, err := k8s.GetSecrets(ctx, podNamespace)
-			if err != nil {
-				return false
-			}
-			var crt, key []byte
-			for i := range secs {
-				if secs[i].Name == caSecret {
-					crt, key = secs[i].Data["tls.crt"], secs[i].Data["tls.key"]
-					break
-				}
-			}
-			if len(crt) == 0 || len(key) == 0 {
-				return false
-			}
-			signer, warnings, err := edgecp.NewProvidedSigner(crt, key, clientCertTTL, clientCertSkew)
-			if err != nil {
-				slog.Error("managed edge CA signer", "err", err)
-				return false
-			}
-			for _, msg := range warnings {
-				slog.Warn("edge CA: " + msg)
-			}
-			server.SetSigner(signer)
-			slog.Info("edge control plane: data-plane issuance enabled (managed CA)",
-				"ca_id", signer.CAID(), "secret", podNamespace+"/"+caSecret, "leaf_ttl", clientCertTTL)
-			return true
+		// Hot-reload the signer from the CA Secret the bootstrap/rotation Job writes.
+		// The reloader reads via the namespace-wide list the CP already watches (no
+		// extra `get` grant) and SetSigner's on every ca_id change — so a rotation's
+		// OLD++NEW write (or a not-yet-provisioned CA landing later) propagates with
+		// no restart.
+		server.ExpectIssuance()
+		signerReloader := edgecp.NewSignerReloader(server, podNamespace, caSecret, clientCertTTL, clientCertSkew)
+		if err := signerReloader.LoadOnce(ctx); err != nil {
+			slog.Error("edgecp: initial edge CA signer load failed", "err", err)
 		}
-		if !installSigner() {
+		if server.SignerLoaded() {
+			slog.Info("edge control plane: data-plane issuance enabled (managed CA)",
+				"ca_id", server.CurrentCAID(), "secret", podNamespace+"/"+caSecret, "leaf_ttl", clientCertTTL)
+		} else {
 			slog.Warn("edge CA not yet provisioned in " + podNamespace + "/" + caSecret +
 				" — run the bootstrap Job; data-plane issuance disabled until it lands")
-			go func() {
-				t := time.NewTicker(10 * time.Second)
-				defer t.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-t.C:
-						if installSigner() {
-							return
-						}
-					}
-				}
-			}()
 		}
+		go signerReloader.Watch(ctx)
 	}
 
 	// Phase 2/3: optionally distribute the WAF (GET /v1/waf): the global baseline

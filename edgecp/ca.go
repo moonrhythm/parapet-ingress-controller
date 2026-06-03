@@ -27,6 +27,28 @@ const DefaultCATTL = 2 * 365 * 24 * time.Hour // ~2 years
 // regenerated — that would mint a new CA and distrust the whole fleet.
 const caGenerationAnnotation = "parapet.moonrhythm.io/edge-ca-generation"
 
+// Rotation annotations + the staged-key field. RotateCA stages a NEW CA alongside
+// OLD without dropping OLD or flipping the active key (the non-destructive overlap
+// phase). The destructive trim + active flip live in a later step.
+const (
+	// caRotationPhaseAnnotation records the rotation phase: "overlap" (OLD++NEW both
+	// trusted, OLD still active). Later phases ("converged"/"trimmed") are written by
+	// the destructive trim step, not here.
+	caRotationPhaseAnnotation = "parapet.moonrhythm.io/edge-ca-rotation-phase"
+	// caActiveAnnotation records which staged key signs new leaves: "old" (Data
+	// tls.key) or "new" (Data tls-new.key). RotateCA only ever writes "old".
+	caActiveAnnotation = "parapet.moonrhythm.io/edge-ca-active"
+
+	caPhaseOverlap = "overlap"
+	caActiveOld    = "old"
+	caActiveNew    = "new"
+
+	// caNewKeyField stages the NEW CA's private key during overlap. tls.key stays the
+	// OLD (active) key until the active flip; the serving reloader reads this field
+	// when caActiveAnnotation == "new".
+	caNewKeyField = "tls-new.key"
+)
+
 // SecretRW is the minimal secret read/CAS-write surface EnsureCA needs. It is
 // satisfied by the k8s package (cluster backend = real resourceVersion CAS) and by
 // a fake in tests.
@@ -150,6 +172,8 @@ func EnsureCA(ctx context.Context, rw SecretRW, namespace, name string, ttl time
 }
 
 // validCAKeypair reports whether (certPEM, keyPEM) parse as a matching CA keypair.
+// certPEM may be a bundle (OLD++NEW): the FIRST CERTIFICATE block must match keyPEM
+// (tls.key tracks the OLD/active cert, which is first in the bundle).
 func validCAKeypair(certPEM, keyPEM []byte) bool {
 	if len(certPEM) == 0 || len(keyPEM) == 0 {
 		return false
@@ -163,4 +187,126 @@ func validCAKeypair(certPEM, keyPEM []byte) bool {
 		return false
 	}
 	return publicKeyMatches(cert.PublicKey, key.Public())
+}
+
+// reencodeCertBundle parses every CERTIFICATE block (all-or-nothing) and re-encodes
+// them into a guaranteed well-formed PEM, returning the bundle and its cert count.
+// A non-CERTIFICATE block is skipped; an unparseable CERTIFICATE block is an error.
+func reencodeCertBundle(certPEM []byte) (bundle []byte, count int, err error) {
+	rest := certPEM
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return nil, 0, fmt.Errorf("parse cert in bundle: %w", err)
+		}
+		bundle = append(bundle, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: block.Bytes})...)
+		count++
+	}
+	return bundle, count, nil
+}
+
+// RotateCA performs the NON-DESTRUCTIVE half of a CA rotation: on a populated
+// single-CA Secret it generates a NEW CA in memory and CAS-writes tls.crt =
+// OLD++NEW, stages the NEW key in tls-new.key, and stamps phase=overlap /
+// active=old. It NEVER drops OLD and NEVER flips the active key — so trust only
+// widens (the core's strictPool already trusts every cert in the bundle while edges
+// keep presenting OLD-CA leaves). The destructive trim + active flip are a later
+// step. Returns the OLD++NEW bundle PEM.
+//
+// It is idempotent: a re-run on an already-overlap Secret (2 certs + a staged
+// tls-new.key) is a no-op that returns the existing bundle, so an Argo re-sync or a
+// Job retry never appends a third cert. Like EnsureCA it uses a resourceVersion CAS
+// loop, re-reading and re-evaluating idempotency on a Conflict. Cluster-backend only
+// (the fs backend's UpdateSecret is non-CAS).
+func RotateCA(ctx context.Context, rw SecretRW, namespace, name string, ttl time.Duration) (bundlePEM []byte, err error) {
+	const maxAttempts = 5
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		sec, err := rw.GetSecret(ctx, namespace, name)
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("edge CA secret %s/%s not found — rotation only runs on an existing CA", namespace, name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get edge CA secret: %w", err)
+		}
+
+		crt := sec.Data["tls.crt"]
+		key := sec.Data["tls.key"]
+		// Rotation requires an existing, valid CA (the active OLD pair). The first
+		// CERTIFICATE block must match tls.key.
+		if !validCAKeypair(crt, key) {
+			return nil, fmt.Errorf("edge CA secret %s/%s is not a populated/valid CA — bootstrap before rotating", namespace, name)
+		}
+
+		_, count, err := reencodeCertBundle(crt)
+		if err != nil {
+			return nil, fmt.Errorf("edge CA secret %s/%s has an unparseable bundle: %w", namespace, name, err)
+		}
+		phase := sec.Annotations[caRotationPhaseAnnotation]
+
+		// Idempotency: already in the overlap we'd produce (2 certs + staged NEW key).
+		if phase == caPhaseOverlap && count == 2 && len(sec.Data[caNewKeyField]) > 0 {
+			return append([]byte(nil), crt...), nil
+		}
+		// Any other multi-cert state is unexpected (a partial/foreign rotation); don't
+		// blindly append a third cert.
+		if count != 1 {
+			return nil, fmt.Errorf("edge CA secret %s/%s has %d certs (phase=%q) — not a clean single-CA to rotate; investigate", namespace, name, count, phase)
+		}
+
+		// Generate NEW and assemble OLD++NEW (both normalized, exactly 2 blocks).
+		oldBundle, _, err := reencodeCertBundle(crt)
+		if err != nil {
+			return nil, err
+		}
+		newCert, newKey, err := GenerateCA(ttl)
+		if err != nil {
+			return nil, err
+		}
+		newBundle := append(append([]byte(nil), oldBundle...), newCert...)
+		if _, n, err := reencodeCertBundle(newBundle); err != nil || n != 2 {
+			return nil, fmt.Errorf("assemble OLD++NEW bundle: want 2 certs, got %d (err=%v)", n, err)
+		}
+
+		id, err := caBundleID(newBundle)
+		if err != nil {
+			return nil, err
+		}
+		if sec.Data == nil {
+			sec.Data = map[string][]byte{}
+		}
+		sec.Data["tls.crt"] = newBundle
+		sec.Data[caNewKeyField] = newKey // tls.key stays OLD (active)
+		if sec.Annotations == nil {
+			sec.Annotations = map[string]string{}
+		}
+		sec.Annotations[caRotationPhaseAnnotation] = caPhaseOverlap
+		sec.Annotations[caActiveAnnotation] = caActiveOld
+		sec.Annotations[caGenerationAnnotation] = id // re-stamp (NEVER blank — keep the anti-regen guard)
+
+		if _, err := rw.UpdateSecret(ctx, namespace, sec); err != nil {
+			if apierrors.IsConflict(err) {
+				continue // re-read + re-evaluate idempotency (don't append a third cert)
+			}
+			return nil, fmt.Errorf("persist rotated edge CA: %w", err)
+		}
+
+		// Re-GET and assert the live Secret round-trips to exactly OLD++NEW before
+		// returning (mirror EnsureCA's re-verify discipline).
+		check, err := rw.GetSecret(ctx, namespace, name)
+		if err != nil {
+			return nil, fmt.Errorf("verify rotated edge CA: %w", err)
+		}
+		if _, n, err := reencodeCertBundle(check.Data["tls.crt"]); err != nil || n != 2 {
+			return nil, fmt.Errorf("post-rotation verify: want 2 certs, got %d (err=%v)", n, err)
+		}
+		return append([]byte(nil), newBundle...), nil
+	}
+	return nil, fmt.Errorf("rotate edge CA: exhausted CAS retries for %s/%s", namespace, name)
 }
