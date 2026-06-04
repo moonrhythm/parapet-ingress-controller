@@ -79,6 +79,7 @@ func RunEdgeCertRefresh(ctx context.Context, coord *RemintCoordinator, interval 
 		case <-t.C:
 			coord.MaybeRenew()
 			if caID, err := coord.cp.FetchTrustBundleCAID(); err == nil {
+				edgeRefreshOK() // liveness for the idle edge that polls no per-domain cert
 				coord.Observe(caID)
 			}
 		}
@@ -106,6 +107,9 @@ func RefreshCertOnce(cp *CpClient, store *CertStore, domain string, coord *Remin
 		} else {
 			slog.Warn("edge: cert PEM unparseable; keeping cached copy", "domain", domain)
 		}
+	}
+	if err == nil {
+		edgeRefreshOK() // liveness: a successful CP poll (200 or 304), independent of any ca_id change
 	}
 	coord.Observe(res.CAID)
 }

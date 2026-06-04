@@ -1,6 +1,11 @@
 package edgecp
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
+	"sort"
+	"strings"
+
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -68,8 +73,64 @@ var (
 	})
 )
 
+var (
+	// registryTotal is the EXPECTED-edge reporter set: one series per data-plane edge id
+	// in this CP's token registry, value 1 (enabled) or 0 (disabled/blacklisted). The
+	// OLD-drop interlock reads label_values(edge_registry_total==1) to discover which
+	// edges must converge. A disabled edge flips to 0 and drops from the expected set —
+	// but a still-RUNNING disabled edge presenting an OLD leaf is caught by the live-edge
+	// gate, not waved through by this.
+	registryTotal = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_registry_total",
+		Help:      "Edges in this control plane's token registry, by edge_id (1=enabled, 0=disabled).",
+	}, []string{"edge_id"})
+
+	// authzGeneration is a deterministic fingerprint of the loaded token registry,
+	// IDENTICAL on every replica that loaded the same registry. It is the pre-rotation
+	// blacklist-barrier (B0) contract: the interlock confirms every CP replica reports
+	// the same value (so a blacklist has converged on all replicas) before a revoke
+	// flips the active CA. The hot authz-watch is deferred; today a blacklist requires
+	// restart-all-CP, which this value lets the operator verify converged.
+	authzGeneration = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_authz_generation",
+		Help:      "Deterministic fingerprint of the loaded token registry (replica-identical; the blacklist-barrier signal).",
+	})
+)
+
 func init() {
-	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed)
+	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration)
+}
+
+// SetRegistryMetrics publishes the expected-edge reporter set and the authz-generation
+// fingerprint from the loaded token registry. Call once at startup (the registry is
+// static today). Only entries with a non-empty id are data-plane edges.
+func SetRegistryMetrics(entries map[string]Entry) {
+	registryTotal.Reset()
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.ID == "" {
+			continue
+		}
+		v := 1.0
+		d := "0"
+		if e.Disabled {
+			v, d = 0.0, "1"
+		}
+		registryTotal.WithLabelValues(e.ID).Set(v)
+		lines = append(lines, e.ID+":"+d)
+	}
+	authzGeneration.Set(registryFingerprint(lines))
+}
+
+// registryFingerprint hashes the sorted "id:disabled" lines into a stable float value
+// (first 6 bytes of the digest — < 2^48, exactly representable in a float64), so every
+// replica loading the same registry reports the identical authz_generation.
+func registryFingerprint(lines []string) float64 {
+	sort.Strings(lines)
+	sum := sha256.Sum256([]byte(strings.Join(lines, ";")))
+	return float64(binary.BigEndian.Uint64(append([]byte{0, 0}, sum[:6]...)))
 }
 
 // setSignerMetrics records the active signer's ca_id, generation, and bundle size. It

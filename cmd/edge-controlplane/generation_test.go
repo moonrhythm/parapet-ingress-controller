@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/moonrhythm/parapet-ingress-controller/edgecp"
 )
 
 func TestProvidedGeneration(t *testing.T) {
@@ -54,4 +56,21 @@ func TestProvidedGeneration(t *testing.T) {
 			t.Error("providedGeneration must never return 0")
 		}
 	})
+}
+
+func TestDuplicateEdgeID(t *testing.T) {
+	if got := duplicateEdgeID(map[string]edgecp.Entry{
+		"t1": {ID: "edge-a"},
+		"t2": {ID: "edge-b"},
+		"t3": {}, // cert-only token, no id
+		"t4": {}, // another empty id — not a collision
+	}); got != "" {
+		t.Errorf("unique ids must not report a duplicate, got %q", got)
+	}
+	if got := duplicateEdgeID(map[string]edgecp.Entry{
+		"t1": {ID: "dup"},
+		"t2": {ID: "dup"},
+	}); got != "dup" {
+		t.Errorf("duplicate id must be reported, got %q", got)
+	}
 }

@@ -566,7 +566,15 @@ pure-instrumentation Prometheus metrics on the shared `parapet` registry / `:918
 | `parapet_edge_clientcert_ca_id` | edge | gauge=1 | `ca_id` | CA set that issued the edge's **live** client leaf (lags the target until the edge re-mints). |
 | `parapet_edge_clientcert_not_after_seconds` | edge | gauge=unix | `ca_id` | Expiry of the edge's live leaf — an edge stuck on OLD with imminent expiry is the danger case. |
 | `parapet_edge_clientcert_loaded` | edge | gauge 0/1 | — | 1 once the edge holds a usable client cert. |
-| `parapet_edge_clientcert_remint_total` | edge | counter | `result` | `ok`/`keygen_fail`/`csr_fail`/`fetch_fail`/`marshal_fail`/`store_fail` — is the re-mint loop succeeding. |
+| `parapet_edge_clientcert_remint_total` | edge | counter | `result`,`trigger` | `ok`/`keygen_fail`/… by `proactive`/`reactive`/`timer` — is the re-mint loop succeeding. |
+| `parapet_edge_refresh_total` | edge | counter | `edge_id` | **Independent liveness** — bumped on EVERY successful CP poll regardless of `ca_id` change. The interlock gates on `increase(...) >= 1` so a wedged-but-scrapable edge frozen at the target can't false-green. |
+| `parapet_edge_registry_total` | CP | gauge 0/1 | `edge_id` | The expected-edge reporter set (1=enabled, 0=blacklisted). The interlock reads `label_values(==1)` to discover which edges must converge. |
+| `parapet_edge_authz_generation` | CP | gauge | — | Replica-identical fingerprint of the loaded token registry — the blacklist-barrier (B0) signal (all CP replicas must agree before a revoke flips the active CA). |
+
+> **`edge_id` label.** Every edge convergence metric carries an `edge_id` (from `EDGE_ID`,
+> matching the CP token id) so the interlock joins per-edge by a reschedule-stable key, not
+> the ephemeral pod/`instance`. A scrape-config `edge_id` relabel (kube-SD) should be
+> asserted to match the in-metric `edge_id`. Duplicate ids are refused at CP startup.
 
 **Convergence model — all three planes reach the CP target `ca_id`.** Because `Sign()`
 appends the full served bundle (`OLD++NEW` during overlap) to every leaf, the edge's
@@ -630,6 +638,7 @@ not Prometheus counters (a Pushgateway would be a new failure domain).
 | `EDGE_TRUST_CP_CACHE_FILE` / `_MAX_STALE` | core | `""` / `1h` | Warm-start hint (no trust until revalidated; bounded by max-stale). |
 | `EDGE_TRUST_REQUIRE_SAN` | core | **forced false, deprecated** | CA-only is the only model; the per-request SAN check is removed. Setting `true` with CP-issuance is a **fatal config error**. Slated for removal. |
 | `EDGE_DATAPLANE_MTLS` | edge | `false` | Enable the CP-issued client cert. Requires `EDGE_UPSTREAM_TLS=true`. Readiness gated on a loaded cert. |
+| `EDGE_ID` | edge | hostname | The edge's STABLE logical id, stamped as the `edge_id` label on every convergence metric (the OLD-drop interlock joins per-edge by it). **Required with `EDGE_DATAPLANE_MTLS=true`** and **must match this edge's CP token id**. Without mTLS, defaults to the hostname (convergence is moot). |
 | `EDGE_CLIENTCERT_TTL` | CP | **`168h` (7 d)** | Issued **leaf** lifetime (was 1 h). Buys a ~multi-day CP-outage budget (= `TTL` × renew-remaining-fraction ≈ 4.6 d). Renewal stays remaining-life (≤ 0.66×TTL, ~4.6 d remaining). The paired-knob guard: renew-before-fraction in (0,1) with ≥ several `EDGE_REFRESH_INTERVAL` of slack before expiry. |
 | `EDGE_CLIENTCERT_REMINT_JITTER` | edge | `60s` (≥ signer drain) | Max random delay before a force-re-mint (proactive or reactive), to prevent a re-mint thundering herd when `ca_id` flips fleet-wide. With exponential backoff + `Retry-After` + per-edge single-flight + a no-`ca_id`-change circuit-breaker. The periodic poll loops also jitter their FIRST tick by `[0,EDGE_REFRESH_INTERVAL]` so the signal-delivery instants decorrelate, not just the mints. |
 | `EDGE_CLIENTCERT_REMINT_BACKOFF_BASE` / `_COOLDOWN` | edge | `2s` / `5×EDGE_REFRESH_INTERVAL` | Exponential-backoff base on a non-ok mint (×2, jittered, capped at `EDGE_REFRESH_INTERVAL`); breaker-open cooldown. |

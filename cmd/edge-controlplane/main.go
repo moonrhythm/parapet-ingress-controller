@@ -171,6 +171,13 @@ func main() {
 		slog.Error("no edge tokens configured (set CP_TOKENS or CP_TOKENS_FILE); refusing to start with an open key-distribution API")
 		os.Exit(1)
 	}
+	// Refuse duplicate data-plane edge ids: two tokens sharing an id would collide on the
+	// edge_id label, shadowing one edge's series and silently masking a partitioned edge
+	// as converged in the OLD-drop interlock.
+	if dupID := duplicateEdgeID(tokens); dupID != "" {
+		slog.Error("duplicate edge id across tokens; each data-plane edge id must be unique", "id", dupID)
+		os.Exit(1)
+	}
 
 	if err := k8s.Init(); err != nil {
 		slog.Error("k8s init", "err", err)
@@ -179,6 +186,9 @@ func main() {
 
 	store := edgecp.NewCertStore()
 	authz := edgecp.NewAuthzEntries(tokens)
+	// Publish the expected-edge reporter set + the blacklist-barrier fingerprint that the
+	// OLD-drop convergence interlock reads (the registry is static today).
+	edgecp.SetRegistryMetrics(tokens)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -321,6 +331,22 @@ func main() {
 		slog.Error("serve", "err", err)
 		os.Exit(1)
 	}
+}
+
+// duplicateEdgeID returns the first non-empty edge id shared by two tokens, or "" if all
+// data-plane ids are unique. Unique ids are required for the edge_id convergence join.
+func duplicateEdgeID(tokens map[string]edgecp.Entry) string {
+	seen := make(map[string]struct{}, len(tokens))
+	for _, e := range tokens {
+		if e.ID == "" {
+			continue
+		}
+		if _, dup := seen[e.ID]; dup {
+			return e.ID
+		}
+		seen[e.ID] = struct{}{}
+	}
+	return ""
 }
 
 // loadTokens reads the registry from inline JSON or a file (file wins if both are
