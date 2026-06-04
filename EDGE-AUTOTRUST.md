@@ -453,6 +453,40 @@ step — else the compromised edge mints a fresh NEW-CA leaf off a lagging repli
 the overlap and survives the drop. Residual: a leaf minted in the sub-second
 pre-convergence window (if the barrier was skipped) survives to the next rotation.
 
+**The active-signer-fingerprint refinement (implemented).** `ca_id` convergence (step 3
+above) proves the edge holds the OLD++NEW *bundle* but **NOT that its leaf is *signed by*
+NEW**: `Sign()` appends the full served bundle to every leaf, so
+`parapet_edge_clientcert_ca_id` is byte-identical for `active=old` and `active=new`. After
+the OLD-drop the core's `ClientCAs={NEW}`, so an OLD-*signed* leaf fails verification → a
+502 for that otherwise-good edge. So the active flip (step 4) is a **separate gated phase**
+the revoke tool drives strictly *after* the ca_id widen barrier and *before* the drop, and
+an **active-signer fingerprint** is threaded CP→edge→converge so the drop interlock
+*cryptographically* asserts every good edge's leaf is NEW-signed, not merely inferred from
+the bundle ca_id:
+- CP: `Signer.ActiveFP()` (the sha256 of the CA actually signing) rides every
+  cert/edge-cert/WAF/trust-bundle response (`X-Parapet-Signing-Cert-Fp` / `signing_cert_fp`)
+  and the `parapet_edge_ca_active_signer_fp{ca_id,sigfp}` gauge. The signer reloader's no-op
+  short-circuit keys on the **(ca_id, active-fp) tuple** so the `active=old→new` flip (an
+  unchanged bundle ⇒ unchanged ca_id) actually installs the NEW signer instead of silently
+  no-op'ing.
+- Edge: `deriveIssuerFP` resolves *which* chain CA signed the live leaf
+  (AuthorityKeyId==SubjectKeyId, exactly-one-match, fail-closed) → `SignerFP()` →
+  `parapet_edge_clientcert_signer_fp`; the proactive re-mint triggers on a divergence on
+  **either** axis (ca_id OR signer fp), so the flip re-chains the leaf to NEW.
+- Drop interlock (`edgecp/converge`): the destructive gate additionally requires every CP
+  replica + every good edge to be NEW-signed (`signer fp == NEW`), the blacklist to have
+  converged on every replica (`authz gen == AuthzGeneration(post-revoke registry)`), and the
+  **CP-authoritative issuance ledger** (`parapet_edge_ca_issued_total{edge_id,sigfp}`) to
+  show the revoked id with **zero** issuances under NEW — a guarantee that does NOT rest on
+  the (forgeable) edge self-report. The revoked id is **exempt** from the live-OLD vetoes (it
+  is the intended casualty; vetoing on it would deadlock the revoke).
+
+The CA-Secret state machine is `overlap`/`active=old` (`RotateCA`, a pure non-destructive
+widen) → `active=new` (`SetActiveNew`, reversible) → `trimmed` (`TrimCA`, the destructive
+NEW-only drop; requires `active=new` first so OLD isn't dropped while it is the active
+signer). The `EDGE_CA_REVOKE` one-shot orchestrator sequences all of it, gating each
+irreversible step on `converge-status` and resuming idempotently on retry.
+
 ### k8s client: the first write path (Job-only)
 
 `GetSecret` + `UpdateSecret` are added but **`UpdateSecret` is invoked SOLELY by the
@@ -657,15 +691,22 @@ not Prometheus counters (a Pushgateway would be a new failure domain).
 | `EDGE_CONVERGE_FRESHNESS` / `_STABLE_READS` / `_POLL_INTERVAL` / `_SCRAPE_INTERVAL` | CP (Job) | `5m` / `2` / `30s` / `15s` | Liveness window; consecutive converged reads required; gap between them; the scrape interval. The reader **refuses** unless `poll × reads ≥ 2×scrape` AND `≥ EDGE_REFRESH_INTERVAL` (a flap can't read as converged). |
 | `EDGE_CONVERGE_EXCLUDE` | CP (Job) | `""` | `id=reason,…` — LOUD, reason-required convergence-veto waivers for decommissioned edges (echoed in the verdict; an empty reason is refused). |
 | `EDGE_CONVERGE_REVOKED_TOKEN` / `_CP_URL` / `_CP_CA` | CP (Job) | `""` | The revoked token + CP endpoint for the absence probe (must be rejected 401/403). Absent ⇒ `revoked-unverified` (fail-closed). |
+| `EDGE_CONVERGE_EXPECTED_CA_ID` / `_SIGNER_FP` / `_AUTHZ_GEN` / `_REVOKED_EDGE_ID` | CP (Job) | `""` / `""` / `0` / `""` | Drop-checkpoint pins. `EXPECTED_CA_ID` pins the resolved target to *this* rotation. Setting `EXPECTED_SIGNER_FP` (the NEW signing fp) switches the predicate from the ca_id widen barrier to the destructive OLD-drop gate: every CP replica + good edge must be NEW-signed, `AUTHZ_GEN` (the post-blacklist `AuthzGeneration`) must match on every replica, and `REVOKED_EDGE_ID` must have zero NEW issuances (and is exempt from the live-OLD vetoes). `SIGNER_FP` set without `AUTHZ_GEN` is a refused half-interlock. |
+| `EDGE_CA_REVOKE` | CP (Job) | false | Run-once **revoke orchestrator**: drives the full phased rotation (widen → wait Gate A → flip → wait Gate B → trim), gating each irreversible step on convergence. Requires `EDGE_CA_REVOKE_EDGE_ID`, `EDGE_CONVERGE_PROM_URL`, the live probe inputs, and the post-blacklist `CP_TOKENS` (preflight refuses unless the id is present-and-`disabled`). Idempotent/resumable; a timeout leaves the rotation at its last completed step. |
+| `EDGE_CA_REVOKE_EDGE_ID` / `EDGE_CA_REVOKE_TIMEOUT` | CP (Job) | `""` / `30m` | The edge id to sever; the per-gate convergence-wait deadline (a timeout never drops OLD — re-run resumes). |
 
 Registry shape: `{"<token>":{"id":...,"domains":[...],"disabled":bool}}`. New trust-bundle
 field `ca_id`. Metrics: `parapet_trust_source{mtls|cidr|none|file}`,
 `parapet_trust_reload_rejected_total`, `parapet_trust_rollback_rejected_total`,
 `parapet_trust_bundle_age_seconds` (core); `parapet_edge_clientcert_loaded`,
-`parapet_edge_clientcert_not_after`, **`parapet_edge_clientcert_ca_id`** (edge);
+`parapet_edge_clientcert_not_after`, **`parapet_edge_clientcert_ca_id`**,
+**`parapet_edge_clientcert_signer_fp`**, `parapet_edge_cp_active_signer_fp` (edge);
 **`parapet_edge_token_disabled_without_rotation`**, **`parapet_edge_ca_rotation_stuck`**,
 `parapet_edge_ca_generated_total`, `parapet_edge_ca_unexpected_empty_total`,
-`parapet_edge_ca_signer_fingerprint` (CP, pod-labeled). **Removed:**
+`parapet_edge_ca_signer_fingerprint`, **`parapet_edge_ca_active_signer_fp`**,
+**`parapet_edge_ca_issued_total{edge_id,sigfp}`** (the CP-authoritative issuance ledger),
+`parapet_edge_ca_signer_active_flip_failed`, `parapet_edge_authz_generation` (CP,
+pod-labeled). **Removed:**
 `parapet_trust_allowed_sans_count` and the deterministic-SAN-serialization-before-etag
 requirement.
 
@@ -691,17 +732,22 @@ requirement.
 > ⚠️ **Blacklisting a token does NOT revoke trust** — see [Revocation](#revocation--ca-rotation).
 > For a real compromise, CA rotation is mandatory.
 
-Ship a single tool, **`edge-controlplane revoke --edge <id>`**, that performs **both**
-steps as one atomic, idempotent, resumable gesture (resumable via the rotation-phase
-annotation): (1) **blacklist** — set `disabled:true` (preferred over delete; a full
-lockout); (2) **wait** until the blacklist has converged on **every** CP replica
-(pod-labeled metric) — a barrier, not a parallel step; (3) **add** the NEW CA to the
-overlap bundle; (4) good edges re-mint under NEW (proactive, jittered); (5) **confirm**
-convergence via the interlock (every good edge on NEW; the revoked id absent under NEW);
-(6) **drop** OLD — the revoked edge's OLD-CA leaf stops verifying and it is distrusted.
-Never expose a bare `blacklist` verb that does only step (1) without loudly printing
-"TRUST NOT YET REVOKED — run rotate"; `parapet_edge_token_disabled_without_rotation`
-fires until the rotation completes.
+**Implemented as the `EDGE_CA_REVOKE` run-once Job** (`runRevoke`), one idempotent,
+resumable gesture (resumable via the rotation-phase annotation + per-step CAS):
+(0) **operator blacklist** — set `disabled:true` in `CP_TOKENS` (preferred over delete; a
+full lockout) and restart the serving CPs (the hot authz-watch is deferred); the Job's
+preflight **refuses** unless the id is present-and-`disabled` and derives the
+`ExpectedAuthzGen` pin from that same registry. Then the Job: (1) **widen** the bundle to
+OLD++NEW (`RotateCA`); (2) **wait Gate A** — every CP+core+edge holds OLD++NEW (`ca_id`
+converged); (3) **flip** the active signer to NEW (`SetActiveNew`); good edges re-mint
+under NEW (proactive, jittered); (4) **wait Gate B** — the destructive-drop interlock:
+every CP replica + good edge NEW-*signed* (the active-fp gates), the blacklist converged
+on every replica (`authz gen`), the revoked id with zero NEW issuances, and the live probe
+rejecting the token; (5) **drop** OLD (`TrimCA`) — the revoked edge's OLD-CA leaf stops
+verifying and it is distrusted. A gate timeout leaves the rotation at its last completed
+step (re-run resumes) and never drops OLD. Never expose a bare `blacklist` verb that does
+only step (0) without loudly printing "TRUST NOT YET REVOKED — run revoke";
+`parapet_edge_token_disabled_without_rotation` fires until the rotation completes.
 
 ## Phasing
 
