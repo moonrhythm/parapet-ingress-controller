@@ -58,18 +58,18 @@ func TestRefreshEdgeCertOnceOK(t *testing.T) {
 	}
 	store := NewClientCertStore()
 
-	before := testutil.ToFloat64(edgeRemint.WithLabelValues("ok", "timer"))
+	before := testutil.ToFloat64(edgeRemint.WithLabelValues("ok", "timer", "unknown"))
 	if got, _ := RefreshEdgeCertOnce(cp, store, "timer"); got != "ok" {
 		t.Fatalf("result = %q, want ok", got)
 	}
-	if testutil.ToFloat64(edgeRemint.WithLabelValues("ok", "timer")) != before+1 {
+	if testutil.ToFloat64(edgeRemint.WithLabelValues("ok", "timer", "unknown")) != before+1 {
 		t.Error("ok remint counter not incremented")
 	}
 	if !store.Loaded() {
 		t.Error("store should hold a cert after a successful re-mint")
 	}
 	// The edge-derived ca_id must equal the CP signer's CAID (same CA set, via caid).
-	if v := testutil.ToFloat64(edgeClientCertCAID.WithLabelValues(signer.CAID())); v != 1 {
+	if v := testutil.ToFloat64(edgeClientCertCAID.WithLabelValues(signer.CAID(), "unknown")); v != 1 {
 		t.Errorf("edge ca_id series for %q not set to 1", signer.CAID())
 	}
 }
@@ -86,11 +86,11 @@ func TestRefreshEdgeCertOnceFetchFail(t *testing.T) {
 	}
 	store := NewClientCertStore()
 
-	before := testutil.ToFloat64(edgeRemint.WithLabelValues("fetch_fail", "timer"))
+	before := testutil.ToFloat64(edgeRemint.WithLabelValues("fetch_fail", "timer", "unknown"))
 	if got, _ := RefreshEdgeCertOnce(cp, store, "timer"); got != "fetch_fail" {
 		t.Fatalf("result = %q, want fetch_fail", got)
 	}
-	if testutil.ToFloat64(edgeRemint.WithLabelValues("fetch_fail", "timer")) != before+1 {
+	if testutil.ToFloat64(edgeRemint.WithLabelValues("fetch_fail", "timer", "unknown")) != before+1 {
 		t.Error("fetch_fail remint counter not incremented")
 	}
 	if store.Loaded() {

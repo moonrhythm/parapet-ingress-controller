@@ -75,6 +75,20 @@ func main() {
 		slog.Error("EDGE_DATAPLANE_MTLS=true requires EDGE_UPSTREAM_TLS=true (a client cert can only ride TLS)")
 		os.Exit(1)
 	}
+	// EDGE_ID is the edge's STABLE logical identity stamped on every convergence metric
+	// (the OLD-drop interlock joins per-edge by it). With data-plane mTLS it MUST be set
+	// and MUST match this edge's CP token id, or the per-edge join silently can't find
+	// the edge (it would either block forever or, worse, let a partitioned edge be
+	// shadowed). Without mTLS, convergence is moot — default to the hostname.
+	edgeID := os.Getenv("EDGE_ID")
+	if dataplaneMTLS && edgeID == "" {
+		slog.Error("EDGE_ID is required with EDGE_DATAPLANE_MTLS=true (it must match this edge's CP token id; the convergence interlock joins on it)")
+		os.Exit(1)
+	}
+	if edgeID == "" {
+		edgeID, _ = os.Hostname()
+	}
+	edge.SetEdgeID(edgeID)
 	refreshInterval := time.Duration(envInt64("EDGE_REFRESH_INTERVAL", 300)) * time.Second
 	if refreshInterval <= 0 { // a 0/negative value would panic time.NewTicker
 		refreshInterval = 300 * time.Second
