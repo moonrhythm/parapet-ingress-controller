@@ -186,6 +186,44 @@ func TestEdgeCertEndpoint(t *testing.T) {
 	}
 }
 
+// The tokenless trust-bundle long-poll is bounded: when the watch-slot pool is full a
+// would-block watcher sheds 503 + Retry-After, while the fast paths (non-watch GET, and an
+// up-to-date watcher whose since < gen) are NEVER gated.
+func TestTrustBundleWatchConcurrencyShed(t *testing.T) {
+	certPEM, keyPEM := testEdgeCA(t)
+	sg, _, _ := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)
+	srv := NewServer(NewCertStore(), NewAuthz(nil)).WithSigner(sg, 1).WithWatchConcurrency(1, 7)
+	h := srv.Handler()
+
+	// Occupy the single watch slot (stands in for one blocked long-poller).
+	srv.watchGate <- struct{}{}
+	defer func() { <-srv.watchGate }()
+
+	// A watcher that WOULD block (since >= gen=1) is shed with 503 + Retry-After.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/trust-bundle?watch=1&since=1", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("saturated watch: want 503, got %d", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") != "7" {
+		t.Errorf("shed must carry Retry-After=7, got %q", rec.Header().Get("Retry-After"))
+	}
+
+	// A non-watch GET is never gated → 200 even with the slot full.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/trust-bundle", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("non-watch GET must not be gated, got %d", rec.Code)
+	}
+
+	// An up-to-date watcher (since < gen ⇒ returns immediately) doesn't need a slot → 200.
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/trust-bundle?watch=1&since=0", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("up-to-date watcher must not be gated, got %d", rec.Code)
+	}
+}
+
 func TestTrustBundleEndpoint(t *testing.T) {
 	certPEM, keyPEM := testEdgeCA(t)
 	sg, _, _ := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)

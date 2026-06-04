@@ -38,6 +38,31 @@ type Server struct {
 	// fleet-aggregate backpressure during a rotation's re-mint surge.
 	signGate       chan struct{}
 	signRetryAfter int
+
+	// watchGate bounds concurrent BLOCKED long-pollers on GET /v1/trust-bundle?watch=1
+	// (nil = no limit). That endpoint is TOKENLESS, so without a bound a flood of watch
+	// requests — even from NetworkPolicy-allowed sources — could pin one blocked goroutine
+	// each for up to watchTimeout and exhaust memory. When full the handler sheds with
+	// 503 + Retry-After:watchRetryAfter (the client retries / falls back to a plain poll).
+	// Only the blocking watch path acquires it; the fast non-watch GET is never gated.
+	watchGate       chan struct{}
+	watchRetryAfter int
+}
+
+// WithWatchConcurrency bounds concurrent blocked trust-bundle long-pollers: at most n in
+// flight, with the given Retry-After (seconds) on a shed 503. Size it generously — there is
+// one long-poll per core + per idle edge, so it should never shed legitimate traffic; it is
+// a defense-in-depth cap on the tokenless endpoint, above the NetworkPolicy. n <= 0 disables
+// the limit. Returns the server for chaining; call once at startup.
+func (s *Server) WithWatchConcurrency(n, retryAfterSecs int) *Server {
+	if n > 0 {
+		s.watchGate = make(chan struct{}, n)
+	}
+	if retryAfterSecs <= 0 {
+		retryAfterSecs = 5
+	}
+	s.watchRetryAfter = retryAfterSecs
+	return s
 }
 
 // WithSignConcurrency bounds concurrent edge-cert signing: at most n in flight, with
