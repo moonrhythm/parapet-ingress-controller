@@ -144,6 +144,20 @@ func (s *Server) handleTrustBundle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("watch") == "1" {
 		since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
 		if st.gen <= since {
+			// Bound concurrent blocked long-pollers on this TOKENLESS endpoint: acquire a slot
+			// or shed with 503 + Retry-After (the client retries / falls back to a plain poll).
+			// Only the blocking branch is gated; an up-to-date watcher (st.gen > since) returns
+			// immediately without consuming a slot. nil gate ⇒ no limit.
+			if s.watchGate != nil {
+				select {
+				case s.watchGate <- struct{}{}:
+					defer func() { <-s.watchGate }()
+				default:
+					w.Header().Set("Retry-After", strconv.Itoa(s.watchRetryAfter))
+					http.Error(w, "trust-bundle watchers saturated", http.StatusServiceUnavailable)
+					return
+				}
+			}
 			s.genMu.Lock()
 			notify := s.genNotify
 			s.genMu.Unlock()

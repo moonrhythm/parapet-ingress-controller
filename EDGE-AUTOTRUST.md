@@ -331,6 +331,15 @@ handlers (over-limit ⇒ 503 + `Retry-After`), a context deadline ≤ the ceilin
 per-source-IP cap, and a body cap — the edge-sources-only NetworkPolicy is now
 **availability-load-bearing**, a hard prerequisite.
 
+> **Implemented** (`Server.WithWatchConcurrency`, `handleTrustBundle`, CP `http.Server`):
+> the `watchGate` semaphore bounds concurrent *blocked* long-pollers (`CP_TRUST_WATCH_CONCURRENCY`,
+> default 1024 — only the would-block branch acquires; an up-to-date watcher and any non-watch
+> GET are never gated) and sheds 503 + `Retry-After` when full; the context deadline / ≤30 s
+> ceiling was already present; `MaxHeaderBytes` (64 KiB) bounds header memory. The
+> **per-source-IP cap stays offloaded to the NetworkPolicy** (the doc's availability-load-bearing
+> prerequisite), and there is no response-body cap because the trust-bundle response is
+> server-generated (a small CA bundle), not client-controlled.
+
 ### The issuance endpoint (`POST /v1/edge-cert`)
 
 CSR-based; the private key never leaves the edge. A token whose registry entry has
@@ -692,6 +701,7 @@ not Prometheus counters (a Pushgateway would be a new failure domain).
 | `EDGE_CLIENTCERT_REMINT_BREAKER_K` / `_PROACTIVE_J` | edge | `3` / `5` | Open the **reactive** breaker after K consecutive ok-mints that don't change `ca_id` (a core-side reject re-minting can't fix); the **proactive** breaker after J ok-mints that don't reach the observed target. Transient (non-ok) mints never feed either — they're the backoff path. A genuine `ca_id` flip / convergence resets. |
 | `EDGE_CLIENTCERT_RENEW_REMAINING_FRACTION` | edge | `0.66` | Remaining-life renewal floor: re-mint when `remaining ≤ fraction × the leaf's own lifetime`. The timer floor that converges even a zero-signal edge; keep `(1-elapsed)×TTL > CP-recovery SLO`. |
 | `CP_EDGE_SIGN_CONCURRENCY` / `CP_EDGE_SIGN_RETRY_AFTER` | CP | `GOMAXPROCS` / `5s` | Bound concurrent edge-cert signs; shed the rotation re-mint surge with `503 + Retry-After` (the only fleet-aggregate backpressure — one token per edge doesn't bound the aggregate). The edge coordinator honors the `Retry-After`. |
+| `CP_TRUST_WATCH_CONCURRENCY` / `CP_TRUST_WATCH_RETRY_AFTER` | CP | `1024` / `5s` | Bound concurrent BLOCKED long-pollers on the tokenless `GET /v1/trust-bundle?watch=1`; over-limit sheds `503 + Retry-After`. Only the would-block branch is gated (non-watch GETs + up-to-date watchers are free). Sized generously (one poll per core + idle edge) so it never sheds legitimate traffic — defense-in-depth above the NetworkPolicy. `0` disables. |
 | `EDGE_CLIENTCERT_KEY_TYPE` / `_SKEW` / `_RATE` | edge/CP | `ecdsa-p256` / `10m` / `10/min` | Ephemeral key type; NotBefore backdate (negligible vs 7 d, but NTP between CP and core stays a prerequisite); per-token issuance limit (**per-replica**, effective N×). |
 | `EDGE_CA_BOOTSTRAP` / `--bootstrap-ca` | CP (Job) | false | One-shot CA bootstrap **and rotation** mode (`EnsureCA`: adopt/generate/never-regenerate, CAS-guarded). The only writer of the CA Secret. |
 | `EDGE_CA_CERT` / `_KEY` | CP | `""` (⇒ managed) | Provided mode (mounted CA). Both-or-neither. Absent ⇒ managed (the Job generates). |

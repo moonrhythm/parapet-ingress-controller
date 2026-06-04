@@ -232,6 +232,12 @@ func main() {
 	signRetryAfter := envInt("CP_EDGE_SIGN_RETRY_AFTER", 5)
 	server = server.WithSignConcurrency(signConcurrency, signRetryAfter)
 
+	// Bound concurrent blocked long-pollers on the TOKENLESS GET /v1/trust-bundle?watch=1 so
+	// a flood can't pin a goroutine each and exhaust memory (defense-in-depth above the
+	// edge/core-only NetworkPolicy). Sized generously — one long-poll per core + idle edge —
+	// so it never sheds legitimate traffic; over-limit gets 503 + Retry-After. 0 disables.
+	server = server.WithWatchConcurrency(envInt("CP_TRUST_WATCH_CONCURRENCY", 1024), envInt("CP_TRUST_WATCH_RETRY_AFTER", 5))
+
 	// Data-plane client-cert issuance (POST /v1/edge-cert) + the tokenless trust
 	// bundle (GET /v1/trust-bundle). Two ways to supply the edge CA:
 	//   provided — mount EDGE_CA_CERT/EDGE_CA_KEY (operator's PKI).
@@ -348,6 +354,9 @@ func main() {
 		Addr:              addr,
 		Handler:           server.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Bound request-header memory per connection on the tokenless API (defense-in-depth
+		// against a header flood); 64 KiB is ample for the bearer token + ETag headers.
+		MaxHeaderBytes: 64 << 10,
 	}
 	if tlsEnabled {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
