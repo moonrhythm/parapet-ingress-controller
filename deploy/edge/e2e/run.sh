@@ -76,11 +76,25 @@ gen_cert leaf "$DOMAIN"    # the cert the edge will fetch + serve for $DOMAIN
 
 # A dedicated edge CA (provided mode) so the CP loads a signer and exposes the
 # convergence metrics (parapet_edge_ca_signer_fingerprint) on its /metrics listener.
+# Use an explicit -config (NOT -addext): -addext APPENDS to the system openssl.cnf's
+# default x509 extensions, so on distros whose default already adds basicConstraints
+# the cert ends up with a DUPLICATE basicConstraints, which Go 1.26's x509 parser
+# rejects. A self-contained config sets each extension exactly once.
+cat > "$WORK/edge-ca.cnf" <<'CNF'
+[req]
+distinguished_name = dn
+x509_extensions = v3_ca
+prompt = no
+[dn]
+CN = parapet-edge-ca
+[v3_ca]
+basicConstraints = critical, CA:TRUE
+keyUsage = critical, keyCertSign, cRLSign
+extendedKeyUsage = clientAuth
+CNF
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-  -keyout "$WORK/edge-ca.key" -out "$WORK/edge-ca.crt" -days 1 -subj "/CN=parapet-edge-ca" \
-  -addext "basicConstraints=critical,CA:TRUE" \
-  -addext "keyUsage=critical,keyCertSign" \
-  -addext "extendedKeyUsage=clientAuth" 2>/dev/null
+  -keyout "$WORK/edge-ca.key" -out "$WORK/edge-ca.crt" -days 1 \
+  -config "$WORK/edge-ca.cnf" 2>/dev/null
 
 # ---------------------------------------------------------------------------
 say "2. write static manifests (TLS Secret + global WAF ConfigMap) + tokens.json"
