@@ -36,17 +36,21 @@ var (
 	edgeRemint = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "edge_clientcert_remint_total",
-		Help:      "Edge data-plane cert re-mint attempts by result (ok|keygen_fail|csr_fail|fetch_fail|marshal_fail|store_fail).",
-	}, []string{"result"})
+		Help:      "Edge data-plane cert re-mint attempts by result (ok|keygen_fail|csr_fail|fetch_fail|marshal_fail|store_fail|breaker_open) and trigger (proactive|reactive|timer).",
+	}, []string{"result", "trigger"})
 
-	edgeRemintHandles = map[string]prometheus.Counter{}
+	// edgeCPTargetCAID is the edge-OBSERVED CP target ca_id (from the X-Parapet-CA-Id
+	// signal). The OLD-drop convergence interlock compares this against the live
+	// edge_clientcert_ca_id; equal ⇒ this edge has converged.
+	edgeCPTargetCAID = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cp_target_ca_id",
+		Help:      "CP target ca_id the edge last observed (value 1).",
+	}, []string{"ca_id"})
 )
 
 func init() {
-	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint)
-	for _, r := range []string{"ok", "keygen_fail", "csr_fail", "fetch_fail", "marshal_fail", "store_fail"} {
-		edgeRemintHandles[r], _ = edgeRemint.GetMetricWith(prometheus.Labels{"result": r})
-	}
+	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID)
 }
 
 // setClientCertMetrics records the live leaf's ca_id and expiry (Reset()-then-Set so
@@ -63,9 +67,17 @@ func setClientCertMetrics(caID string, notAfterUnix int64) {
 	edgeClientCertLoaded.Set(1)
 }
 
-// remint counts one re-mint attempt by result (bare Inc on a pre-materialized handle).
-func remint(result string) {
-	if h := edgeRemintHandles[result]; h != nil {
-		h.Inc()
+// remint counts one re-mint attempt by result and trigger. Re-mints are infrequent
+// (per rotation / renewal, not per request), so resolving the label here is fine.
+func remint(result, trigger string) {
+	edgeRemint.WithLabelValues(result, trigger).Inc()
+}
+
+// setObservedTarget records the CP target ca_id the edge last observed (Reset-then-Set,
+// one live series). "" (no signal) clears it.
+func setObservedTarget(caID string) {
+	edgeCPTargetCAID.Reset()
+	if caID != "" {
+		edgeCPTargetCAID.WithLabelValues(caID).Set(1)
 	}
 }

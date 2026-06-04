@@ -32,6 +32,26 @@ type Server struct {
 	// readiness probe 503s until a signer has actually loaded, so an edge isn't
 	// pointed at a CP that can't yet issue/serve the trust bundle.
 	issuanceExpected atomic.Bool
+
+	// signGate bounds concurrent sg.Sign() on POST /v1/edge-cert (nil = no limit).
+	// When full, the handler sheds with 503 + Retry-After:signRetryAfter — the
+	// fleet-aggregate backpressure during a rotation's re-mint surge.
+	signGate       chan struct{}
+	signRetryAfter int
+}
+
+// WithSignConcurrency bounds concurrent edge-cert signing: at most n in flight, with
+// the given Retry-After (seconds) on a shed 503. n <= 0 disables the limit. Returns
+// the server for chaining; call once at startup.
+func (s *Server) WithSignConcurrency(n, retryAfterSecs int) *Server {
+	if n > 0 {
+		s.signGate = make(chan struct{}, n)
+	}
+	if retryAfterSecs <= 0 {
+		retryAfterSecs = 5
+	}
+	s.signRetryAfter = retryAfterSecs
+	return s
 }
 
 // signerGen is an immutable (signer, generation) pair. SetSigner replaces the whole
@@ -150,6 +170,17 @@ func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Force-re-mint signal: advertise the signer's target ca_id (the edge-CA the fleet
+	// should converge to, process-global) on EVERY authorized response — 404/304/200 —
+	// so an edge observes a CA rotation on its existing /v1/certs poll regardless of
+	// cert presence or ETag state. This is the SIGNER target, orthogonal to this sni's
+	// leaf issuer; it is deliberately NOT folded into entry.etag — a pure CA rotation
+	// must never force a fleet-wide cert+key re-download. Set after Known()/Allowed()
+	// (never to an unauthorized caller), before any WriteHeader so it rides the 304/404.
+	if id := s.CurrentCAID(); id != "" {
+		w.Header().Set("X-Parapet-CA-Id", id)
+	}
+
 	entry, ok := s.certs.Get(sni)
 	if !ok {
 		http.Error(w, "no certificate for sni", http.StatusNotFound)
@@ -174,8 +205,9 @@ func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
 type wafResponse struct {
 	Generation  uint64            `json:"generation"`
 	GlobalRules string            `json:"global_rules"`
-	Zones       map[string]string `json:"zones"`         // zoneKey -> rules YAML
-	HostZoneMap map[string]string `json:"host_zone_map"` // host -> zoneKey
+	Zones       map[string]string `json:"zones"`           // zoneKey -> rules YAML
+	HostZoneMap map[string]string `json:"host_zone_map"`   // host -> zoneKey
+	CAID        string            `json:"ca_id,omitempty"` // signer target ca_id (best-effort SECONDARY force-re-mint confirmer)
 }
 
 // handleWAF serves the WAF payload scoped to the edge's allowed domains: the
@@ -198,6 +230,11 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 		GlobalRules: snap.global,
 		Zones:       snap.zones,
 		HostZoneMap: snap.hostZone,
+		// In-body ca_id busts the ETag on the 200 arm for free (the WAF snapshot is
+		// ca_id-independent — SetSigner leaves it untouched). The steady-state 304 arm
+		// carries NOTHING, so /v1/waf is only a SECONDARY confirmer; the /v1/certs
+		// X-Parapet-CA-Id header is the guaranteed steady-state carrier.
+		CAID: s.CurrentCAID(),
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {

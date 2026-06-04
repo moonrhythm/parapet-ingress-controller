@@ -223,8 +223,8 @@ The default data-plane identity is CP-issued (`EDGE_DATAPLANE_MTLS=true`; requir
 `EDGE_UPSTREAM_TLS=true`). `edge/clientcert.go` holds the leaf in an in-memory
 `ClientCertStore` (`atomic.Pointer[tls.Certificate]`); `Update` is **all-or-nothing**
 (keep the prior pair on failure). `RunEdgeCertRefresh` renews on remaining-life
-(re-mint at ≤ ⅓ of the now-7d TTL, ~the 56 h mark) with backoff + jitter +
-`Retry-After`.
+(re-mint when ≤ 0.66 × the leaf's own lifetime remains, i.e. ~4.6 d left of a 7-d
+leaf, ~2.4 d in) with backoff + jitter + `Retry-After`.
 
 ### Force-re-mint trigger: proactive overlap (primary) + reactive (floor)
 
@@ -611,8 +611,12 @@ not Prometheus counters (a Pushgateway would be a new failure domain).
 | `EDGE_TRUST_CP_CACHE_FILE` / `_MAX_STALE` | core | `""` / `1h` | Warm-start hint (no trust until revalidated; bounded by max-stale). |
 | `EDGE_TRUST_REQUIRE_SAN` | core | **forced false, deprecated** | CA-only is the only model; the per-request SAN check is removed. Setting `true` with CP-issuance is a **fatal config error**. Slated for removal. |
 | `EDGE_DATAPLANE_MTLS` | edge | `false` | Enable the CP-issued client cert. Requires `EDGE_UPSTREAM_TLS=true`. Readiness gated on a loaded cert. |
-| `EDGE_CLIENTCERT_TTL` | CP | **`168h` (7 d)** | Issued **leaf** lifetime (was 1 h). Buys a ~multi-day CP-outage budget (= `TTL` × renew-before-fraction ≈ 4.6 d). Renewal stays remaining-life (≤⅓, ~56 h mark). The paired-knob guard: renew-before-fraction in (0,1) with ≥ several `EDGE_REFRESH_INTERVAL` of slack before expiry. |
-| `EDGE_CLIENTCERT_REMINT_JITTER` | edge | `60s` (≥ signer drain) | Max random delay before a force-re-mint (proactive or reactive), to prevent a re-mint thundering herd when `ca_id` flips fleet-wide. With exponential backoff + `Retry-After` + per-edge single-flight + a no-`ca_id`-change circuit-breaker. |
+| `EDGE_CLIENTCERT_TTL` | CP | **`168h` (7 d)** | Issued **leaf** lifetime (was 1 h). Buys a ~multi-day CP-outage budget (= `TTL` × renew-remaining-fraction ≈ 4.6 d). Renewal stays remaining-life (≤ 0.66×TTL, ~4.6 d remaining). The paired-knob guard: renew-before-fraction in (0,1) with ≥ several `EDGE_REFRESH_INTERVAL` of slack before expiry. |
+| `EDGE_CLIENTCERT_REMINT_JITTER` | edge | `60s` (≥ signer drain) | Max random delay before a force-re-mint (proactive or reactive), to prevent a re-mint thundering herd when `ca_id` flips fleet-wide. With exponential backoff + `Retry-After` + per-edge single-flight + a no-`ca_id`-change circuit-breaker. The periodic poll loops also jitter their FIRST tick by `[0,EDGE_REFRESH_INTERVAL]` so the signal-delivery instants decorrelate, not just the mints. |
+| `EDGE_CLIENTCERT_REMINT_BACKOFF_BASE` / `_COOLDOWN` | edge | `2s` / `5×EDGE_REFRESH_INTERVAL` | Exponential-backoff base on a non-ok mint (×2, jittered, capped at `EDGE_REFRESH_INTERVAL`); breaker-open cooldown. |
+| `EDGE_CLIENTCERT_REMINT_BREAKER_K` / `_PROACTIVE_J` | edge | `3` / `5` | Open the **reactive** breaker after K consecutive ok-mints that don't change `ca_id` (a core-side reject re-minting can't fix); the **proactive** breaker after J ok-mints that don't reach the observed target. Transient (non-ok) mints never feed either — they're the backoff path. A genuine `ca_id` flip / convergence resets. |
+| `EDGE_CLIENTCERT_RENEW_REMAINING_FRACTION` | edge | `0.66` | Remaining-life renewal floor: re-mint when `remaining ≤ fraction × the leaf's own lifetime`. The timer floor that converges even a zero-signal edge; keep `(1-elapsed)×TTL > CP-recovery SLO`. |
+| `CP_EDGE_SIGN_CONCURRENCY` / `CP_EDGE_SIGN_RETRY_AFTER` | CP | `GOMAXPROCS` / `5s` | Bound concurrent edge-cert signs; shed the rotation re-mint surge with `503 + Retry-After` (the only fleet-aggregate backpressure — one token per edge doesn't bound the aggregate). The edge coordinator honors the `Retry-After`. |
 | `EDGE_CLIENTCERT_KEY_TYPE` / `_SKEW` / `_RATE` | edge/CP | `ecdsa-p256` / `10m` / `10/min` | Ephemeral key type; NotBefore backdate (negligible vs 7 d, but NTP between CP and core stays a prerequisite); per-token issuance limit (**per-replica**, effective N×). |
 | `EDGE_CA_BOOTSTRAP` / `--bootstrap-ca` | CP (Job) | false | One-shot CA bootstrap **and rotation** mode (`EnsureCA`: adopt/generate/never-regenerate, CAS-guarded). The only writer of the CA Secret. |
 | `EDGE_CA_CERT` / `_KEY` | CP | `""` (⇒ managed) | Provided mode (mounted CA). Both-or-neither. Absent ⇒ managed (the Job generates). |

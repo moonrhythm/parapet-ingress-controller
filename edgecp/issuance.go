@@ -28,6 +28,7 @@ type edgeCertResponse struct {
 	ChainPEM string `json:"chain_pem"`
 	NotAfter string `json:"not_after"`
 	Serial   string `json:"serial"`
+	CAID     string `json:"ca_id,omitempty"` // signer ca_id, so the edge self-confirms convergence post-mint
 }
 
 // handleEdgeCert signs an edge data-plane client cert from a CSR. Token-gated: a
@@ -80,6 +81,22 @@ func (s *Server) handleEdgeCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Fleet-aggregate backpressure: a rotation flips ca_id for every edge at once and
+	// each re-mints against this CPU-bound signer. One token per edge means the
+	// per-token bucket does NOT bound the aggregate, so bound the concurrent signs here
+	// and shed with 503 + Retry-After when saturated — the edge coordinator honors it.
+	// nil/disabled gate ⇒ no limit (behavior unchanged).
+	if s.signGate != nil {
+		select {
+		case s.signGate <- struct{}{}:
+			defer func() { <-s.signGate }()
+		default:
+			w.Header().Set("Retry-After", strconv.Itoa(s.signRetryAfter))
+			http.Error(w, "signer saturated", http.StatusServiceUnavailable)
+			return
+		}
+	}
+
 	chainPEM, notAfter, serial, err := sg.Sign(csr.PublicKey, id)
 	if err != nil {
 		http.Error(w, "sign failed", http.StatusInternalServerError)
@@ -93,6 +110,7 @@ func (s *Server) handleEdgeCert(w http.ResponseWriter, r *http.Request) {
 		ChainPEM: string(chainPEM),
 		NotAfter: notAfter.UTC().Format(time.RFC3339),
 		Serial:   serial,
+		CAID:     sg.CAID(),
 	})
 }
 

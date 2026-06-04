@@ -107,26 +107,46 @@ func main() {
 
 	ctx := context.Background()
 
+	// Optional data-plane mTLS: fetch a CP-issued client cert (CA-only trust), hold it
+	// in memory (never on disk), and present it on the re-encrypt hop. The re-mint
+	// coordinator owns every re-mint path (proactive on a ca_id flip observed via the
+	// /v1/certs poll, reactive on a core cert-reject, timer on remaining-life). It is
+	// built EARLY so it threads into the cert/WAF refresh loops as the force-re-mint
+	// observer; nil when mTLS is off (every coord call is a no-op).
+	var clientCertStore *edge.ClientCertStore
+	var remintCoord *edge.RemintCoordinator
+	if dataplaneMTLS {
+		clientCertStore = edge.NewClientCertStore()
+		remintCoord = edge.NewRemintCoordinator(cp, clientCertStore, edge.RemintConfig{
+			Jitter:        time.Duration(envInt64("EDGE_CLIENTCERT_REMINT_JITTER", 60)) * time.Second,
+			BackoffBase:   time.Duration(envInt64("EDGE_CLIENTCERT_REMINT_BACKOFF_BASE", 2)) * time.Second,
+			BackoffMax:    refreshInterval,
+			Cooldown:      time.Duration(envInt64("EDGE_CLIENTCERT_REMINT_COOLDOWN", int64(5*refreshInterval/time.Second))) * time.Second,
+			BreakerK:      int(envInt64("EDGE_CLIENTCERT_REMINT_BREAKER_K", 3)),
+			ProactiveJ:    int(envInt64("EDGE_CLIENTCERT_REMINT_PROACTIVE_J", 5)),
+			RenewFraction: envFloat("EDGE_CLIENTCERT_RENEW_REMAINING_FRACTION", 0.66),
+		})
+	}
+
 	if serveAll {
 		// On a handshake for an SNI not held, fetch it from the control plane (the
 		// handshake blocks on it); the CP's per-token authz still gates which SNIs
 		// resolve. The periodic refresh keeps on-demand domains rotated.
-		store.SetOnDemand(func(sni string) { edge.RefreshCertOnce(cp, store, sni) })
+		store.SetOnDemand(func(sni string) { edge.RefreshCertOnce(cp, store, sni, remintCoord) })
 		slog.Info("edge: EDGE_DOMAINS empty — serving ALL domains (certs fetched on demand)")
 	} else {
-		loaded := edge.RefreshCertsAll(cp, store, domains)
+		loaded := edge.RefreshCertsAll(cp, store, domains, remintCoord)
 		slog.Info("edge: initial cert load", "loaded", loaded, "total", len(domains))
 	}
-	go edge.RunCertRefresh(ctx, cp, store, domains, refreshInterval)
+	go edge.RunCertRefresh(ctx, cp, store, domains, refreshInterval, remintCoord)
 
-	// Optional data-plane mTLS: fetch a CP-issued client cert (CA-only trust), hold
-	// it in memory (never on disk), refresh on a timer, and present it on the
-	// re-encrypt hop. The leaf private key is generated here and never leaves.
-	var clientCertStore *edge.ClientCertStore
 	if dataplaneMTLS {
-		clientCertStore = edge.NewClientCertStore()
-		edge.RefreshEdgeCertOnce(cp, clientCertStore) // best-effort; fail-static
-		go edge.RunEdgeCertRefresh(ctx, cp, clientCertStore, refreshInterval)
+		// Startup mint is direct + UN-jittered (readiness needs it fast); the periodic
+		// loops are jittered so a simultaneous fleet restart doesn't thunder. A
+		// boot-during-overlap edge that freezes at a stale ca_id gets a proactive
+		// recheck within one interval via the jittered first cert-refresh/trust-bundle tick.
+		edge.RefreshEdgeCertOnce(cp, clientCertStore, "timer") // best-effort; fail-static
+		go edge.RunEdgeCertRefresh(ctx, remintCoord, refreshInterval)
 		slog.Info("edge: data-plane mTLS enabled (CP-issued client cert)")
 	}
 
@@ -138,8 +158,8 @@ func main() {
 	if wafEnabled {
 		country, asn = loadGeoResolvers()
 		ewaf = edge.NewEdgeWAF(country, asn)
-		edge.RefreshWafOnce(cp, ewaf)
-		go edge.RunWafRefresh(ctx, cp, ewaf, refreshInterval)
+		edge.RefreshWafOnce(cp, ewaf, remintCoord)
+		go edge.RunWafRefresh(ctx, cp, ewaf, refreshInterval, remintCoord)
 	}
 
 	// Optional response cache (off by default), from parapet/pkg/cache. The
@@ -170,10 +190,14 @@ func main() {
 	}
 
 	var getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error)
+	var onCertReject func()
 	if clientCertStore != nil {
 		getClientCert = clientCertStore.GetClientCertificate
+		// Reactive force-re-mint floor: a core cert-reject in the re-encrypt handshake
+		// fires a (non-blocking) reactive re-mint. nil when mTLS is off.
+		onCertReject = func() { remintCoord.Trigger("reactive") }
 	}
-	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamSNI, getClientCert)
+	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamSNI, getClientCert, onCertReject)
 
 	if metricsListen != "" {
 		go func() {
@@ -377,6 +401,15 @@ func envInt64(key string, def int64) int64 {
 	if v, ok := os.LookupEnv(key); ok {
 		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
 			return n
+		}
+	}
+	return def
+}
+
+func envFloat(key string, def float64) float64 {
+	if v, ok := os.LookupEnv(key); ok {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			return f
 		}
 	}
 	return def

@@ -58,11 +58,11 @@ func TestRefreshEdgeCertOnceOK(t *testing.T) {
 	}
 	store := NewClientCertStore()
 
-	before := testutil.ToFloat64(edgeRemintHandles["ok"])
-	if got := RefreshEdgeCertOnce(cp, store); got != "ok" {
+	before := testutil.ToFloat64(edgeRemint.WithLabelValues("ok", "timer"))
+	if got, _ := RefreshEdgeCertOnce(cp, store, "timer"); got != "ok" {
 		t.Fatalf("result = %q, want ok", got)
 	}
-	if testutil.ToFloat64(edgeRemintHandles["ok"]) != before+1 {
+	if testutil.ToFloat64(edgeRemint.WithLabelValues("ok", "timer")) != before+1 {
 		t.Error("ok remint counter not incremented")
 	}
 	if !store.Loaded() {
@@ -86,11 +86,11 @@ func TestRefreshEdgeCertOnceFetchFail(t *testing.T) {
 	}
 	store := NewClientCertStore()
 
-	before := testutil.ToFloat64(edgeRemintHandles["fetch_fail"])
-	if got := RefreshEdgeCertOnce(cp, store); got != "fetch_fail" {
+	before := testutil.ToFloat64(edgeRemint.WithLabelValues("fetch_fail", "timer"))
+	if got, _ := RefreshEdgeCertOnce(cp, store, "timer"); got != "fetch_fail" {
 		t.Fatalf("result = %q, want fetch_fail", got)
 	}
-	if testutil.ToFloat64(edgeRemintHandles["fetch_fail"]) != before+1 {
+	if testutil.ToFloat64(edgeRemint.WithLabelValues("fetch_fail", "timer")) != before+1 {
 		t.Error("fetch_fail remint counter not incremented")
 	}
 	if store.Loaded() {
