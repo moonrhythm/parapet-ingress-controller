@@ -335,4 +335,22 @@ CERT_CAID="$(curl -sS -D - -o /dev/null --cacert "$WORK/ca.crt" -H "Authorizatio
   || { echo "cert-arm ca_id='$CERT_CAID' signer ca_id='$SIG_CAID'" >&2; fail "/v1/certs X-Parapet-CA-Id missing or != signer ca_id"; }
 echo "  ✓ /v1/certs advertises X-Parapet-CA-Id ($CERT_CAID) matching the signer"
 
+# Active-signer fingerprint signal (the revoke interlock's load-bearing axis): the ca_id is
+# identical for active=OLD/NEW during an overlap, so the edge re-mints + the OLD-drop gates
+# on the SIGNER fp, not the ca_id. Assert the live binary advertises it on /v1/certs (header)
+# AND the tokenless trust bundle (body), both equal to parapet_edge_ca_active_signer_fp.
+say "10. active-signer fp signal: /v1/certs + /v1/trust-bundle advertise signing_cert_fp"
+SIG_FP="$(grep -oE 'parapet_edge_ca_active_signer_fp\{[^}]*sigfp="[^"]+"' <<<"$MET" | grep -oE 'sigfp="[^"]+"' | cut -d'"' -f2)"
+[ -n "$SIG_FP" ] || { grep parapet_edge_ca_active <<<"$MET" >&2; fail "could not read active signer fp from /metrics"; }
+CERT_FP="$(curl -sS -D - -o /dev/null --cacert "$WORK/ca.crt" -H "Authorization: Bearer $TOKEN" \
+  --resolve "localhost:$CP_PORT:127.0.0.1" "https://localhost:$CP_PORT/v1/certs?sni=$DOMAIN" \
+  | grep -i '^x-parapet-signing-cert-fp:' | tr -d '\r' | awk '{print $2}')"
+[ "$CERT_FP" = "$SIG_FP" ] \
+  || { echo "cert-arm fp='$CERT_FP' signer fp='$SIG_FP'" >&2; fail "/v1/certs X-Parapet-Signing-Cert-Fp missing or != active signer fp"; }
+TB_FP="$(curl -sS --cacert "$WORK/ca.crt" --resolve "localhost:$CP_PORT:127.0.0.1" \
+  "https://localhost:$CP_PORT/v1/trust-bundle" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("signing_cert_fp",""))')"
+[ "$TB_FP" = "$SIG_FP" ] \
+  || { echo "trust-bundle fp='$TB_FP' signer fp='$SIG_FP'" >&2; fail "/v1/trust-bundle signing_cert_fp missing or != active signer fp"; }
+echo "  ✓ /v1/certs + /v1/trust-bundle advertise signing_cert_fp ($SIG_FP) matching the active signer"
+
 say "E2E PASSED"
