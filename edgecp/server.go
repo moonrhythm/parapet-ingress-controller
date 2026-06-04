@@ -72,29 +72,35 @@ func (s *Server) WithWAF(waf *WafStore) *Server {
 	return s
 }
 
-// WithSigner enables data-plane client-cert issuance and trust distribution.
-// Returns the server for chaining.
-func (s *Server) WithSigner(sg *Signer) *Server {
-	s.SetSigner(sg)
+// WithSigner enables data-plane client-cert issuance and trust distribution at the
+// given trust-bundle generation. Returns the server for chaining.
+func (s *Server) WithSigner(sg *Signer, generation uint64) *Server {
+	s.SetSigner(sg, generation)
 	return s
 }
 
-// SetSigner installs (or hot-swaps, on rotation) the active Signer and bumps the
-// trust-bundle generation, waking any long-poll waiters. The (signer, gen) pair is
-// stored as one immutable value so concurrent readers never tear it. Safe to call
-// concurrently.
-func (s *Server) SetSigner(sg *Signer) {
+// SetSigner installs (or hot-swaps, on rotation) the active Signer at the given
+// trust-bundle generation. generation is the CA Secret's resourceVersion (the etcd
+// revision — replica-identical + monotonic across CP replicas), NOT a process counter.
+//
+// It enforces a MONOTONIC FLOOR: a generation <= the currently-served one is rejected
+// (kept last-good, counted), so an out-of-order watch re-list serving an older cached CA
+// object can never regress the served generation — which would otherwise let the core
+// re-apply a replayed-older bundle (re-trusting a dropped CA / un-trusting a re-minted
+// fleet). The (signer, gen) pair is one immutable value so concurrent readers never tear
+// it. Safe to call concurrently.
+func (s *Server) SetSigner(sg *Signer, generation uint64) {
 	s.genMu.Lock()
 	defer s.genMu.Unlock()
-	var prev uint64
-	if st := s.signerState.Load(); st != nil {
-		prev = st.gen
+	if st := s.signerState.Load(); st != nil && generation <= st.gen {
+		signerFloored.Inc()
+		return
 	}
-	s.signerState.Store(&signerGen{sg: sg, gen: prev + 1})
+	s.signerState.Store(&signerGen{sg: sg, gen: generation})
 	// Convergence metrics: set all signer gauges together inside the held genMu so a
 	// scrape never tears across them. Done before close(genNotify) so a long-poll
 	// waiter that wakes and re-scrapes always observes the new series.
-	setSignerMetrics(sg.CAID(), prev+1, sg.BundleLen())
+	setSignerMetrics(sg.CAID(), generation, sg.BundleLen())
 	close(s.genNotify)
 	s.genNotify = make(chan struct{})
 }

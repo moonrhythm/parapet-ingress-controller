@@ -28,26 +28,27 @@ func TestTrustBundleSnapshotCoherentUnderRace(t *testing.T) {
 	}
 
 	srv := NewServer(NewCertStore(), NewAuthz(nil))
-	srv.SetSigner(sgA)
+	srv.SetSigner(sgA, 1)
 	h := srv.Handler()
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
 
-	// Writer: alternate the active signer as fast as it can.
+	// Writer: alternate the active signer with STRICTLY-INCREASING generations (the
+	// monotonic floor rejects gen <= served, so a flat gen would be floored).
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		for i := 0; ; i++ {
+		for i := 2; ; i++ {
 			select {
 			case <-stop:
 				return
 			default:
 			}
 			if i%2 == 0 {
-				srv.SetSigner(sgA)
+				srv.SetSigner(sgA, uint64(i))
 			} else {
-				srv.SetSigner(sgB)
+				srv.SetSigner(sgB, uint64(i))
 			}
 		}
 	}()

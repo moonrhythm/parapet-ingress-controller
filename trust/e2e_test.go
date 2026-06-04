@@ -40,7 +40,7 @@ func TestAutoTrustEndToEnd(t *testing.T) {
 	authz := edgecp.NewAuthzEntries(map[string]edgecp.Entry{
 		"edge-tok": {ID: "edge-1", Domains: []string{"acme.com"}},
 	})
-	cp := httptest.NewTLSServer(edgecp.NewServer(edgecp.NewCertStore(), authz).WithSigner(signer).Handler())
+	cp := httptest.NewTLSServer(edgecp.NewServer(edgecp.NewCertStore(), authz).WithSigner(signer, 100).Handler())
 	defer cp.Close()
 	cpServerCA := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cp.Certificate().Raw})
 
@@ -51,6 +51,11 @@ func TestAutoTrustEndToEnd(t *testing.T) {
 	}
 	mgr := NewManager()
 	pullInto(t, tc, mgr) // applies the bundle (edge CA) into the manager's ClientCAs
+
+	// Cross-plane: the core consumes the CP's exact (resourceVersion-derived) generation.
+	if got := mgr.Generation(); got != 100 {
+		t.Errorf("core generation = %d, want 100 (the CP's served generation)", got)
+	}
 
 	coreURL, coreClose := startCore(t, mgr)
 	defer coreClose()

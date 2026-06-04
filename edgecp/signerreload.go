@@ -149,6 +149,19 @@ func (r *SignerReloader) reload(ctx context.Context) error {
 		return nil
 	}
 
+	// generation = the CA Secret's OWN resourceVersion (the etcd revision — see
+	// resourceversion.go: single-object, replica-identical, monotonic). Fail-closed on a
+	// non-numeric RV: keep last-good (never gen=0, which a replayed bundle could beat),
+	// log on EVERY reload (the stuck state can be permanent), and raise an alertable gauge.
+	generation, ok := rvToU64(sec.ResourceVersion)
+	if !ok {
+		slog.Error("edgecp: CA secret resourceVersion is non-numeric; keeping last-good signer (frozen until it parses)",
+			"resource_version", sec.ResourceVersion, "secret", r.namespace+"/"+r.caSecret)
+		signerRVUnparsed.Set(1)
+		return nil
+	}
+	signerRVUnparsed.Set(0)
+
 	// Select the active key field AND the active cert fingerprint as a coherent unit
 	// from the tls-active annotation. OLD is the first cert, NEW the last.
 	active := sec.Annotations[caActiveAnnotation]
@@ -181,13 +194,13 @@ func (r *SignerReloader) reload(ctx context.Context) error {
 		slog.Warn("edge CA: " + msg)
 	}
 	if cand.CAID() == r.server.CurrentCAID() {
-		return nil // unchanged bundle; do not churn the generation
+		return nil // unchanged bundle; do not churn the generation (RV-only writes are no-ops)
 	}
-	r.server.SetSigner(cand)
+	r.server.SetSigner(cand, generation)
 	if active == "" {
 		active = caActiveOld
 	}
 	slog.Info("edgecp: edge CA signer installed",
-		"ca_id", cand.CAID(), "active", active, "certs", len(fps), "secret", r.namespace+"/"+r.caSecret)
+		"ca_id", cand.CAID(), "active", active, "certs", len(fps), "generation", generation, "secret", r.namespace+"/"+r.caSecret)
 	return nil
 }

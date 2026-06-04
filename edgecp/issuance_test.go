@@ -126,7 +126,7 @@ func TestEdgeCertEndpoint(t *testing.T) {
 		"tok-no-id":    {Domains: []string{"acme.com"}}, // may fetch certs, but no data-plane identity
 		"tok-disabled": {ID: "ghost", Domains: []string{"acme.com"}, Disabled: true},
 	})
-	h := NewServer(NewCertStore(), authz).WithSigner(sg).Handler()
+	h := NewServer(NewCertStore(), authz).WithSigner(sg, 1).Handler()
 
 	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	csr := testCSR(t, leafKey)
@@ -190,7 +190,7 @@ func TestTrustBundleEndpoint(t *testing.T) {
 		t.Fatalf("no signer: want 503, got %d", rec.Code)
 	}
 
-	srv.SetSigner(sg)
+	srv.SetSigner(sg, 1)
 	h := srv.Handler()
 
 	// Tokenless 200 with {generation, ca_pem, ca_id}.

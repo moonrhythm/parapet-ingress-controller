@@ -48,7 +48,7 @@ func TestEdgeCertIssuanceEndToEnd(t *testing.T) {
 	authz := edgecp.NewAuthzEntries(map[string]edgecp.Entry{
 		"tok": {ID: "acme-edge-1", Domains: []string{"acme.com"}},
 	})
-	h := edgecp.NewServer(edgecp.NewCertStore(), authz).WithSigner(signer).Handler()
+	h := edgecp.NewServer(edgecp.NewCertStore(), authz).WithSigner(signer, 1).Handler()
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 

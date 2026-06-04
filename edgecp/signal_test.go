@@ -21,7 +21,7 @@ func TestHandleCertEmitsCAIDOnEveryArm(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewCertStore()
-	srv := NewServer(store, NewAuthz(map[string][]string{"tok": {"acme.com"}})).WithSigner(signer)
+	srv := NewServer(store, NewAuthz(map[string][]string{"tok": {"acme.com"}})).WithSigner(signer, 1)
 	want := signer.CAID()
 	h := srv.Handler()
 
@@ -70,7 +70,7 @@ func TestHandleCertEmitsCAIDOnEveryArm(t *testing.T) {
 func TestHandleCertNoCAIDForUnauthorized(t *testing.T) {
 	certPEM, keyPEM := testEdgeCA(t)
 	signer, _, _ := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)
-	srv := NewServer(NewCertStore(), NewAuthz(map[string][]string{"tok": {"acme.com"}})).WithSigner(signer)
+	srv := NewServer(NewCertStore(), NewAuthz(map[string][]string{"tok": {"acme.com"}})).WithSigner(signer, 1)
 	h := srv.Handler()
 
 	// 401 (no token).
@@ -94,7 +94,7 @@ func TestEdgeCertCAIDAndSaturation(t *testing.T) {
 	certPEM, keyPEM := testEdgeCA(t)
 	signer, _, _ := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)
 	authz := NewAuthzEntries(map[string]Entry{"tok": {ID: "edge-1", Domains: []string{"acme.com"}}})
-	srv := NewServer(NewCertStore(), authz).WithSigner(signer).WithSignConcurrency(1, 9)
+	srv := NewServer(NewCertStore(), authz).WithSigner(signer, 1).WithSignConcurrency(1, 9)
 	h := srv.Handler()
 
 	leafKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

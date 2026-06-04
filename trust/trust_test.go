@@ -116,7 +116,7 @@ func TestTrustBundleOverTLSEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := edgecp.NewServer(edgecp.NewCertStore(), edgecp.NewAuthz(nil)).WithSigner(signer).Handler()
+	h := edgecp.NewServer(edgecp.NewCertStore(), edgecp.NewAuthz(nil)).WithSigner(signer, 1).Handler()
 	srv := httptest.NewTLSServer(h)
 	defer srv.Close()
 
