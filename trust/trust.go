@@ -118,10 +118,11 @@ type Manager struct {
 	floor uint64
 	// cachePath is the warm-start file; "" disables persistence. Set by EnableWarmStart.
 	cachePath string
-	// lastGood is the most recent applied bundle, rewritten to disk on EVERY successful poll
-	// (incl. 304s) so the file's written_at tracks last CP CONTACT (liveness), not last CA
-	// change — otherwise a stable fleet's months-old cache would always exceed MAX_STALE and
-	// the floor would never load. Touched only in the single Run goroutine.
+	// lastGood is the most recent applied bundle (or, before this session's first apply, the
+	// loaded warm-start entry — see EnableWarmStart), rewritten to disk on EVERY successful
+	// poll (incl. 304s) so the file's written_at tracks last CP CONTACT (liveness), not last
+	// CA change — otherwise a stable fleet's months-old cache would always exceed MAX_STALE
+	// and the floor would never load. Set before Run starts, then touched only in Run.
 	lastGood *cacheEntry
 }
 
@@ -175,6 +176,13 @@ func (m *Manager) EnableWarmStart(path string, maxStale time.Duration) {
 		}
 	}
 	m.floor = e.Generation
+	// Seed lastGood from the cache so the liveness timestamp is refreshed even on a 304 that
+	// arrives BEFORE this session's first apply. This grants NO trust — lastGood feeds only
+	// writeCache (never ClientCAs / gen) — it just keeps written_at tracking last CP contact
+	// so MAX_STALE stays meaningful regardless of poll ordering. (Today Run's first fetch is a
+	// non-watch GET so a pre-apply 304 can't occur; this removes the latent coupling.)
+	seed := e
+	m.lastGood = &seed
 	metric.TrustWarmStart(true)
 	slog.Info("core: warm-start floor loaded — edge mTLS trust WITHHELD (CIDR-only) until a live fetch revalidates",
 		"floor_generation", e.Generation, "ca_id", e.CAID)

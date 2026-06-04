@@ -183,6 +183,11 @@ func TestWarmStartFloorRoundTrip(t *testing.T) {
 	if b.ClientCAs() != nil {
 		t.Fatal("warm-start must NOT load ClientCAs from the cache (trust stays CIDR-only until revalidated)")
 	}
+	// lastGood is seeded from the cache so a 304 before the first apply still refreshes the
+	// liveness timestamp — but it grants NO trust (ClientCAs stayed nil above, floor unchanged).
+	if b.lastGood == nil || b.lastGood.Generation != 7 {
+		t.Fatalf("EnableWarmStart must seed lastGood from the cache for the liveness refresh, got %+v", b.lastGood)
+	}
 
 	// A stale CP replica serving gen 6 (< floor) is rejected — anti-resurrection.
 	if res, err := b.apply(Bundle{Generation: 6, CAPEM: caPEM, CAID: "old"}); err == nil || res != resultFloorRejected {
