@@ -2,6 +2,7 @@ package edgecp
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -63,6 +64,62 @@ func TestRecordIssuanceLedger(t *testing.T) {
 	}
 	if v := testutil.ToFloat64(issuedUnderSigner.WithLabelValues("edge-b", "fp-new")); v != 1 {
 		t.Errorf("issued{edge-b,fp-new} = %v, want 1", v)
+	}
+}
+
+// A blacklisted token flags edge_token_disabled_without_rotation (the bare-blacklist
+// reminder); enabled tokens leave no series, and a re-publish clears stale ones.
+func TestTokenDisabledWithoutRotation(t *testing.T) {
+	SetRegistryMetrics(map[string]Entry{
+		"t-live": {ID: "edge-live"},
+		"t-dead": {ID: "edge-dead", Disabled: true},
+	})
+	if v := testutil.ToFloat64(tokenDisabledNoRotation.WithLabelValues("edge-dead")); v != 1 {
+		t.Errorf("blacklisted id must flag without_rotation=1, got %v", v)
+	}
+	if c := testutil.CollectAndCount(tokenDisabledNoRotation); c != 1 {
+		t.Errorf("only the disabled id gets a series, got %d", c)
+	}
+	// Removing the tombstone (registry no longer lists it) clears the flag.
+	SetRegistryMetrics(map[string]Entry{"t-live": {ID: "edge-live"}})
+	if c := testutil.CollectAndCount(tokenDisabledNoRotation); c != 0 {
+		t.Errorf("removing the tombstone must clear the flag, got %d series", c)
+	}
+}
+
+// edge_ca_rotation_stuck is 0 outside overlap, 0 inside overlap before the deadline, and 1
+// once the overlap outlives the deadline — and the clock does NOT reset on a re-observe.
+func TestRotationStuckGauge(t *testing.T) {
+	t.Cleanup(func() { SetRotationOverlap(false); SetRotationStuckDeadline(0) })
+
+	SetRotationStuckDeadline(time.Hour)
+	SetRotationOverlap(false)
+	if v := testutil.ToFloat64(rotationStuck); v != 0 {
+		t.Errorf("not in overlap ⇒ 0, got %v", v)
+	}
+	// Enter overlap "1 hour + ε ago" by back-dating the start, deadline 1h ⇒ stuck.
+	SetRotationOverlap(true)
+	rotationOverlapSince.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	if v := testutil.ToFloat64(rotationStuck); v != 1 {
+		t.Errorf("overlap past the deadline ⇒ 1, got %v", v)
+	}
+	// A re-observe must NOT reset the (back-dated) clock — still stuck.
+	before := rotationOverlapSince.Load()
+	SetRotationOverlap(true)
+	if rotationOverlapSince.Load() != before {
+		t.Error("re-observing overlap must not reset the stuck clock")
+	}
+	// A fresh overlap within the deadline ⇒ not yet stuck.
+	SetRotationOverlap(false)
+	SetRotationOverlap(true)
+	if v := testutil.ToFloat64(rotationStuck); v != 0 {
+		t.Errorf("fresh overlap within the deadline ⇒ 0, got %v", v)
+	}
+	// Deadline disabled (0) ⇒ never stuck even when long in overlap.
+	rotationOverlapSince.Store(time.Now().Add(-100 * time.Hour).UnixNano())
+	SetRotationStuckDeadline(0)
+	if v := testutil.ToFloat64(rotationStuck); v != 0 {
+		t.Errorf("deadline disabled ⇒ 0, got %v", v)
 	}
 }
 
