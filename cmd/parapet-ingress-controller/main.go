@@ -260,6 +260,14 @@ func main() {
 			os.Exit(1)
 		}
 		trustMgr = trust.NewManager()
+		// Warm-start cache (optional): persist the last-good bundle so a restart-during-outage
+		// can't resurrect a rotated-out CA via a stale CP replica. The cache seeds an
+		// anti-rollback generation FLOOR; it confers NO trust until a live fetch revalidates
+		// (mTLS stays CIDR-only meanwhile). See EDGE-AUTOTRUST.md "Warm-start cache".
+		if cacheFile := config.String("EDGE_TRUST_CP_CACHE_FILE"); cacheFile != "" {
+			maxStale := time.Duration(config.IntDefault("EDGE_TRUST_CP_MAX_STALE", 3600)) * time.Second
+			trustMgr.EnableWarmStart(cacheFile, maxStale)
+		}
 		pollInterval := time.Duration(config.IntDefault("EDGE_TRUST_CP_POLL_INTERVAL", 300)) * time.Second
 		go trustMgr.Run(context.Background(), tc, pollInterval)
 		slog.Info("edge auto-trust enabled (CA-only mTLS)", "endpoint", ep)

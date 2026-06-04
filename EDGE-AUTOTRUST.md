@@ -236,6 +236,16 @@ caps the hint's age. `parapet_trust_source{file|mtls|cidr|none}` makes the state
 alertable. (Header hardening unchanged: the core unconditionally strips client-supplied
 `X-Forwarded-Country/-ASN` at ingress.)
 
+> **Implemented** (`trust.Manager.EnableWarmStart`/`writeCache`, `apply`'s floor check). The
+> hint is realized as a generation **floor** (anti-resurrection) — the cached CA is
+> deliberately NOT loaded into `ClientCAs`, so "stays CIDR-only until revalidated" falls out
+> for free (per-request trust keys on `r.TLS.VerifiedChains`, which is empty until a live
+> apply populates the pool) and a stale-CA handshake can never reject a NEW-leaf edge.
+> Because no per-request decision is "file-sourced" under that safe design, the alertable
+> state is the **`parapet_trust_warmstart_active`** gauge (1 while running on an
+> unrevalidated floor) rather than a per-request `trust_source{file}` counter; the
+> anti-resurrection rejection is `trust_apply_total{result="floor_rejected"}`.
+
 ## Edge wiring
 
 The default data-plane identity is CP-issued (`EDGE_DATAPLANE_MTLS=true`; requires
@@ -594,9 +604,10 @@ pure-instrumentation Prometheus metrics on the shared `parapet` registry / `:918
 | `parapet_edge_ca_signer_loaded` | CP | gauge 0/1 | — | 1 once a signer is loaded; 0 = CP up but not yet provisioned (vs scrape-missing). |
 | `parapet_trust_bundle_generation` | core | gauge=gen | `ca_id` | The `ca_id`/generation the core currently trusts. |
 | `parapet_trust_bundle_age_seconds` | core | gaugefunc | — | Seconds since the core last applied a bundle; rising fleet-wide = convergence stalled. |
-| `parapet_trust_apply_total` | core | counter | `result` | `applied`/`rollback_rejected`/`parse_rejected`/`empty_rejected` — `rollback_rejected` is the anti-replay signal. |
+| `parapet_trust_apply_total` | core | counter | `result` | `applied`/`rollback_rejected`/`floor_rejected`/`parse_rejected`/`empty_rejected` — `rollback_rejected` (in-session) and `floor_rejected` (cross-restart warm-start floor) are the anti-replay/anti-resurrection signals. |
 | `parapet_trust_fetch_failed_total` | core | counter | — | Couldn't reach/decode the CP (vs reached-but-rejected). |
 | `parapet_trust_source_total` | core | counter | `source` | Per-request trust decision: `cidr`/`verified-chain`/`none`. |
+| `parapet_trust_warmstart_active` | core | gauge 0/1 | — | 1 while running on an unrevalidated warm-start floor (mTLS withheld, CIDR-only); 0 once a live fetch revalidates. Alert if it stays 1. |
 | `parapet_edge_clientcert_ca_id` | edge | gauge=1 | `ca_id` | CA set that issued the edge's **live** client leaf (lags the target until the edge re-mints). |
 | `parapet_edge_clientcert_not_after_seconds` | edge | gauge=unix | `ca_id` | Expiry of the edge's live leaf — an edge stuck on OLD with imminent expiry is the danger case. |
 | `parapet_edge_clientcert_loaded` | edge | gauge 0/1 | — | 1 once the edge holds a usable client cert. |
@@ -669,7 +680,7 @@ not Prometheus counters (a Pushgateway would be a new failure domain).
 | `EDGE_TRUST_CP_ENDPOINT` | core | `""` (off) | HTTPS base URL of the CP. Set ⇒ the core pulls `GET /v1/trust-bundle`. **MUST be `https://`** — non-https is fatal, no plaintext analog ever. |
 | `EDGE_TRUST_CP_CA` | core | `""` | PEM of the CA that signs the **CP server** cert → `RootCAs`. **Mandatory + fatal** if missing/empty/unparseable; no system-roots fallback, no skip-verify. Dedicated single-purpose CA; distinct from the edge CA in `ca_pem`. |
 | `EDGE_TRUST_CP_WATCH_TIMEOUT` / `_POLL_INTERVAL` | core/CP | `30s` / `5m` | Long-poll ceiling; safety-net poll. The poll now bounds **CA-rotation** propagation only (not per-request revocation), so it may lengthen; keep the long-poll for fast rotation convergence. |
-| `EDGE_TRUST_CP_CACHE_FILE` / `_MAX_STALE` | core | `""` / `1h` | Warm-start hint (no trust until revalidated; bounded by max-stale). |
+| `EDGE_TRUST_CP_CACHE_FILE` / `_MAX_STALE` | core | `""` (off) / `3600` (s, =1h) | Warm-start cache. After every successful poll the core persists `{generation, ca_id, ca_pem, written_at}` (public; atomic temp+rename) and on startup loads its generation as an anti-rollback **floor** (a bundle below it ⇒ `trust_apply_total{result="floor_rejected"}`), so a restart-during-outage can't resurrect a rotated-out CA via a stale CP replica. It confers **NO trust** until a live fetch revalidates — the cached CA is **not** loaded into `ClientCAs`, so trust stays CIDR-only meanwhile (`trust_warmstart_active=1`) and flips to mTLS on the first live apply. `written_at` tracks last CP **contact** (refreshed on 304s too), so `_MAX_STALE` (seconds) bounds time-since-contact: a longer outage discards the floor and cold-starts (larger = safer vs. resurrection; smaller = recovers faster from a CP-side generation reset). |
 | `EDGE_TRUST_REQUIRE_SAN` | core | **forced false, deprecated** | CA-only is the only model; the per-request SAN check is removed. Setting `true` with CP-issuance is a **fatal config error**. Slated for removal. |
 | `EDGE_DATAPLANE_MTLS` | edge | `false` | Enable the CP-issued client cert. Requires `EDGE_UPSTREAM_TLS=true`. Readiness gated on a loaded cert. |
 | `EDGE_ID` | edge | hostname | The edge's STABLE logical id, stamped as the `edge_id` label on every convergence metric (the OLD-drop interlock joins per-edge by it). **Required with `EDGE_DATAPLANE_MTLS=true`** and **must match this edge's CP token id**. Without mTLS, defaults to the hostname (convergence is moot). |

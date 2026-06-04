@@ -8,7 +8,7 @@ import (
 )
 
 func TestTrustApplyEnum(t *testing.T) {
-	for _, result := range []string{"applied", "rollback_rejected", "parse_rejected", "empty_rejected"} {
+	for _, result := range []string{"applied", "rollback_rejected", "floor_rejected", "parse_rejected", "empty_rejected"} {
 		before := testutil.ToFloat64(trustApplyHandles[result])
 		TrustApply(result)
 		if got := testutil.ToFloat64(trustApplyHandles[result]); got != before+1 {
@@ -26,6 +26,17 @@ func TestTrustSourceEnum(t *testing.T) {
 		if got := testutil.ToFloat64(trustSourceCounters[src]); got != before+1 {
 			t.Errorf("TrustSource(%d): %v -> %v, want +1", src, before, got)
 		}
+	}
+}
+
+func TestTrustWarmStart(t *testing.T) {
+	TrustWarmStart(true)
+	if v := testutil.ToFloat64(trustWarmStart); v != 1 {
+		t.Errorf("warmstart active = %v, want 1", v)
+	}
+	TrustWarmStart(false) // a live fetch revalidated
+	if v := testutil.ToFloat64(trustWarmStart); v != 0 {
+		t.Errorf("warmstart after revalidation = %v, want 0", v)
 	}
 }
 

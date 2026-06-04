@@ -23,7 +23,7 @@ var (
 	trustApply = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "trust_apply_total",
-		Help:      "Trust-bundle apply attempts by result (applied|rollback_rejected|parse_rejected|empty_rejected).",
+		Help:      "Trust-bundle apply attempts by result (applied|rollback_rejected|floor_rejected|parse_rejected|empty_rejected).",
 	}, []string{"result"})
 
 	trustFetchFailed = prometheus.NewCounter(prometheus.CounterOpts{
@@ -37,6 +37,17 @@ var (
 		Name:      "trust_source_total",
 		Help:      "Per-request trust decision by source (cidr|verified-chain|none).",
 	}, []string{"source"})
+
+	// trustWarmStart is 1 while the core is running on a persisted warm-start FLOOR that
+	// has NOT yet been revalidated by a live control-plane fetch — a degraded, alertable
+	// state: edge mTLS trust is withheld (CIDR-only) until the first live bundle supersedes
+	// the floor, because the cached CA could be one the operator just rotated out. It flips
+	// to 0 on the first successful live apply (or is 0 from the start when no cache loaded).
+	trustWarmStart = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "trust_warmstart_active",
+		Help:      "1 while running on an unrevalidated warm-start floor (mTLS trust withheld, CIDR-only); 0 once a live fetch revalidates.",
+	})
 
 	// lastApply is the unix-nanos timestamp of the last successful apply, read at scrape
 	// time by the trust_bundle_age_seconds GaugeFunc (zero steady-state cost, no ticker).
@@ -76,9 +87,9 @@ func init() {
 		}
 		return time.Since(time.Unix(0, ns)).Seconds()
 	})
-	prom.Registry().MustRegister(trustBundleGeneration, trustApply, trustFetchFailed, trustSource, bundleAge)
+	prom.Registry().MustRegister(trustBundleGeneration, trustApply, trustFetchFailed, trustSource, trustWarmStart, bundleAge)
 
-	for _, r := range []string{"applied", "rollback_rejected", "parse_rejected", "empty_rejected"} {
+	for _, r := range []string{"applied", "rollback_rejected", "floor_rejected", "parse_rejected", "empty_rejected"} {
 		trustApplyHandles[r], _ = trustApply.GetMetricWith(prometheus.Labels{"result": r})
 	}
 	trustSourceCounters[TrustSrcNone], _ = trustSource.GetMetricWith(prometheus.Labels{"source": "none"})
@@ -110,6 +121,17 @@ func TrustBundleApplied(caID string, generation uint64) {
 
 // TrustFetchFailed counts a failed trust-bundle fetch (couldn't reach/decode the CP).
 func TrustFetchFailed() { trustFetchFailed.Inc() }
+
+// TrustWarmStart sets the warm-start-active state (1 = running on an unrevalidated floor,
+// mTLS withheld; 0 = revalidated / no cache). Set true at startup when a floor loads, false
+// on the first successful live apply.
+func TrustWarmStart(active bool) {
+	if active {
+		trustWarmStart.Set(1)
+		return
+	}
+	trustWarmStart.Set(0)
+}
 
 // TrustSource counts one per-request trust decision. Hot-path: a bare array index +
 // atomic add — no lock, no label resolution, no map hash.
