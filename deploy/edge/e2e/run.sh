@@ -50,6 +50,11 @@ wait_for_port() {
     if nc -z 127.0.0.1 "$port" 2>/dev/null; then return 0; fi
     sleep 0.2
   done
+  # Surface the process logs so a startup crash is diagnosable in CI (not just a
+  # bare "did not come up").
+  for log in "$WORK/cp.log" "$WORK/edge.log"; do
+    [ -s "$log" ] && { echo "----- $(basename "$log") -----" >&2; cat "$log" >&2; }
+  done
   fail "$name did not come up on :$port"
 }
 

@@ -589,7 +589,10 @@ scraper reaches it without the bearer token. The payload is non-secret (fingerpr
 counters, generations — no key material), but rotation/generation transitions are observable
 recon, so **a NetworkPolicy must restrict it to the scraper** (shipped in
 `deploy/edge/controlplane.yaml`). The listener starts **only in the serving process** — the
-run-once bootstrap/rotate Jobs `os.Exit` before it. A failed metrics bind is fatal (loud).
+run-once bootstrap/rotate Jobs `os.Exit` before it. A failed metrics bind is logged loudly but
+**not fatal** — the CP keeps serving issuance + trust distribution (its primary job must never be
+taken down because an observability port is contended); a missing `/metrics` is already loud as
+the scrape target's `up == 0`, and the convergence interlock fails closed on a non-reporting target.
 
 **Run-once Job observability is logs, not scraped counters.** `EnsureCA`/`RotateCA` run in
 Jobs that `os.Exit` before any scrape, so CA-generated / unexpected-empty events are
