@@ -57,7 +57,7 @@ func TestEdgeCertIssuanceEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := NewClientCertStore()
-	RefreshEdgeCertOnce(cp, store)
+	RefreshEdgeCertOnce(cp, store, "timer")
 
 	if !store.Loaded() {
 		t.Fatal("client cert not loaded after issuance")

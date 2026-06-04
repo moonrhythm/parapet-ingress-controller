@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/moonrhythm/parapet-ingress-controller/caid"
 )
@@ -18,6 +19,11 @@ import (
 // "Edge wiring".
 type ClientCertStore struct {
 	cur atomic.Pointer[tls.Certificate]
+	// caid is the ca_id of the CA set that issued the LIVE leaf (== the
+	// edge_clientcert_ca_id gauge). It is the AUTHORITATIVE held value the force-re-mint
+	// observer compares the CP target against; correct after a fail-static (it tracks
+	// the cert actually in use, not a failed attempt).
+	caid atomic.Pointer[string]
 }
 
 func NewClientCertStore() *ClientCertStore { return &ClientCertStore{} }
@@ -57,6 +63,7 @@ func (s *ClientCertStore) Update(chainPEM, keyPEM []byte) error {
 	if len(cert.Certificate) >= 2 {
 		caID, _ = caid.FromDER(cert.Certificate[1:])
 	}
+	s.caid.Store(&caID) // store even when "" (single-CA chain / too-short)
 	var notAfter int64
 	if cert.Leaf != nil {
 		notAfter = cert.Leaf.NotAfter.Unix()
@@ -68,3 +75,24 @@ func (s *ClientCertStore) Update(chainPEM, keyPEM []byte) error {
 // Loaded reports whether a client cert has ever been installed (readiness gate when
 // EDGE_DATAPLANE_MTLS is on).
 func (s *ClientCertStore) Loaded() bool { return s.cur.Load() != nil }
+
+// CAID returns the ca_id of the CA set that issued the LIVE leaf, or "" if none is
+// held yet (or the chain is too short to carry a CA block). This is the held-vs-target
+// convergence comparison's authoritative "live" side.
+func (s *ClientCertStore) CAID() string {
+	if p := s.caid.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// Validity returns the live leaf's NotBefore/NotAfter for remaining-life renewal (the
+// renewal threshold is a fraction of the cert's OWN lifetime, so it needs no knowledge
+// of the CP's configured TTL). ok=false when no cert is held or the leaf didn't parse.
+func (s *ClientCertStore) Validity() (notBefore, notAfter time.Time, ok bool) {
+	c := s.cur.Load()
+	if c == nil || c.Leaf == nil {
+		return time.Time{}, time.Time{}, false
+	}
+	return c.Leaf.NotBefore, c.Leaf.NotAfter, true
+}

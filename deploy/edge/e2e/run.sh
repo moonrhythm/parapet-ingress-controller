@@ -321,4 +321,18 @@ grep -qE "^parapet_edge_ca_signer_loaded 1$" <<<"$MET" \
   || { grep signer_loaded <<<"$MET" >&2; fail "CP signer_loaded != 1"; }
 echo "  ✓ CP /metrics (tokenless) serves signer_fingerprint + signer_loaded=1"
 
+# Force-re-mint signal: GET /v1/certs carries the X-Parapet-CA-Id header (the universal
+# proactive carrier that rides the edge's existing cert poll on EVERY arm, incl. 304/404).
+# Assert it is present and equals the signer fingerprint from /metrics — so a CA rotation
+# would be observable by every edge regardless of WAF/serve-all mode.
+say "9. force-re-mint signal: /v1/certs advertises X-Parapet-CA-Id"
+SIG_CAID="$(grep -oE 'parapet_edge_ca_signer_fingerprint\{ca_id="[^"]+"' <<<"$MET" | grep -oE 'ca_id="[^"]+"' | cut -d'"' -f2)"
+[ -n "$SIG_CAID" ] || fail "could not read signer ca_id from /metrics"
+CERT_CAID="$(curl -sS -D - -o /dev/null --cacert "$WORK/ca.crt" -H "Authorization: Bearer $TOKEN" \
+  --resolve "localhost:$CP_PORT:127.0.0.1" "https://localhost:$CP_PORT/v1/certs?sni=$DOMAIN" \
+  | grep -i '^x-parapet-ca-id:' | tr -d '\r' | awk '{print $2}')"
+[ "$CERT_CAID" = "$SIG_CAID" ] \
+  || { echo "cert-arm ca_id='$CERT_CAID' signer ca_id='$SIG_CAID'" >&2; fail "/v1/certs X-Parapet-CA-Id missing or != signer ca_id"; }
+echo "  ✓ /v1/certs advertises X-Parapet-CA-Id ($CERT_CAID) matching the signer"
+
 say "E2E PASSED"

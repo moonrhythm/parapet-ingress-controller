@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"sync"
 
 	"github.com/moonrhythm/parapet"
@@ -38,7 +39,10 @@ type Forwarder struct {
 // it. Re-encrypt uses TLS with InsecureSkipVerify (a cluster-internal hop,
 // matching the controller's upstream posture) — the edge authenticates ITSELF to
 // the core with its client cert; it does not yet verify the core's server cert.
-func NewForwarder(addr string, useTLS bool, sni string, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error)) *Forwarder {
+// onCertReject, when non-nil, fires when the CORE rejects the edge's data-plane client
+// cert in the re-encrypt TLS handshake — the reactive force-re-mint floor. It is the
+// coordinator's reactive Trigger; nil when data-plane mTLS is off.
+func NewForwarder(addr string, useTLS bool, sni string, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error), onCertReject func()) *Forwarder {
 	var tr http.RoundTripper
 	if useTLS {
 		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // cluster-internal hop, matches the controller's upstream posture
@@ -68,11 +72,56 @@ func NewForwarder(addr string, useTLS bool, sni string, getClientCert func(*tls.
 			if errors.Is(err, context.Canceled) {
 				return // client went away
 			}
+			// Reactive force-re-mint floor: if the CORE rejected our client cert in the
+			// handshake, fire the (non-blocking) reactive trigger BEFORE the 502. The
+			// request still 502s; once the new leaf lands, subsequent requests succeed.
+			if onCertReject != nil && isClientCertRejected(err) {
+				onCertReject()
+			}
 			slog.Warn("edge: upstream error", "addr", addr, "error", err)
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		},
 	}
 	return &Forwarder{rp: rp}
+}
+
+// isClientCertRejected reports whether err is the CORE rejecting the edge's client cert
+// in the re-encrypt TLS handshake — and ONLY that. It is deliberately PARANOID: a false
+// positive turns an unrelated core outage into a fleet-wide re-mint storm, so it
+// matches only a PEER-sent ("remote error: tls: ...") cert-verify alert and excludes a
+// locally-raised alert, dial errors, timeouts, and any HTTP status (a healthy core's
+// 5xx is a response that never reaches ErrorHandler).
+func isClientCertRejected(err error) bool {
+	if err == nil {
+		return false
+	}
+	// A locally-generated alert is the EDGE rejecting the core (we don't verify the core
+	// today, but be explicit) — re-minting our own cert can't fix that. Exclude it.
+	var ae *tls.AlertError
+	if errors.As(err, &ae) {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	if !strings.Contains(s, "remote error: tls:") {
+		return false // not a peer-sent TLS alert (dial error / timeout / etc.)
+	}
+	// NOTE: certificate_expired is deliberately ABSENT — an expired leaf is owned by the
+	// remaining-life renewal floor (MaybeRenew), not the reactive path. Including it would
+	// let an expiry-driven reactive mint (which produces a fresh leaf with the SAME ca_id)
+	// feed the no-flip reactive breaker.
+	for _, alert := range []string{
+		"bad certificate",      // Go's rendering of bad_certificate
+		"certificate required", // certificate_required (core wants a cert / rejected none)
+		"unknown certificate authority",
+		"unknown ca",          // unknown_ca
+		"certificate unknown", // certificate_unknown
+		"certificate revoked", // certificate_revoked
+	} {
+		if strings.Contains(s, alert) {
+			return true
+		}
+	}
+	return false
 }
 
 // ServeHandler implements parapet.Middleware. It is terminal — the next handler

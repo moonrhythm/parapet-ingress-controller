@@ -61,7 +61,7 @@ func TestAutoTrustEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	ccStore := edge.NewClientCertStore()
-	edge.RefreshEdgeCertOnce(edgeCP, ccStore)
+	edge.RefreshEdgeCertOnce(edgeCP, ccStore, "timer")
 	if !ccStore.Loaded() {
 		t.Fatal("edge did not obtain a data-plane client cert from the CP")
 	}

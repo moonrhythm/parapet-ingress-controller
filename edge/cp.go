@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -64,6 +65,11 @@ type CertFetch struct {
 	ChainPEM []byte
 	KeyPEM   []byte
 	Etag     string
+	// CAID is the signer's target ca_id from the X-Parapet-CA-Id response header. It
+	// is populated on EVERY status (200, 304, and even a 404) — the universal
+	// force-re-mint signal that rides the edge's existing /v1/certs poll. "" means the
+	// CP didn't advertise one (old CP / no signer); the edge fail-statics on "".
+	CAID string
 }
 
 type certBody struct {
@@ -83,9 +89,14 @@ func (c *CpClient) FetchCert(sni, currentEtag string) (CertFetch, error) {
 	}
 	defer resp.Body.Close()
 
+	// The X-Parapet-CA-Id header rides EVERY status. Read it once, up front, so the
+	// force-re-mint signal is surfaced on the 304 (the steady-state carrier — almost
+	// all responses are 304), the 200, AND the 404 (a missing-cert sni still learns
+	// the CP target). Steady state is ~100% 304s, so the 304 arm is load-bearing.
+	caID := resp.Header.Get("X-Parapet-CA-Id")
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		return CertFetch{Unchanged: true}, nil
+		return CertFetch{Unchanged: true, CAID: caID}, nil
 	case http.StatusOK:
 		var body certBody
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxCertBody)).Decode(&body); err != nil {
@@ -95,9 +106,12 @@ func (c *CpClient) FetchCert(sni, currentEtag string) (CertFetch, error) {
 			ChainPEM: []byte(body.ChainPEM),
 			KeyPEM:   []byte(body.KeyPEM),
 			Etag:     resp.Header.Get("ETag"),
+			CAID:     caID,
 		}, nil
 	default:
-		return CertFetch{}, fmt.Errorf("control plane returned %d for sni %q", resp.StatusCode, sni)
+		// Surface the target with the error so the caller can still observe a ca_id
+		// flip even when the per-sni cert is missing (404).
+		return CertFetch{CAID: caID}, fmt.Errorf("control plane returned %d for sni %q", resp.StatusCode, sni)
 	}
 }
 
@@ -112,6 +126,7 @@ type WafFetch struct {
 	Zones       map[string]string
 	HostZoneMap map[string]string
 	Etag        string
+	CAID        string // signer target ca_id (secondary force-re-mint confirmer; 200 only)
 }
 
 type wafBody struct {
@@ -119,6 +134,7 @@ type wafBody struct {
 	GlobalRules string            `json:"global_rules"`
 	Zones       map[string]string `json:"zones"`
 	HostZoneMap map[string]string `json:"host_zone_map"`
+	CAID        string            `json:"ca_id"`
 }
 
 // FetchWaf fetches the WAF payload (global YAML + zones + host->zone map) scoped
@@ -146,6 +162,7 @@ func (c *CpClient) FetchWaf(currentEtag string) (WafFetch, error) {
 			Zones:       body.Zones,
 			HostZoneMap: body.HostZoneMap,
 			Etag:        resp.Header.Get("ETag"),
+			CAID:        body.CAID,
 		}, nil
 	default:
 		return WafFetch{}, fmt.Errorf("control plane returned %d for /v1/waf", resp.StatusCode)
@@ -157,6 +174,10 @@ type EdgeCertFetch struct {
 	ChainPEM []byte // leaf-first chain (leaf + edge CA); pair with the locally-held key
 	NotAfter string // RFC3339, for renewal scheduling
 	Serial   string
+	CAID     string // signer ca_id, so the edge self-confirms convergence post-mint
+	// RetryAfter is the parsed Retry-After delay on a 429/503 (signer saturated),
+	// returned ALONGSIDE the error so the coordinator can back off the whole fleet.
+	RetryAfter time.Duration
 }
 
 type edgeCertReqBody struct {
@@ -167,6 +188,7 @@ type edgeCertRespBody struct {
 	ChainPEM string `json:"chain_pem"`
 	NotAfter string `json:"not_after"`
 	Serial   string `json:"serial"`
+	CAID     string `json:"ca_id"`
 }
 
 // FetchEdgeCert posts a CSR to POST /v1/edge-cert and returns the signed chain. The
@@ -191,7 +213,14 @@ func (c *CpClient) FetchEdgeCert(csrPEM []byte) (EdgeCertFetch, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return EdgeCertFetch{}, fmt.Errorf("control plane returned %d for /v1/edge-cert", resp.StatusCode)
+		// On a saturated-signer shed (429/503), surface the Retry-After so the
+		// coordinator honors fleet-aggregate backpressure (one token per edge does NOT
+		// bound the aggregate). Returned with the error; the caller still fail-statics.
+		var retryAfter time.Duration
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		}
+		return EdgeCertFetch{RetryAfter: retryAfter}, fmt.Errorf("control plane returned %d for /v1/edge-cert", resp.StatusCode)
 	}
 	var body edgeCertRespBody
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxCertBody)).Decode(&body); err != nil {
@@ -201,7 +230,54 @@ func (c *CpClient) FetchEdgeCert(csrPEM []byte) (EdgeCertFetch, error) {
 		ChainPEM: []byte(body.ChainPEM),
 		NotAfter: body.NotAfter,
 		Serial:   body.Serial,
+		CAID:     body.CAID,
 	}, nil
+}
+
+// parseRetryAfter parses an HTTP Retry-After header value: either delta-seconds
+// (e.g. "5") or an HTTP-date. Returns 0 on empty/unparseable/negative.
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
+type trustBundleBody struct {
+	CAID string `json:"ca_id"`
+}
+
+// FetchTrustBundleCAID reads ONLY the ca_id from the tokenless GET /v1/trust-bundle
+// (the same public endpoint the core polls). It lets an mTLS edge observe a CA rotation
+// even when it polls no per-domain cert and no WAF (serve-all, no traffic, WAF off) —
+// it rides the edge-cert refresh tick, not a new loop. The bearer token is sent (the
+// endpoint ignores it). Errors are the caller's to fail-static on.
+func (c *CpClient) FetchTrustBundleCAID() (string, error) {
+	resp, err := c.do(c.base+"/v1/trust-bundle", "")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("control plane returned %d for /v1/trust-bundle", resp.StatusCode)
+	}
+	var body trustBundleBody
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxCertBody)).Decode(&body); err != nil {
+		return "", fmt.Errorf("decode: %w", err)
+	}
+	return body.CAID, nil
 }
 
 // do issues an authorized GET, optionally with If-None-Match. The body must be

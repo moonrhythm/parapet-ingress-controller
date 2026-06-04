@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -25,6 +27,17 @@ import (
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return def
+}
+
+// envInt reads a base-10 int from env, or returns def (on unset/invalid).
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+		slog.Warn("invalid int; using default", "key", key, "value", v, "default", def)
 	}
 	return def
 }
@@ -153,6 +166,13 @@ func main() {
 	go reloader.Start(ctx)
 
 	server := edgecp.NewServer(store, authz)
+
+	// Bound concurrent edge-cert signing so a rotation's fleet-wide re-mint surge sheds
+	// with 503 + Retry-After instead of saturating the CPU-bound signer. Default to
+	// GOMAXPROCS in-flight (signing is fast; this is a safety valve, not a tight cap).
+	signConcurrency := envInt("CP_EDGE_SIGN_CONCURRENCY", runtime.GOMAXPROCS(0))
+	signRetryAfter := envInt("CP_EDGE_SIGN_RETRY_AFTER", 5)
+	server = server.WithSignConcurrency(signConcurrency, signRetryAfter)
 
 	// Data-plane client-cert issuance (POST /v1/edge-cert) + the tokenless trust
 	// bundle (GET /v1/trust-bundle). Two ways to supply the edge CA:

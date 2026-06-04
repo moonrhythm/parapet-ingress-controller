@@ -10,7 +10,7 @@ import (
 // EdgeWAF. A fetch failure or a compile error is fail-static — the edge keeps its
 // last-good ruleset and never falls open to "no WAF". Per-ruleset keep-last-good
 // means a bad zone keeps its old rules while other rulesets still update.
-func RefreshWafOnce(cp *CpClient, w *EdgeWAF) {
+func RefreshWafOnce(cp *CpClient, w *EdgeWAF, coord *RemintCoordinator) {
 	res, err := cp.FetchWaf(w.Etag())
 	switch {
 	case err != nil:
@@ -24,14 +24,21 @@ func RefreshWafOnce(cp *CpClient, w *EdgeWAF) {
 			slog.Info("edge: WAF rulesets updated", "generation", res.Generation)
 		}
 	}
+	// Secondary force-re-mint confirmer: the WAF body carries ca_id on the 200 arm only
+	// (the 304 carries nothing — /v1/certs is the guaranteed carrier). res.CAID is ""
+	// on 304/err, and Observe("") is a no-op.
+	coord.Observe(res.CAID)
 }
 
-// RunWafRefresh runs the periodic WAF refresh forever. The first tick is one
-// interval after startup (startup already fetched). Same cadence as the cert
-// refresh (EDGE_REFRESH_INTERVAL); fail-static.
-func RunWafRefresh(ctx context.Context, cp *CpClient, w *EdgeWAF, interval time.Duration) {
+// RunWafRefresh runs the periodic WAF refresh forever. The first tick is jittered by
+// [0,interval] (fleet poll-instant decorrelation). Same cadence as the cert refresh
+// (EDGE_REFRESH_INTERVAL); fail-static.
+func RunWafRefresh(ctx context.Context, cp *CpClient, w *EdgeWAF, interval time.Duration, coord *RemintCoordinator) {
 	if interval <= 0 { // time.NewTicker panics on a non-positive interval
 		interval = 300 * time.Second
+	}
+	if !sleepCtx(ctx, fullJitter(interval)) {
+		return
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
@@ -40,7 +47,7 @@ func RunWafRefresh(ctx context.Context, cp *CpClient, w *EdgeWAF, interval time.
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			RefreshWafOnce(cp, w)
+			RefreshWafOnce(cp, w, coord)
 		}
 	}
 }

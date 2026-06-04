@@ -33,12 +33,26 @@ func TestSetClientCertMetricsOneSeries(t *testing.T) {
 }
 
 func TestRemintEnum(t *testing.T) {
-	for _, result := range []string{"ok", "keygen_fail", "csr_fail", "fetch_fail", "marshal_fail", "store_fail"} {
-		before := testutil.ToFloat64(edgeRemintHandles[result])
-		remint(result)
-		if got := testutil.ToFloat64(edgeRemintHandles[result]); got != before+1 {
+	for _, result := range []string{"ok", "keygen_fail", "csr_fail", "fetch_fail", "marshal_fail", "store_fail", "breaker_open"} {
+		before := testutil.ToFloat64(edgeRemint.WithLabelValues(result, "reactive"))
+		remint(result, "reactive")
+		if got := testutil.ToFloat64(edgeRemint.WithLabelValues(result, "reactive")); got != before+1 {
 			t.Errorf("remint(%q): %v -> %v, want +1", result, before, got)
 		}
 	}
-	remint("bogus") // no-op
+}
+
+func TestSetObservedTargetOneSeries(t *testing.T) {
+	setObservedTarget("ca-a")
+	setObservedTarget("ca-b") // rotation: one live series
+	if c := testutil.CollectAndCount(edgeCPTargetCAID); c != 1 {
+		t.Errorf("observed-target: want 1 live series, got %d", c)
+	}
+	if v := testutil.ToFloat64(edgeCPTargetCAID.WithLabelValues("ca-b")); v != 1 {
+		t.Errorf("observed-target ca-b = %v, want 1", v)
+	}
+	setObservedTarget("") // clears
+	if c := testutil.CollectAndCount(edgeCPTargetCAID); c != 0 {
+		t.Errorf("empty target must clear the series, got %d", c)
+	}
 }
