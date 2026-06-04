@@ -41,6 +41,10 @@ const (
 	caActiveAnnotation = "parapet.moonrhythm.io/edge-ca-active"
 
 	caPhaseOverlap = "overlap"
+	// caPhaseTrimmed marks a completed OLD-drop: tls.crt is NEW-only, tls.key is the NEW
+	// key, tls-new.key is gone, active is back to the single-CA default. The destructive
+	// TrimCA writes it; its presence (with 1 cert) makes a re-run idempotent.
+	caPhaseTrimmed = "trimmed"
 	caActiveOld    = "old"
 	caActiveNew    = "new"
 
@@ -224,6 +228,28 @@ func reencodeCertBundle(certPEM []byte) (bundle []byte, count int, err error) {
 	return bundle, count, nil
 }
 
+// splitCertBundle parses every CERTIFICATE block (all-or-nothing) and returns each as
+// its own normalized one-block PEM, in bundle order (OLD first, NEW last). It is the
+// per-cert counterpart of reencodeCertBundle, used by TrimCA to keep exactly one block.
+func splitCertBundle(certPEM []byte) (certs [][]byte, err error) {
+	rest := certPEM
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			continue
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return nil, fmt.Errorf("parse cert in bundle: %w", err)
+		}
+		certs = append(certs, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: block.Bytes}))
+	}
+	return certs, nil
+}
+
 // RotateCA performs the NON-DESTRUCTIVE half of a CA rotation: on a populated
 // single-CA Secret it generates a NEW CA in memory and CAS-writes tls.crt =
 // OLD++NEW, stages the NEW key in tls-new.key, and stamps phase=overlap /
@@ -321,4 +347,199 @@ func RotateCA(ctx context.Context, rw SecretRW, namespace, name string, ttl time
 		return append([]byte(nil), newBundle...), nil
 	}
 	return nil, fmt.Errorf("rotate edge CA: exhausted CAS retries for %s/%s", namespace, name)
+}
+
+// SetActiveNew flips the ACTIVE signing key from OLD to NEW during an OLD++NEW overlap:
+// it writes only the caActiveAnnotation ("old" → "new") so every serving replica's
+// reloader rebuilds its Signer to sign new leaves under the NEW key. It is NON-destructive
+// — the served bundle stays OLD++NEW (both still trusted), so an in-flight OLD-signed leaf
+// keeps verifying; only freshly-minted leaves change to NEW. It is REVERSIBLE (flip back to
+// "old") until TrimCA drops OLD.
+//
+// It is the second rotation step. It MUST run after the ca_id widen convergence (every
+// core trusts NEW) and before TrimCA — the revoke tool orders the steps and gates each on
+// converge-status; SetActiveNew itself only enforces the structural preconditions.
+//
+// expectedNewFP, when non-empty, PINS the NEW cert (the last block): the bundle's last
+// fingerprint must equal it, so a reordered/foreign bundle can't flip the active key onto
+// the wrong cert. Idempotent: a re-run on an already-flipped Secret (active=new) is a
+// no-op. CAS-looped like RotateCA. Returns the (unchanged) OLD++NEW bundle PEM.
+func SetActiveNew(ctx context.Context, rw SecretRW, namespace, name, expectedNewFP string) (bundlePEM []byte, err error) {
+	const maxAttempts = 5
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		sec, err := rw.GetSecret(ctx, namespace, name)
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("edge CA secret %s/%s not found — flip only runs on an overlapping CA", namespace, name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get edge CA secret: %w", err)
+		}
+
+		crt := sec.Data["tls.crt"]
+		certs, err := splitCertBundle(crt)
+		if err != nil {
+			return nil, fmt.Errorf("edge CA secret %s/%s has an unparseable bundle: %w", namespace, name, err)
+		}
+		fps := certBundleFPs(crt)
+		phase := sec.Annotations[caRotationPhaseAnnotation]
+		active := sec.Annotations[caActiveAnnotation]
+
+		// Idempotency: already flipped. Re-assert the pin so a re-run still validates the
+		// state it converged to (never returns "ok" on a surprise bundle).
+		if active == caActiveNew {
+			if expectedNewFP != "" && (len(fps) == 0 || fps[len(fps)-1] != expectedNewFP) {
+				return nil, fmt.Errorf("edge CA secret %s/%s is active=new but its last cert fp != expected — investigate", namespace, name)
+			}
+			return append([]byte(nil), crt...), nil
+		}
+
+		// Structural preconditions: a clean 2-cert overlap with a staged NEW key.
+		if phase != caPhaseOverlap || len(certs) != 2 {
+			return nil, fmt.Errorf("edge CA secret %s/%s is not in a 2-cert overlap (phase=%q, certs=%d) — rotate before flipping", namespace, name, phase, len(certs))
+		}
+		newKey := sec.Data[caNewKeyField]
+		if len(newKey) == 0 {
+			return nil, fmt.Errorf("edge CA secret %s/%s has no staged %s — cannot flip", namespace, name, caNewKeyField)
+		}
+		newCert := certs[len(certs)-1] // NEW is last
+		if expectedNewFP != "" && fps[len(fps)-1] != expectedNewFP {
+			return nil, fmt.Errorf("edge CA secret %s/%s last cert fp != expected NEW fp — refusing to flip onto the wrong cert", namespace, name)
+		}
+		// The flip only lands if the staged key actually matches the NEW cert; verify HERE
+		// so a mismatch is a loud error, not a silent reloader wedge minting OLD forever.
+		if !validCAKeypair(newCert, newKey) {
+			return nil, fmt.Errorf("edge CA secret %s/%s staged %s does not match the NEW cert — refusing to flip", namespace, name, caNewKeyField)
+		}
+
+		if sec.Annotations == nil {
+			sec.Annotations = map[string]string{}
+		}
+		sec.Annotations[caActiveAnnotation] = caActiveNew
+
+		if _, err := rw.UpdateSecret(ctx, namespace, sec); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return nil, fmt.Errorf("persist active flip: %w", err)
+		}
+		check, err := rw.GetSecret(ctx, namespace, name)
+		if err != nil {
+			return nil, fmt.Errorf("verify active flip: %w", err)
+		}
+		if check.Annotations[caActiveAnnotation] != caActiveNew {
+			return nil, fmt.Errorf("post-flip verify: active annotation is %q, want %q", check.Annotations[caActiveAnnotation], caActiveNew)
+		}
+		return append([]byte(nil), crt...), nil
+	}
+	return nil, fmt.Errorf("flip edge CA active key: exhausted CAS retries for %s/%s", namespace, name)
+}
+
+// TrimCA performs the DESTRUCTIVE OLD-drop: it rewrites the Secret to NEW-only (tls.crt =
+// the NEW cert, tls.key = the staged NEW key), deletes tls-new.key, and stamps
+// phase=trimmed / active=old (the single-CA steady state). After it lands, the core's
+// strictPool trusts ONLY the NEW CA, so every OLD-signed leaf — the revoked edge's, and any
+// good edge that hasn't re-minted — loses trust and is severed.
+//
+// THIS IS THE IRREVERSIBLE STEP. Its safety rests on the CALLER having gated it on
+// converge-status (every CP replica + good edge NEW-signed, blacklist converged, revoked id
+// with zero NEW issuances). TrimCA enforces only the STRUCTURAL invariants that make the
+// drop well-formed; it does NOT and cannot re-check fleet convergence:
+//   - active MUST be "new" (dropping OLD while OLD is still the active signer would orphan
+//     the signing key and break issuance) — the active flip must have happened first;
+//   - exactly 2 certs in a clean overlap;
+//   - expectedNewFP (REQUIRED) must equal the last (NEW) cert's fp — the operator names the
+//     exact cert to KEEP, so a reordered/foreign bundle can't drop the wrong one;
+//   - the staged NEW key must match that NEW cert.
+//
+// Idempotent / resumable: a re-run on an already-trimmed Secret (phase=trimmed, 1 cert
+// whose fp == expectedNewFP, matching tls.key) is a no-op returning the NEW bundle. CAS-looped.
+func TrimCA(ctx context.Context, rw SecretRW, namespace, name, expectedNewFP string) (bundlePEM []byte, err error) {
+	if expectedNewFP == "" {
+		return nil, fmt.Errorf("TrimCA requires the expected NEW cert fingerprint (the cert to KEEP) — refusing a blind destructive drop")
+	}
+	const maxAttempts = 5
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		sec, err := rw.GetSecret(ctx, namespace, name)
+		if apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("edge CA secret %s/%s not found — trim only runs on an overlapping CA", namespace, name)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("get edge CA secret: %w", err)
+		}
+
+		crt := sec.Data["tls.crt"]
+		certs, err := splitCertBundle(crt)
+		if err != nil {
+			return nil, fmt.Errorf("edge CA secret %s/%s has an unparseable bundle: %w", namespace, name, err)
+		}
+		fps := certBundleFPs(crt)
+		phase := sec.Annotations[caRotationPhaseAnnotation]
+		active := sec.Annotations[caActiveAnnotation]
+
+		// Idempotency / resume: already trimmed to the pinned NEW-only CA.
+		if phase == caPhaseTrimmed && len(certs) == 1 {
+			if fps[0] != expectedNewFP {
+				return nil, fmt.Errorf("edge CA secret %s/%s is trimmed but its single cert fp != expected NEW fp — investigate", namespace, name)
+			}
+			if !validCAKeypair(crt, sec.Data["tls.key"]) {
+				return nil, fmt.Errorf("edge CA secret %s/%s is trimmed but tls.key does not match the NEW cert — investigate", namespace, name)
+			}
+			return append([]byte(nil), crt...), nil
+		}
+
+		// Structural preconditions for the drop.
+		if active != caActiveNew {
+			return nil, fmt.Errorf("edge CA secret %s/%s active=%q — flip the active key to NEW before dropping OLD (else issuance is orphaned)", namespace, name, active)
+		}
+		if phase != caPhaseOverlap || len(certs) != 2 {
+			return nil, fmt.Errorf("edge CA secret %s/%s is not a clean 2-cert overlap (phase=%q, certs=%d) — refusing to trim", namespace, name, phase, len(certs))
+		}
+		if fps[len(fps)-1] != expectedNewFP {
+			return nil, fmt.Errorf("edge CA secret %s/%s last (NEW) cert fp != expected — refusing to drop the wrong cert", namespace, name)
+		}
+		newCert := certs[len(certs)-1]
+		newKey := sec.Data[caNewKeyField]
+		if len(newKey) == 0 || !validCAKeypair(newCert, newKey) {
+			return nil, fmt.Errorf("edge CA secret %s/%s staged %s missing/mismatched for the NEW cert — refusing to trim", namespace, name, caNewKeyField)
+		}
+
+		id, err := caBundleID(newCert)
+		if err != nil {
+			return nil, err
+		}
+		// Collapse to NEW-only: NEW cert becomes the sole tls.crt, the staged NEW key becomes
+		// tls.key, the staged field is removed, and active returns to the single-CA default.
+		sec.Data["tls.crt"] = append([]byte(nil), newCert...)
+		sec.Data["tls.key"] = append([]byte(nil), newKey...)
+		delete(sec.Data, caNewKeyField)
+		if sec.Annotations == nil {
+			sec.Annotations = map[string]string{}
+		}
+		sec.Annotations[caRotationPhaseAnnotation] = caPhaseTrimmed
+		sec.Annotations[caActiveAnnotation] = caActiveOld
+		sec.Annotations[caGenerationAnnotation] = id // re-stamp the anti-regen guard (NEVER blank)
+
+		if _, err := rw.UpdateSecret(ctx, namespace, sec); err != nil {
+			if apierrors.IsConflict(err) {
+				continue
+			}
+			return nil, fmt.Errorf("persist trimmed edge CA: %w", err)
+		}
+		check, err := rw.GetSecret(ctx, namespace, name)
+		if err != nil {
+			return nil, fmt.Errorf("verify trimmed edge CA: %w", err)
+		}
+		checkFPs := certBundleFPs(check.Data["tls.crt"])
+		if _, n, err := reencodeCertBundle(check.Data["tls.crt"]); err != nil || n != 1 {
+			return nil, fmt.Errorf("post-trim verify: want 1 cert, got %d (err=%v)", n, err)
+		}
+		if len(checkFPs) != 1 || checkFPs[0] != expectedNewFP {
+			return nil, fmt.Errorf("post-trim verify: surviving cert fp != expected NEW fp")
+		}
+		if !validCAKeypair(check.Data["tls.crt"], check.Data["tls.key"]) {
+			return nil, fmt.Errorf("post-trim verify: tls.key does not match the surviving NEW cert")
+		}
+		return append([]byte(nil), newCert...), nil
+	}
+	return nil, fmt.Errorf("trim edge CA: exhausted CAS retries for %s/%s", namespace, name)
 }
