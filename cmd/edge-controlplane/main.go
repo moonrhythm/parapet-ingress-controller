@@ -63,6 +63,18 @@ func envInt(key string, def int) int {
 	return def
 }
 
+// envFloat reads a float64 env var (the converge authz-generation pin is a float
+// fingerprint). An unparseable value falls back to def with a loud warning.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+		slog.Warn("invalid float; using default", "key", key, "value", v, "default", def)
+	}
+	return def
+}
+
 // k8sRW adapts the package-level k8s secret read/write funcs to edgecp.SecretRW for
 // the CA bootstrap (the only writer of the CA Secret).
 type k8sRW struct{}
