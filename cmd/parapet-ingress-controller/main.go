@@ -272,10 +272,19 @@ func main() {
 	trustProxy := cidrTrust
 	if trustMgr != nil {
 		trustProxy = func(r *http.Request) bool {
+			// Resolve the decision to ONE source, then emit exactly once (never
+			// double-count). cidr takes precedence, so verified-chain undercounts a
+			// dual-path edge — a verified-chain flatline after rotation is still the
+			// earliest convergence-failure signal. This closure exists only when
+			// trustMgr != nil, so the trust-disabled path stays free of per-request work.
+			src := metric.TrustSrcNone
 			if cidrTrust != nil && cidrTrust(r) {
-				return true
+				src = metric.TrustSrcCIDR
+			} else if r.TLS != nil && len(r.TLS.VerifiedChains) > 0 {
+				src = metric.TrustSrcVerifiedChain
 			}
-			return r.TLS != nil && len(r.TLS.VerifiedChains) > 0
+			metric.TrustSource(src)
+			return src != metric.TrustSrcNone
 		}
 	}
 

@@ -71,6 +71,10 @@ func (s *Server) SetSigner(sg *Signer) {
 		prev = st.gen
 	}
 	s.signerState.Store(&signerGen{sg: sg, gen: prev + 1})
+	// Convergence metrics: set all signer gauges together inside the held genMu so a
+	// scrape never tears across them. Done before close(genNotify) so a long-poll
+	// waiter that wakes and re-scrapes always observes the new series.
+	setSignerMetrics(sg.CAID(), prev+1, sg.BundleLen())
 	close(s.genNotify)
 	s.genNotify = make(chan struct{})
 }

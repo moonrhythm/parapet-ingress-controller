@@ -13,9 +13,10 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
+
+	"github.com/moonrhythm/parapet-ingress-controller/caid"
 )
 
 // SANTrustDomain is the SPIFFE-style trust domain (URI host) for every edge leaf
@@ -47,6 +48,7 @@ type Signer struct {
 	bundle     []byte            // every CA public cert, PEM (OLD++NEW during overlap); served as ca_pem
 	bundlePool *x509.CertPool    // roots over `bundle`, for Sign()'s post-sign chain self-verify
 	caID       string
+	certCount  int // number of CA certs in the bundle (2 during OLD++NEW overlap, else 1)
 	ttl        time.Duration
 	skew       time.Duration
 }
@@ -146,6 +148,7 @@ func NewProvidedSignerActive(bundlePEM, keyPEM []byte, activeFP string, ttl, ske
 		bundle:     rebuilt,
 		bundlePool: pool,
 		caID:       id,
+		certCount:  len(certs),
 		ttl:        ttl,
 		skew:       skew,
 	}, warnings, nil
@@ -159,6 +162,10 @@ func (s *Signer) BundlePEM() []byte { return s.bundle }
 // trust-bundle ca_id). It changes whenever a CA is added to or dropped from the
 // bundle, which is the edge's proactive force-re-mint trigger.
 func (s *Signer) CAID() string { return s.caID }
+
+// BundleLen returns the number of CA certs in the served bundle: 2 during an
+// OLD++NEW rotation overlap, 1 otherwise. Read-only, O(1) (counted at construction).
+func (s *Signer) BundleLen() int { return s.certCount }
 
 // Sign issues a leaf for the given public key and edge id. It builds the template
 // from a zero value (never echoing CSR fields), stamps the id-derived URI SAN, and
@@ -386,33 +393,10 @@ func certBundleFPs(certPEM []byte) []string {
 	return fps
 }
 
-// caBundleID computes the trust-bundle ca_id: a hex fingerprint over the sorted
-// SHA-256s of every CERTIFICATE block in the bundle. Sorting makes it stable and
-// order-independent (an OLD++NEW overlap and NEW++OLD produce the same id only if
-// the set is equal — which is the intent: ca_id reflects the trusted CA *set*).
+// caBundleID computes the trust-bundle ca_id over every CERTIFICATE block in the
+// bundle. It delegates to the shared caid package (the single source of truth so the
+// edge can derive a byte-identical id from its client cert's CA chain without
+// importing this k8s-bound package).
 func caBundleID(bundlePEM []byte) (string, error) {
-	var sums []string
-	rest := bundlePEM
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type != "CERTIFICATE" {
-			continue
-		}
-		sum := sha256.Sum256(block.Bytes)
-		sums = append(sums, hex.EncodeToString(sum[:]))
-	}
-	if len(sums) == 0 {
-		return "", fmt.Errorf("CA bundle has no certificates")
-	}
-	sort.Strings(sums)
-	h := sha256.New()
-	for _, s := range sums {
-		h.Write([]byte(s))
-		h.Write([]byte{0})
-	}
-	return hex.EncodeToString(h.Sum(nil)[:16]), nil
+	return caid.FromPEM(bundlePEM)
 }

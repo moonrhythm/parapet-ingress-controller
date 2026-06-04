@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"fmt"
 	"sync/atomic"
+
+	"github.com/moonrhythm/parapet-ingress-controller/caid"
 )
 
 // ClientCertStore holds the edge's data-plane mTLS client certificate in memory
@@ -46,6 +48,20 @@ func (s *ClientCertStore) Update(chainPEM, keyPEM []byte) error {
 		}
 	}
 	s.cur.Store(&cert)
+
+	// Convergence metric: derive the issuing CA-set ca_id from the chain's CA blocks
+	// (Certificate[1:], the bundle Sign() appended after the leaf) — byte-identical to
+	// the CP's CAID for the same set. Guard a too-short chain and a nil leaf so the
+	// metric never panics the refresh goroutine.
+	var caID string
+	if len(cert.Certificate) >= 2 {
+		caID, _ = caid.FromDER(cert.Certificate[1:])
+	}
+	var notAfter int64
+	if cert.Leaf != nil {
+		notAfter = cert.Leaf.NotAfter.Unix()
+	}
+	setClientCertMetrics(caID, notAfter)
 	return nil
 }
 

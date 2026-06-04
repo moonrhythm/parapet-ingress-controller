@@ -76,6 +76,9 @@ spec:
           ports:
             - name: https
               containerPort: 8443
+            - name: metrics # CP_METRICS_LISTEN — UNAUTHENTICATED Prometheus /metrics
+              containerPort: 9187 #   (non-secret: ca_id fingerprints, counters, generations).
+              #                        Restrict to the scraper via the NetworkPolicy below.
           livenessProbe:
             httpGet:
               path: /healthz
@@ -155,3 +158,13 @@ spec:
       ports:
         - protocol: TCP
           port: 8443
+    # The :9187 /metrics listener is UNAUTHENTICATED — allow ONLY the Prometheus
+    # scraper. REPLACE this selector with however your scraper is identified
+    # (namespaceSelector for the monitoring namespace, a podSelector, or an ipBlock).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring # REPLACE: your Prometheus namespace
+      ports:
+        - protocol: TCP
+          port: 9187

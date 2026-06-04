@@ -16,6 +16,8 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 
+	"github.com/moonrhythm/parapet/pkg/prom"
+
 	"github.com/moonrhythm/parapet-ingress-controller/edgecp"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 )
@@ -41,12 +43,13 @@ func (k8sRW) UpdateSecret(ctx context.Context, ns string, s *v1.Secret) (*v1.Sec
 
 func main() {
 	addr := envOr("CP_LISTEN", ":8443")
-	watchNamespace := os.Getenv("WATCH_NAMESPACE") // "" = all namespaces
-	podNamespace := os.Getenv("POD_NAMESPACE")     // bounds the global WAF ruleset
-	tlsCert := os.Getenv("CP_TLS_CERT")            // server cert (with CP_TLS_KEY → HTTPS)
-	tlsKey := os.Getenv("CP_TLS_KEY")              // server key
-	tokensJSON := os.Getenv("CP_TOKENS")           // {"<token>":["acme.com",...]} or {"<token>":{"id","domains","disabled"}}
-	tokensFile := os.Getenv("CP_TOKENS_FILE")      // alternative: path to that JSON
+	metricsListen := envOr("CP_METRICS_LISTEN", ":9187") // "" disables; SEPARATE unauthenticated listener (non-secret: ca_id fingerprints, counters, generations)
+	watchNamespace := os.Getenv("WATCH_NAMESPACE")       // "" = all namespaces
+	podNamespace := os.Getenv("POD_NAMESPACE")           // bounds the global WAF ruleset
+	tlsCert := os.Getenv("CP_TLS_CERT")                  // server cert (with CP_TLS_KEY → HTTPS)
+	tlsKey := os.Getenv("CP_TLS_KEY")                    // server key
+	tokensJSON := os.Getenv("CP_TOKENS")                 // {"<token>":["acme.com",...]} or {"<token>":{"id","domains","disabled"}}
+	tokensFile := os.Getenv("CP_TOKENS_FILE")            // alternative: path to that JSON
 	wafEnabled := os.Getenv("CP_WAF_ENABLED") == "true"
 	caCertPath := os.Getenv("EDGE_CA_CERT")                 // provided-mode edge CA cert (with EDGE_CA_KEY → enable issuance)
 	caKeyPath := os.Getenv("EDGE_CA_KEY")                   // provided-mode edge CA private key
@@ -232,6 +235,25 @@ func main() {
 		go ingReloader.Watch(ctx)
 		server = server.WithWAF(wafStore)
 		slog.Info("edge control plane: WAF distribution enabled", "pod_namespace", podNamespace)
+	}
+
+	// Convergence /metrics on a SEPARATE, unauthenticated listener (never the
+	// token-gated API mux, so a scraper reaches it without the bearer token). Only the
+	// serving process reaches here — the run-once bootstrap/rotate Jobs os.Exit above.
+	// The payload is non-secret (ca_id fingerprints, counters, generations — no key
+	// material); a NetworkPolicy must still restrict it to the scraper.
+	//
+	// A failed bind is logged loudly but NOT fatal: the control plane's job is issuance
+	// + trust distribution, which must never be taken down because an observability port
+	// is contended. A missing /metrics is already loud to the scraper (the target's
+	// `up == 0`), and the convergence interlock fails closed on a non-reporting target.
+	if metricsListen != "" {
+		go func() {
+			if err := prom.Start(metricsListen); err != nil && err != http.ErrServerClosed {
+				slog.Error("edge control plane: metrics listener failed; serving API without /metrics", "addr", metricsListen, "err", err)
+			}
+		}()
+		slog.Info("edge control plane: metrics listening", "addr", metricsListen)
 	}
 
 	srv := &http.Server{
