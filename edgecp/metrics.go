@@ -46,10 +46,30 @@ var (
 		Name:      "edge_ca_target_ca_id",
 		Help:      "The ca_id the fleet should converge to — the serving control plane's current signer (value 1).",
 	}, []string{"ca_id"})
+
+	// signerFloored counts signer swaps rejected by the monotonic generation floor (an
+	// out-of-order re-list serving an older cached CA object). A non-zero rate means a
+	// rotation is being held back at last-good — it must be scrapeable, not just logged,
+	// because the floor turns the always-swap path into a sometimes-skip.
+	signerFloored = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_ca_signer_floored_total",
+		Help:      "Signer swaps rejected by the monotonic generation floor (older-than-served generation).",
+	})
+
+	// signerRVUnparsed is 1 while the CA Secret's resourceVersion is non-numeric (the
+	// signer is frozen at last-good and readiness will 503 if none loaded). The k8s
+	// contract permits an opaque resourceVersion, so this can be a PERMANENT stuck state
+	// — it must be alertable, not a one-shot log line.
+	signerRVUnparsed = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_ca_signer_rv_unparsed",
+		Help:      "1 when the CA Secret resourceVersion is non-numeric (signer frozen at last-good); 0 when parseable.",
+	})
 )
 
 func init() {
-	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID)
+	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed)
 }
 
 // setSignerMetrics records the active signer's ca_id, generation, and bundle size. It

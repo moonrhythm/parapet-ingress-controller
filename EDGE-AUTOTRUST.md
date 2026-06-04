@@ -193,17 +193,36 @@ runs alongside as a correctness backstop; the watch call avoids a whole-request
 `http.Client.Timeout` (Transport timeouts + per-attempt ctx deadline + TCP
 keep-alive). The CP `http.Server` `WriteTimeout`/`IdleTimeout` MUST be ≥ the ceiling.
 
-### Generation (content-derived, replica-identical + monotonic)
+### Generation (resourceVersion-derived, replica-identical + monotonic)
 
-`generation = max(resourceVersion)` across the source objects (the registry Secret +
-the `parapet-edge-ca` Secret). etcd is a single global monotonic revision counter, so
-this is server-assigned (identical on every CP replica), monotonic, and persisted
-across CP restarts **by construction** — no process counter. **Forward-only is now
-LOAD-BEARING for CA-rotation-as-revocation:** a replayed OLDER bundle over any TLS gap
-could re-add a just-dropped OLD CA (**re-trusting a compromised edge** whose leaf
-chains to OLD) or remove a just-added NEW CA (un-trusting a just-re-minted fleet →
-mass 502). The core swaps only on a strictly-advancing generation. (Also fixes the
-pre-existing `wafstore.go` per-process-counter flap under `replicas: 2`.)
+`generation` is the **`parapet-edge-ca` Secret's own `metadata.resourceVersion`** (a
+single source object), parsed to `uint64` (`edgecp/resourceversion.go`). etcd is a single
+global monotonic revision counter, so this is server-assigned (**identical on every CP
+replica** that reads the same object), monotonic, and persisted across CP restarts **by
+construction** — no process counter (this replaces the `prev+1` that two replicas desync,
+the `wafstore.go` flap class). **It is NOT a `max()` across objects** — a `resourceVersion`
+is only comparable within one object's history, so the token registry (when it becomes a
+Secret) gets its OWN separate generation for its own concern, never folded in.
+
+Guards: (1) the CP-side **monotonic floor** in `SetSigner` rejects `generation <= served`
+(an out-of-order watch re-list can't regress; counted by `parapet_edge_ca_signer_floored_total`);
+(2) a non-numeric `resourceVersion` (the k8s contract permits it) keeps last-good and raises
+`parapet_edge_ca_signer_rv_unparsed` (fail-closed — never `0`, never a counter fallback);
+(3) the `ca_id` no-churn gate means a metadata-only write does **not** advance generation.
+**Forward-only is LOAD-BEARING for CA-rotation-as-revocation:** a replayed OLDER bundle over
+any TLS gap could re-add a just-dropped OLD CA (**re-trusting a compromised edge**) or remove
+a just-added NEW CA (mass 502); the core swaps only on a strictly-advancing generation.
+
+**Provided mode** has no Secret RV: `generation` comes from `EDGE_CA_PROVIDED_GENERATION`
+(bump it on each rotation) or the cert file's mtime — it **must advance on every rotation**,
+or the core rejects the new bundle as a rollback.
+
+> **One-way door (rollback footgun).** Switching to a `resourceVersion`-derived generation
+> moves the value from a small counter to a large etcd revision. Once the core has applied an
+> RV-derived generation, a plain deploy **rollback** to the old counter scheme makes the core
+> reject the now-smaller generation as a rollback and **freeze trust at last-good**. Rolling
+> back requires resetting the core's remembered trust generation (restart the core after the
+> CP is rolled back). Distinct from the delete+recreate UID-reset residual.
 
 ### Warm-start cache (fail-closed)
 
@@ -620,6 +639,7 @@ not Prometheus counters (a Pushgateway would be a new failure domain).
 | `EDGE_CLIENTCERT_KEY_TYPE` / `_SKEW` / `_RATE` | edge/CP | `ecdsa-p256` / `10m` / `10/min` | Ephemeral key type; NotBefore backdate (negligible vs 7 d, but NTP between CP and core stays a prerequisite); per-token issuance limit (**per-replica**, effective N×). |
 | `EDGE_CA_BOOTSTRAP` / `--bootstrap-ca` | CP (Job) | false | One-shot CA bootstrap **and rotation** mode (`EnsureCA`: adopt/generate/never-regenerate, CAS-guarded). The only writer of the CA Secret. |
 | `EDGE_CA_CERT` / `_KEY` | CP | `""` (⇒ managed) | Provided mode (mounted CA). Both-or-neither. Absent ⇒ managed (the Job generates). |
+| `EDGE_CA_PROVIDED_GENERATION` | CP | cert mtime | Provided-mode trust-bundle generation (managed mode derives it from the CA Secret's `resourceVersion`). **MUST strictly advance on each provided-CA rotation** or the core rejects the new bundle as a rollback. |
 | `EDGE_CA_SECRET` | CP | `parapet-edge-ca` | The CA Secret in a CP-only namespace; Job writes (scoped), serving reads (read-only + read-watch). Pre-created empty, GitOps drift-exclusion. |
 | `EDGE_CA_TTL` | CP | `8760h–17520h` (1–2 y) | Edge CA cert lifetime. **Shortened** from 10 y now that rotation is a routine on-demand primitive — but kept comfortably longer than the expected revoke-driven rotation interval so a scheduled CA expiry doesn't collide with on-demand rotations. |
 | `POD_NAMESPACE` / `WATCH_NAMESPACE` | CP | downward API (**required**) / `""` | CA Secret namespace (read serving-managed, write Job); pin `WATCH_NAMESPACE` to shrink the cluster-wide tenant-TLS read blast radius. |

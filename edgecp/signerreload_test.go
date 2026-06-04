@@ -19,7 +19,9 @@ func testReloader(srv *Server, secs *[]v1.Secret) *SignerReloader {
 
 func caSecretObj(data map[string][]byte, annotations map[string]string) v1.Secret {
 	return v1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "parapet-edge-ca", Namespace: "ns", Annotations: annotations},
+		// ResourceVersion is the generation source (the etcd revision). Stamp a numeric
+		// default; rotation tests bump it (a real Secret write advances the RV).
+		ObjectMeta: metav1.ObjectMeta{Name: "parapet-edge-ca", Namespace: "ns", ResourceVersion: "100", Annotations: annotations},
 		Data:       data,
 	}
 }
@@ -46,11 +48,12 @@ func TestSignerReloaderPicksUpRotation(t *testing.T) {
 	}
 	gen1, caid1 := srvGen(srv), srv.CurrentCAID()
 
-	// Rotate: flip the Secret to OLD++NEW overlap.
+	// Rotate: flip the Secret to OLD++NEW overlap (a real write advances the RV).
 	newCert, newKey := mustGenerateCA(t)
 	secs[0].Data["tls.crt"] = append(append([]byte(nil), oldCert...), newCert...)
 	secs[0].Data[caNewKeyField] = newKey
 	secs[0].Annotations = map[string]string{caRotationPhaseAnnotation: caPhaseOverlap, caActiveAnnotation: caActiveOld}
+	secs[0].ResourceVersion = "200"
 
 	if err := r.reload(context.Background()); err != nil {
 		t.Fatal(err)

@@ -31,6 +31,27 @@ func envOr(key, def string) string {
 	return def
 }
 
+// providedGeneration derives the trust-bundle generation for a mounted (provided) CA,
+// which has no Secret resourceVersion. It prefers EDGE_CA_PROVIDED_GENERATION (the
+// operator bumps it on rotation — strictly-increasing for determinism), else falls back
+// to the cert file's mtime as unix seconds (a remount with a newer file advances it).
+// It must advance on every provided-CA rotation, or the core rejects the new bundle as a
+// rollback (gen <= held). 0 is never returned (cold value 1).
+func providedGeneration(caCertPath string) uint64 {
+	if v := os.Getenv("EDGE_CA_PROVIDED_GENERATION"); v != "" {
+		if n, err := strconv.ParseUint(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+		slog.Warn("EDGE_CA_PROVIDED_GENERATION must be a positive integer; falling back to cert mtime", "value", v)
+	}
+	if fi, err := os.Stat(caCertPath); err == nil {
+		if mt := fi.ModTime().Unix(); mt > 0 {
+			return uint64(mt)
+		}
+	}
+	return 1
+}
+
 // envInt reads a base-10 int from env, or returns def (on unset/invalid).
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
@@ -204,12 +225,17 @@ func main() {
 			slog.Warn("edge CA: " + msg)
 		}
 		server.ExpectIssuance()
-		server = server.WithSigner(signer)
-		slog.Info("edge control plane: data-plane issuance enabled (provided CA)",
-			"ca_id", signer.CAID(), "leaf_ttl", clientCertTTL)
-		// NOTE: rotating a mounted (provided) CA requires remounting EDGE_CA_CERT/KEY
-		// and restarting this process — there is no fsnotify here. Managed mode (below)
+		// Provided mode has no Secret resourceVersion to derive the generation from, so
+		// take it from EDGE_CA_PROVIDED_GENERATION (operator bumps it on each rotation) or
+		// the cert file's mtime. A fixed value would make provided-CA rotation impossible
+		// (the core rejects the new bundle at gen <= held). Rotating a mounted CA thus
+		// REQUIRES remounting EDGE_CA_CERT/KEY (a newer mtime) or bumping the env, AND
+		// restarting this process — there is no fsnotify here. Managed mode (below)
 		// hot-reloads via the CA-Secret watch.
+		providedGen := providedGeneration(caCertPath)
+		server = server.WithSigner(signer, providedGen)
+		slog.Info("edge control plane: data-plane issuance enabled (provided CA)",
+			"ca_id", signer.CAID(), "generation", providedGen, "leaf_ttl", clientCertTTL)
 
 	case caSecret != "":
 		if podNamespace == "" {
