@@ -224,6 +224,58 @@ func TestTrustBundleWatchConcurrencyShed(t *testing.T) {
 	}
 }
 
+// Exercises the REAL acquire → block → release → re-acquire cycle through the handler (the
+// pre-filled-slot shed test can't): a blocked watcher holds the only slot, is unblocked by a
+// generation bump (releasing the slot via defer), and a SECOND watcher then re-acquires the
+// freed slot. Catches a broken/removed release (which would permanently saturate the gate and
+// 503 every legitimate watcher — a self-inflicted trust-bundle outage).
+func TestTrustBundleWatchSlotReleaseReacquire(t *testing.T) {
+	certPEM, keyPEM := testEdgeCA(t)
+	sg, _, _ := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)
+	srv := NewServer(NewCertStore(), NewAuthz(nil)).WithSigner(sg, 1).WithWatchConcurrency(1, 5)
+	h := srv.Handler()
+
+	// watch fires a would-block long-poller (since == current gen) in a goroutine.
+	watch := func(url string) chan int {
+		done := make(chan int, 1)
+		go func() {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, httptest.NewRequest("GET", url, nil))
+			done <- rec.Code
+		}()
+		return done
+	}
+	waitSlots := func(n int) {
+		t.Helper()
+		for i := 0; i < 500; i++ {
+			if len(srv.watchGate) == n {
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		t.Fatalf("watch slots = %d, want %d within deadline", len(srv.watchGate), n)
+	}
+
+	// First watcher (since=1 == gen) acquires the only slot and blocks.
+	d1 := watch("/v1/trust-bundle?watch=1&since=1")
+	waitSlots(1)
+	// Advance the generation → genNotify wakes the waiter → it returns, releasing the slot.
+	srv.SetSigner(sg, 2)
+	if code := <-d1; code != http.StatusOK {
+		t.Fatalf("first watcher: want 200 after gen bump, got %d", code)
+	}
+	waitSlots(0) // released
+
+	// A second watcher (since=2 == new gen) RE-ACQUIRES the freed slot — proves release works.
+	d2 := watch("/v1/trust-bundle?watch=1&since=2")
+	waitSlots(1)
+	srv.SetSigner(sg, 3)
+	if code := <-d2; code != http.StatusOK {
+		t.Fatalf("second watcher (re-acquire): want 200, got %d", code)
+	}
+	waitSlots(0)
+}
+
 func TestTrustBundleEndpoint(t *testing.T) {
 	certPEM, keyPEM := testEdgeCA(t)
 	sg, _, _ := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)
