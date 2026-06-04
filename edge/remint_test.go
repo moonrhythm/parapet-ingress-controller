@@ -81,6 +81,30 @@ func TestObserveTriggersProactive(t *testing.T) {
 	}
 }
 
+// The active=OLD→NEW flip leaves the bundle ca_id UNCHANGED (both append OLD++NEW) and
+// changes only the signer fp — so Observe must trigger on a signer-fp divergence even when
+// the ca_id matches the held leaf, or the edge would never re-chain to NEW and would 502 at
+// the OLD-drop.
+func TestObserveTriggersOnSignerFPFlip(t *testing.T) {
+	coord, store := testCoord(t, RemintConfig{})
+	if _, _ = RefreshEdgeCertOnce(coord.cp, store, "timer"); !store.Loaded() {
+		t.Fatal("pre-mint failed")
+	}
+	liveCA, liveFP := store.CAID(), store.SignerFP()
+	if liveCA == "" || liveFP == "" {
+		t.Fatalf("need a known held tuple, got ca=%q fp=%q", liveCA, liveFP)
+	}
+	// SAME ca_id, DIFFERENT active signer fp (the flip). Must attempt a re-mint.
+	coord.Observe(liveCA, "a-different-signer-fp")
+	waitFor(t, func() bool { return !coordInFlight(coord) && store.CAID() == liveCA })
+	coord.mu.Lock()
+	noConverge := coord.proactiveNoConverge
+	coord.mu.Unlock()
+	if noConverge == 0 {
+		t.Error("a same-ca_id signer-fp flip must trigger a proactive re-mint")
+	}
+}
+
 // K reactive ok-mints that don't change ca_id open the reactive breaker. Reaching the
 // CP target does NOT reset it (the core may still reject); only a genuine ca_id FLIP does.
 func TestReactiveBreaker(t *testing.T) {

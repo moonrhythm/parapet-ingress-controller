@@ -144,6 +144,66 @@ func TestSignerReloaderContradictoryAnnotationKeepsLastGood(t *testing.T) {
 	}
 }
 
+// THE load-bearing serving change: an active=old→new flip leaves the OLD++NEW bundle
+// byte-identical (same ca_id), so a ca_id-only short-circuit would make the flip a SILENT
+// no-op and the NEW signer would never install. The reloader must install it — keyed on the
+// (ca_id, active-fp) tuple — advancing the generation and re-chaining new leaves to NEW
+// while the ca_id is UNCHANGED.
+func TestSignerReloaderActiveFlipInstallsNewSigner(t *testing.T) {
+	oldCert, oldKey := mustGenerateCA(t)
+	newCert, newKey := mustGenerateCA(t)
+	overlap := append(append([]byte(nil), oldCert...), newCert...)
+	secs := []v1.Secret{caSecretObj(
+		map[string][]byte{"tls.crt": overlap, "tls.key": oldKey, caNewKeyField: newKey},
+		map[string]string{caRotationPhaseAnnotation: caPhaseOverlap, caActiveAnnotation: caActiveOld},
+	)}
+
+	srv := NewServer(NewCertStore(), NewAuthz(nil))
+	r := testReloader(srv, &secs)
+	if err := r.reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	gen1, caid1 := srvGen(srv), srv.CurrentCAID()
+	if srv.CurrentActiveFP() != fpOf(t, oldCert) {
+		t.Fatalf("pre-flip active fp = %q, want OLD %q", srv.CurrentActiveFP(), fpOf(t, oldCert))
+	}
+
+	// Flip ONLY the active annotation (a real write advances the RV); the bundle is identical.
+	secs[0].Annotations[caActiveAnnotation] = caActiveNew
+	secs[0].ResourceVersion = "300"
+	if err := r.reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if srv.CurrentCAID() != caid1 {
+		t.Errorf("ca_id must stay identical across the active flip (same OLD++NEW bundle), %q → %q", caid1, srv.CurrentCAID())
+	}
+	if srvGen(srv) <= gen1 {
+		t.Errorf("the flip must install a new signer (generation must advance), %d → %d", gen1, srvGen(srv))
+	}
+	if srv.CurrentActiveFP() != fpOf(t, newCert) {
+		t.Errorf("post-flip active fp = %q, want NEW %q", srv.CurrentActiveFP(), fpOf(t, newCert))
+	}
+	// The installed signer now signs under NEW (the whole point — leaves survive the OLD-drop).
+	sg := srv.signerState.Load().sg
+	chainPEM, _, _, err := sg.Sign(mkLeafKey(t).Public(), "edge-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !verifiesUnder(t, chainPEM, newCert) || verifiesUnder(t, chainPEM, oldCert) {
+		t.Error("after the flip, new leaves must chain to NEW, not OLD")
+	}
+
+	// A re-read at the same RV (unchanged bundle AND active) must NOT churn the generation.
+	gen2 := srvGen(srv)
+	if err := r.reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if srvGen(srv) != gen2 {
+		t.Errorf("a no-op re-read after the flip must not advance the generation, %d → %d", gen2, srvGen(srv))
+	}
+}
+
 func TestSignerReloaderAbsentSecretKeepsUnloaded(t *testing.T) {
 	secs := []v1.Secret{} // CA not provisioned yet
 	srv := NewServer(NewCertStore(), NewAuthz(nil))
