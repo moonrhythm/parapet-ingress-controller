@@ -88,35 +88,46 @@ func TestTokenDisabledWithoutRotation(t *testing.T) {
 }
 
 // edge_ca_rotation_stuck is 0 outside overlap, 0 inside overlap before the deadline, and 1
-// once the overlap outlives the deadline — and the clock does NOT reset on a re-observe.
+// once the overlap outlives the deadline. The overlap-start is taken from the annotation
+// timestamp (restart-immune), and a re-observe at the same start does not move the clock.
 func TestRotationStuckGauge(t *testing.T) {
-	t.Cleanup(func() { SetRotationOverlap(false); SetRotationStuckDeadline(0) })
+	t.Cleanup(func() { SetRotationOverlap(false, 0); SetRotationStuckDeadline(0) })
 
 	SetRotationStuckDeadline(time.Hour)
-	SetRotationOverlap(false)
+	SetRotationOverlap(false, 0)
 	if v := testutil.ToFloat64(rotationStuck); v != 0 {
 		t.Errorf("not in overlap ⇒ 0, got %v", v)
 	}
-	// Enter overlap "1 hour + ε ago" by back-dating the start, deadline 1h ⇒ stuck.
-	SetRotationOverlap(true)
-	rotationOverlapSince.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	// Overlap that began 2h ago (annotation start), deadline 1h ⇒ stuck. This is the
+	// RESTART-IMMUNE path: the age comes from the persisted start, not first-observed time.
+	twoHoursAgo := time.Now().Add(-2 * time.Hour).Unix()
+	SetRotationOverlap(true, twoHoursAgo)
 	if v := testutil.ToFloat64(rotationStuck); v != 1 {
-		t.Errorf("overlap past the deadline ⇒ 1, got %v", v)
+		t.Errorf("overlap started past the deadline ⇒ 1, got %v", v)
 	}
-	// A re-observe must NOT reset the (back-dated) clock — still stuck.
+	// A fresh restart re-reads the SAME annotation start → still correctly stuck (the bug this
+	// folds: a restart used to reset the clock to now and falsely read 0).
 	before := rotationOverlapSince.Load()
-	SetRotationOverlap(true)
+	SetRotationOverlap(true, twoHoursAgo)
 	if rotationOverlapSince.Load() != before {
-		t.Error("re-observing overlap must not reset the stuck clock")
+		t.Error("re-observing the same overlap start must be idempotent (restart-immune)")
 	}
-	// A fresh overlap within the deadline ⇒ not yet stuck.
-	SetRotationOverlap(false)
-	SetRotationOverlap(true)
+	if v := testutil.ToFloat64(rotationStuck); v != 1 {
+		t.Error("re-observe after 'restart' must still read stuck")
+	}
+	// A recent overlap within the deadline ⇒ not yet stuck.
+	SetRotationOverlap(true, time.Now().Add(-1*time.Minute).Unix())
 	if v := testutil.ToFloat64(rotationStuck); v != 0 {
 		t.Errorf("fresh overlap within the deadline ⇒ 0, got %v", v)
 	}
+	// Legacy Secret (no started annotation, startedUnix=0) ⇒ first-observed fallback (recent ⇒ 0).
+	SetRotationOverlap(false, 0)
+	SetRotationOverlap(true, 0)
+	if v := testutil.ToFloat64(rotationStuck); v != 0 {
+		t.Errorf("legacy fallback (just observed) ⇒ 0, got %v", v)
+	}
 	// Deadline disabled (0) ⇒ never stuck even when long in overlap.
-	rotationOverlapSince.Store(time.Now().Add(-100 * time.Hour).UnixNano())
+	SetRotationOverlap(true, time.Now().Add(-100*time.Hour).Unix())
 	SetRotationStuckDeadline(0)
 	if v := testutil.ToFloat64(rotationStuck); v != 0 {
 		t.Errorf("deadline disabled ⇒ 0, got %v", v)

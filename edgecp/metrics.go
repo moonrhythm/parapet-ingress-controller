@@ -176,13 +176,19 @@ func init() {
 func SetRotationStuckDeadline(d time.Duration) { rotationStuckDeadline.Store(int64(d)) }
 
 // SetRotationOverlap records whether the CA Secret is currently in the OLD++NEW overlap.
-// Called by the signer reloader on every reload. It starts the stuck-clock on the FIRST
-// observation of overlap and stops it when the overlap ends (trim / single-CA) — so the
-// duration measures continuous time-in-overlap, not time-since-last-Secret-change. Idempotent
-// while overlap persists (does not reset the clock on a re-observe).
-func SetRotationOverlap(inOverlap bool) {
+// Called by the signer reloader on every reload. startedUnix is the overlap-start wall-clock
+// from the CA Secret annotation (RotateCA stamps it): using it makes the stuck-clock
+// RESTART-IMMUNE and REPLICA-IDENTICAL — the duration is the true time-in-overlap regardless
+// of when this process started observing. inOverlap=false stops the clock. A legacy Secret
+// with no started annotation (startedUnix<=0) falls back to this process's first-observed
+// time (the pre-fix behavior, restart-resettable) so the signal still works.
+func SetRotationOverlap(inOverlap bool, startedUnix int64) {
 	if !inOverlap {
 		rotationOverlapSince.Store(0)
+		return
+	}
+	if startedUnix > 0 {
+		rotationOverlapSince.Store(startedUnix * int64(time.Second)) // authoritative; idempotent across reloads/replicas
 		return
 	}
 	rotationOverlapSince.CompareAndSwap(0, time.Now().UnixNano())
