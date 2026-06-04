@@ -36,8 +36,8 @@ RUN mkdir -p /geoip && \
 	if [ -n "$GEOIP_DB_URL" ] || [ -n "$ASN_DB_URL" ]; then \
 		apt-get update && apt-get -y install --no-install-recommends curl ca-certificates; \
 	fi && \
-	if [ -n "$GEOIP_DB_URL" ]; then curl -fsSL "$GEOIP_DB_URL" -o /geoip/ip-to-country.mmdb; fi && \
-	if [ -n "$ASN_DB_URL" ]; then curl -fsSL "$ASN_DB_URL" -o /geoip/ip-to-asn.mmdb; fi && \
+	if [ -n "$GEOIP_DB_URL" ]; then curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 "$GEOIP_DB_URL" -o /geoip/ip-to-country.mmdb; fi && \
+	if [ -n "$ASN_DB_URL" ]; then curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 30 "$ASN_DB_URL" -o /geoip/ip-to-asn.mmdb; fi && \
 	ls -l /geoip
 
 FROM debian:trixie-slim

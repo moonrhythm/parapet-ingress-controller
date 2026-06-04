@@ -652,6 +652,11 @@ not Prometheus counters (a Pushgateway would be a new failure domain).
 | `EDGE_CA_SECRET` | CP | `parapet-edge-ca` | The CA Secret in a CP-only namespace; Job writes (scoped), serving reads (read-only + read-watch). Pre-created empty, GitOps drift-exclusion. |
 | `EDGE_CA_TTL` | CP | `8760h–17520h` (1–2 y) | Edge CA cert lifetime. **Shortened** from 10 y now that rotation is a routine on-demand primitive — but kept comfortably longer than the expected revoke-driven rotation interval so a scheduled CA expiry doesn't collide with on-demand rotations. |
 | `POD_NAMESPACE` / `WATCH_NAMESPACE` | CP | downward API (**required**) / `""` | CA Secret namespace (read serving-managed, write Job); pin `WATCH_NAMESPACE` to shrink the cluster-wide tenant-TLS read blast radius. |
+| `EDGE_CONVERGE_STATUS` | CP (Job/CLI) | false | Run-once **convergence reader**: query Prometheus, exit 0 only if every plane reached the target `ca_id`, else 1 with named blockers. **Read-only** — what sub-PR 5's revoke Job calls before the OLD-drop. Never on the serving path. |
+| `EDGE_CONVERGE_PROM_URL` / `_EXPECTED_CP` / `_EXPECTED_CORE` / `_MIN_EDGES` | CP (Job) | — | Prometheus API base; expected CP-replica and core counts; and the **edge-count floor** (a registry/scrape drift that empties the expected-edge set must fail closed, not converge vacuously — `MIN_EDGES` ≤ 0 is itself refused). A missing reporter ⇒ count mismatch ⇒ block. |
+| `EDGE_CONVERGE_FRESHNESS` / `_STABLE_READS` / `_POLL_INTERVAL` / `_SCRAPE_INTERVAL` | CP (Job) | `5m` / `2` / `30s` / `15s` | Liveness window; consecutive converged reads required; gap between them; the scrape interval. The reader **refuses** unless `poll × reads ≥ 2×scrape` AND `≥ EDGE_REFRESH_INTERVAL` (a flap can't read as converged). |
+| `EDGE_CONVERGE_EXCLUDE` | CP (Job) | `""` | `id=reason,…` — LOUD, reason-required convergence-veto waivers for decommissioned edges (echoed in the verdict; an empty reason is refused). |
+| `EDGE_CONVERGE_REVOKED_TOKEN` / `_CP_URL` / `_CP_CA` | CP (Job) | `""` | The revoked token + CP endpoint for the absence probe (must be rejected 401/403). Absent ⇒ `revoked-unverified` (fail-closed). |
 
 Registry shape: `{"<token>":{"id":...,"domains":[...],"disabled":bool}}`. New trust-bundle
 field `ca_id`. Metrics: `parapet_trust_source{mtls|cidr|none|file}`,
