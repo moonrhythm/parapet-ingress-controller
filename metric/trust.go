@@ -44,8 +44,24 @@ var (
 
 	// Pre-materialized bounded-enum handles: the hot-path helpers do a bare Inc() with
 	// zero label resolution and zero locking (mirrors metric/reload.go).
-	trustApplyHandles  = map[string]prometheus.Counter{}
-	trustSourceHandles = map[string]prometheus.Counter{}
+	trustApplyHandles = map[string]prometheus.Counter{}
+
+	// trustSourceCounters is indexed by TrustSrc (not a string-keyed map) so the
+	// per-request TrustSource is a bare array load + atomic add — no string hash, no
+	// map lookup. Populated once in init().
+	trustSourceCounters [numTrustSrc]prometheus.Counter
+)
+
+// TrustSrc is the per-request trust decision. It indexes trustSourceCounters, so the
+// hot path avoids a string hash and is type-safe (a bad value can't compile, unlike a
+// stringly-typed label that would silently no-op on a typo).
+type TrustSrc uint8
+
+const (
+	TrustSrcNone TrustSrc = iota
+	TrustSrcCIDR
+	TrustSrcVerifiedChain
+	numTrustSrc
 )
 
 func init() {
@@ -65,9 +81,9 @@ func init() {
 	for _, r := range []string{"applied", "rollback_rejected", "parse_rejected", "empty_rejected"} {
 		trustApplyHandles[r], _ = trustApply.GetMetricWith(prometheus.Labels{"result": r})
 	}
-	for _, s := range []string{"cidr", "verified-chain", "none"} {
-		trustSourceHandles[s], _ = trustSource.GetMetricWith(prometheus.Labels{"source": s})
-	}
+	trustSourceCounters[TrustSrcNone], _ = trustSource.GetMetricWith(prometheus.Labels{"source": "none"})
+	trustSourceCounters[TrustSrcCIDR], _ = trustSource.GetMetricWith(prometheus.Labels{"source": "cidr"})
+	trustSourceCounters[TrustSrcVerifiedChain], _ = trustSource.GetMetricWith(prometheus.Labels{"source": "verified-chain"})
 }
 
 // TrustApply counts a bundle apply attempt by result. rollback_rejected is the
@@ -95,10 +111,8 @@ func TrustBundleApplied(caID string, generation uint64) {
 // TrustFetchFailed counts a failed trust-bundle fetch (couldn't reach/decode the CP).
 func TrustFetchFailed() { trustFetchFailed.Inc() }
 
-// TrustSource counts one per-request trust decision. Hot-path: a single atomic add on
-// a pre-materialized handle, no lock, no label resolution.
-func TrustSource(source string) {
-	if h := trustSourceHandles[source]; h != nil {
-		h.Inc()
-	}
+// TrustSource counts one per-request trust decision. Hot-path: a bare array index +
+// atomic add — no lock, no label resolution, no map hash.
+func TrustSource(s TrustSrc) {
+	trustSourceCounters[s].Inc()
 }

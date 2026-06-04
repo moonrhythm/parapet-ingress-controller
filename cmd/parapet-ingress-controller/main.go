@@ -277,14 +277,14 @@ func main() {
 			// dual-path edge — a verified-chain flatline after rotation is still the
 			// earliest convergence-failure signal. This closure exists only when
 			// trustMgr != nil, so the trust-disabled path stays free of per-request work.
-			src := "none"
+			src := metric.TrustSrcNone
 			if cidrTrust != nil && cidrTrust(r) {
-				src = "cidr"
+				src = metric.TrustSrcCIDR
 			} else if r.TLS != nil && len(r.TLS.VerifiedChains) > 0 {
-				src = "verified-chain"
+				src = metric.TrustSrcVerifiedChain
 			}
 			metric.TrustSource(src)
-			return src != "none"
+			return src != metric.TrustSrcNone
 		}
 	}
 

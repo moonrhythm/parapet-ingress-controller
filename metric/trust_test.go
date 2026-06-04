@@ -20,14 +20,13 @@ func TestTrustApplyEnum(t *testing.T) {
 }
 
 func TestTrustSourceEnum(t *testing.T) {
-	for _, src := range []string{"cidr", "verified-chain", "none"} {
-		before := testutil.ToFloat64(trustSourceHandles[src])
+	for _, src := range []TrustSrc{TrustSrcNone, TrustSrcCIDR, TrustSrcVerifiedChain} {
+		before := testutil.ToFloat64(trustSourceCounters[src])
 		TrustSource(src)
-		if got := testutil.ToFloat64(trustSourceHandles[src]); got != before+1 {
-			t.Errorf("TrustSource(%q): %v -> %v, want +1", src, before, got)
+		if got := testutil.ToFloat64(trustSourceCounters[src]); got != before+1 {
+			t.Errorf("TrustSource(%d): %v -> %v, want +1", src, before, got)
 		}
 	}
-	TrustSource("bogus") // no-op
 }
 
 func TestTrustFetchFailed(t *testing.T) {
