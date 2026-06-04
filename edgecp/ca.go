@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"strconv"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -39,6 +40,11 @@ const (
 	// caActiveAnnotation records which staged key signs new leaves: "old" (Data
 	// tls.key) or "new" (Data tls-new.key). RotateCA only ever writes "old".
 	caActiveAnnotation = "parapet.moonrhythm.io/edge-ca-active"
+	// caRotationStartedAnnotation records the unix-seconds wall-clock when the overlap
+	// began (written by RotateCA, cleared by TrimCA). The serving CP reads it so the
+	// edge_ca_rotation_stuck gauge measures the TRUE overlap age — restart-immune and
+	// replica-identical — instead of resetting to each process's first-observed time.
+	caRotationStartedAnnotation = "parapet.moonrhythm.io/edge-ca-rotation-started"
 
 	caPhaseOverlap = "overlap"
 	// caPhaseTrimmed marks a completed OLD-drop: tls.crt is NEW-only, tls.key is the NEW
@@ -326,7 +332,8 @@ func RotateCA(ctx context.Context, rw SecretRW, namespace, name string, ttl time
 		}
 		sec.Annotations[caRotationPhaseAnnotation] = caPhaseOverlap
 		sec.Annotations[caActiveAnnotation] = caActiveOld
-		sec.Annotations[caGenerationAnnotation] = id // re-stamp (NEVER blank — keep the anti-regen guard)
+		sec.Annotations[caRotationStartedAnnotation] = strconv.FormatInt(time.Now().Unix(), 10) // overlap-start clock (restart-immune stuck gauge)
+		sec.Annotations[caGenerationAnnotation] = id                                            // re-stamp (NEVER blank — keep the anti-regen guard)
 
 		if _, err := rw.UpdateSecret(ctx, namespace, sec); err != nil {
 			if apierrors.IsConflict(err) {
@@ -517,7 +524,8 @@ func TrimCA(ctx context.Context, rw SecretRW, namespace, name, expectedNewFP str
 		}
 		sec.Annotations[caRotationPhaseAnnotation] = caPhaseTrimmed
 		sec.Annotations[caActiveAnnotation] = caActiveOld
-		sec.Annotations[caGenerationAnnotation] = id // re-stamp the anti-regen guard (NEVER blank)
+		delete(sec.Annotations, caRotationStartedAnnotation) // overlap ended — stop the stuck clock
+		sec.Annotations[caGenerationAnnotation] = id         // re-stamp the anti-regen guard (NEVER blank)
 
 		if _, err := rw.UpdateSecret(ctx, namespace, sec); err != nil {
 			if apierrors.IsConflict(err) {

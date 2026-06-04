@@ -125,6 +125,9 @@ func TestTrimCADropsOldAndSeversOldLeaves(t *testing.T) {
 	if s.Annotations[caActiveAnnotation] != caActiveOld {
 		t.Errorf("active = %q, want old (single-CA default)", s.Annotations[caActiveAnnotation])
 	}
+	if s.Annotations[caRotationStartedAnnotation] != "" {
+		t.Errorf("trim must clear the rotation-started annotation (overlap ended), got %q", s.Annotations[caRotationStartedAnnotation])
+	}
 	if s.Annotations[caGenerationAnnotation] == "" {
 		t.Error("anti-regeneration guard must remain stamped after trim")
 	}

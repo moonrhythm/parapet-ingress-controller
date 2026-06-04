@@ -2,6 +2,7 @@ package edgecp
 
 import (
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 )
@@ -63,6 +64,73 @@ func TestRecordIssuanceLedger(t *testing.T) {
 	}
 	if v := testutil.ToFloat64(issuedUnderSigner.WithLabelValues("edge-b", "fp-new")); v != 1 {
 		t.Errorf("issued{edge-b,fp-new} = %v, want 1", v)
+	}
+}
+
+// A blacklisted token flags edge_token_disabled_without_rotation (the bare-blacklist
+// reminder); enabled tokens leave no series, and a re-publish clears stale ones.
+func TestTokenDisabledWithoutRotation(t *testing.T) {
+	SetRegistryMetrics(map[string]Entry{
+		"t-live": {ID: "edge-live"},
+		"t-dead": {ID: "edge-dead", Disabled: true},
+	})
+	if v := testutil.ToFloat64(tokenDisabledNoRotation.WithLabelValues("edge-dead")); v != 1 {
+		t.Errorf("blacklisted id must flag without_rotation=1, got %v", v)
+	}
+	if c := testutil.CollectAndCount(tokenDisabledNoRotation); c != 1 {
+		t.Errorf("only the disabled id gets a series, got %d", c)
+	}
+	// Removing the tombstone (registry no longer lists it) clears the flag.
+	SetRegistryMetrics(map[string]Entry{"t-live": {ID: "edge-live"}})
+	if c := testutil.CollectAndCount(tokenDisabledNoRotation); c != 0 {
+		t.Errorf("removing the tombstone must clear the flag, got %d series", c)
+	}
+}
+
+// edge_ca_rotation_stuck is 0 outside overlap, 0 inside overlap before the deadline, and 1
+// once the overlap outlives the deadline. The overlap-start is taken from the annotation
+// timestamp (restart-immune), and a re-observe at the same start does not move the clock.
+func TestRotationStuckGauge(t *testing.T) {
+	t.Cleanup(func() { SetRotationOverlap(false, 0); SetRotationStuckDeadline(0) })
+
+	SetRotationStuckDeadline(time.Hour)
+	SetRotationOverlap(false, 0)
+	if v := testutil.ToFloat64(rotationStuck); v != 0 {
+		t.Errorf("not in overlap ⇒ 0, got %v", v)
+	}
+	// Overlap that began 2h ago (annotation start), deadline 1h ⇒ stuck. This is the
+	// RESTART-IMMUNE path: the age comes from the persisted start, not first-observed time.
+	twoHoursAgo := time.Now().Add(-2 * time.Hour).Unix()
+	SetRotationOverlap(true, twoHoursAgo)
+	if v := testutil.ToFloat64(rotationStuck); v != 1 {
+		t.Errorf("overlap started past the deadline ⇒ 1, got %v", v)
+	}
+	// A fresh restart re-reads the SAME annotation start → still correctly stuck (the bug this
+	// folds: a restart used to reset the clock to now and falsely read 0).
+	before := rotationOverlapSince.Load()
+	SetRotationOverlap(true, twoHoursAgo)
+	if rotationOverlapSince.Load() != before {
+		t.Error("re-observing the same overlap start must be idempotent (restart-immune)")
+	}
+	if v := testutil.ToFloat64(rotationStuck); v != 1 {
+		t.Error("re-observe after 'restart' must still read stuck")
+	}
+	// A recent overlap within the deadline ⇒ not yet stuck.
+	SetRotationOverlap(true, time.Now().Add(-1*time.Minute).Unix())
+	if v := testutil.ToFloat64(rotationStuck); v != 0 {
+		t.Errorf("fresh overlap within the deadline ⇒ 0, got %v", v)
+	}
+	// Legacy Secret (no started annotation, startedUnix=0) ⇒ first-observed fallback (recent ⇒ 0).
+	SetRotationOverlap(false, 0)
+	SetRotationOverlap(true, 0)
+	if v := testutil.ToFloat64(rotationStuck); v != 0 {
+		t.Errorf("legacy fallback (just observed) ⇒ 0, got %v", v)
+	}
+	// Deadline disabled (0) ⇒ never stuck even when long in overlap.
+	SetRotationOverlap(true, time.Now().Add(-100*time.Hour).Unix())
+	SetRotationStuckDeadline(0)
+	if v := testutil.ToFloat64(rotationStuck); v != 0 {
+		t.Errorf("deadline disabled ⇒ 0, got %v", v)
 	}
 }
 

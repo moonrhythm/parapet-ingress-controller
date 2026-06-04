@@ -2,6 +2,7 @@ package edgecp
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -55,6 +56,10 @@ func TestRotateCAAddsNewToBundle(t *testing.T) {
 	}
 	if s.Annotations[caGenerationAnnotation] == "" {
 		t.Error("anti-regeneration guard must remain stamped (never blanked)")
+	}
+	// The overlap-start timestamp is stamped (feeds the restart-immune rotation_stuck gauge).
+	if started, err := strconv.ParseInt(s.Annotations[caRotationStartedAnnotation], 10, 64); err != nil || started <= 0 {
+		t.Errorf("rotation-started annotation must be a positive unix time, got %q (err=%v)", s.Annotations[caRotationStartedAnnotation], err)
 	}
 }
 

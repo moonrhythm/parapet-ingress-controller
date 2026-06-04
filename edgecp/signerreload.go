@@ -3,6 +3,7 @@ package edgecp
 import (
 	"context"
 	"log/slog"
+	"strconv"
 	"time"
 
 	v1 "k8s.io/api/core/v1"
@@ -140,8 +141,19 @@ func (r *SignerReloader) reload(ctx context.Context) error {
 		}
 	}
 	if sec == nil {
+		SetRotationOverlap(false, 0) // no CA Secret ⇒ no rotation in flight
 		slog.Warn("edgecp: edge CA secret not found yet", "secret", r.namespace+"/"+r.caSecret)
 		return nil
+	}
+	// Rotation-stuck observability: record whether the CA is in the OLD++NEW overlap (and when
+	// it began, from the annotation) so the edge_ca_rotation_stuck GaugeFunc can page if it
+	// lingers past the deadline — restart-immune. Independent of whether the signer build below
+	// succeeds.
+	if sec.Annotations[caRotationPhaseAnnotation] == caPhaseOverlap {
+		started, _ := strconv.ParseInt(sec.Annotations[caRotationStartedAnnotation], 10, 64)
+		SetRotationOverlap(true, started) // started==0 (legacy/missing) ⇒ first-observed fallback
+	} else {
+		SetRotationOverlap(false, 0)
 	}
 	crt := sec.Data["tls.crt"]
 	if len(crt) == 0 {

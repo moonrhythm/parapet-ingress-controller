@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
@@ -127,10 +129,69 @@ var (
 		Name:      "edge_authz_generation",
 		Help:      "Deterministic fingerprint of the loaded token registry (replica-identical; the blacklist-barrier signal).",
 	})
+
+	// tokenDisabledNoRotation is 1 per BLACKLISTED edge id in the registry — the
+	// bare-blacklist-isn't-revocation reminder. Disabling a token only stops FUTURE minting;
+	// its already-issued leaf stays trusted until the CA is rotated out. This fires for every
+	// disabled id and clears only when the operator REMOVES the tombstone from the registry
+	// (after completing the revoke-rotation). It never gives a false all-clear (a still-trusted
+	// blacklisted token always shows 1); a retained tombstone keeps it at 1 by design.
+	tokenDisabledNoRotation = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_token_disabled_without_rotation",
+		Help:      "1 per blacklisted edge_id whose already-issued leaf is only truly revoked by a CA rotation — remove the tombstone after rotating to clear.",
+	}, []string{"edge_id"})
+
+	// rotationStuck is 1 while the CA Secret has sat in the OLD++NEW overlap longer than the
+	// configured deadline — a half-applied rotation, which means a compromised/rotated-out edge
+	// is STILL trusted (OLD not yet dropped). A GaugeFunc (not Set-on-change) so it goes hot
+	// WITHOUT the reloader re-firing as wall-clock advances — the Secret doesn't change while a
+	// rotation sits stuck. Computed at scrape time (zero steady-state cost).
+	rotationStuck = prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_ca_rotation_stuck",
+		Help:      "1 while the CA Secret has been in the OLD++NEW overlap past EDGE_CA_ROTATION_DEADLINE (a half-applied rotation: the rotated-out edge is still trusted); 0 otherwise.",
+	}, func() float64 {
+		since := rotationOverlapSince.Load()
+		deadline := rotationStuckDeadline.Load()
+		if since == 0 || deadline <= 0 {
+			return 0
+		}
+		if time.Now().UnixNano()-since > deadline {
+			return 1
+		}
+		return 0
+	})
+
+	rotationOverlapSince  atomic.Int64 // unix nanos the CP first observed phase=overlap; 0 = not in overlap
+	rotationStuckDeadline atomic.Int64 // nanos; 0 disables the stuck gauge (always 0)
 )
 
 func init() {
-	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration, activeSignerFP, signerActiveFlipFailed, issuedUnderSigner)
+	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration, activeSignerFP, signerActiveFlipFailed, issuedUnderSigner, tokenDisabledNoRotation, rotationStuck)
+}
+
+// SetRotationStuckDeadline configures the overlap-stuck threshold (call once at startup).
+// d<=0 keeps the edge_ca_rotation_stuck gauge permanently 0 (the signal disabled).
+func SetRotationStuckDeadline(d time.Duration) { rotationStuckDeadline.Store(int64(d)) }
+
+// SetRotationOverlap records whether the CA Secret is currently in the OLD++NEW overlap.
+// Called by the signer reloader on every reload. startedUnix is the overlap-start wall-clock
+// from the CA Secret annotation (RotateCA stamps it): using it makes the stuck-clock
+// RESTART-IMMUNE and REPLICA-IDENTICAL — the duration is the true time-in-overlap regardless
+// of when this process started observing. inOverlap=false stops the clock. A legacy Secret
+// with no started annotation (startedUnix<=0) falls back to this process's first-observed
+// time (the pre-fix behavior, restart-resettable) so the signal still works.
+func SetRotationOverlap(inOverlap bool, startedUnix int64) {
+	if !inOverlap {
+		rotationOverlapSince.Store(0)
+		return
+	}
+	if startedUnix > 0 {
+		rotationOverlapSince.Store(startedUnix * int64(time.Second)) // authoritative; idempotent across reloads/replicas
+		return
+	}
+	rotationOverlapSince.CompareAndSwap(0, time.Now().UnixNano())
 }
 
 // recordIssuance ledgers one minted edge leaf under the active signer fp (CP-authoritative).
@@ -143,6 +204,7 @@ func recordIssuance(edgeID, signerFP string) {
 // static today). Only entries with a non-empty id are data-plane edges.
 func SetRegistryMetrics(entries map[string]Entry) {
 	registryTotal.Reset()
+	tokenDisabledNoRotation.Reset()
 	for _, e := range entries {
 		if e.ID == "" {
 			continue
@@ -150,6 +212,9 @@ func SetRegistryMetrics(entries map[string]Entry) {
 		v := 1.0
 		if e.Disabled {
 			v = 0.0
+			// A blacklisted token: its already-issued leaf is only truly revoked by a CA
+			// rotation. Flag it until the operator removes the tombstone post-rotation.
+			tokenDisabledNoRotation.WithLabelValues(e.ID).Set(1)
 		}
 		registryTotal.WithLabelValues(e.ID).Set(v)
 	}

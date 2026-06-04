@@ -285,6 +285,11 @@ func main() {
 		// OLD++NEW write (or a not-yet-provisioned CA landing later) propagates with
 		// no restart.
 		server.ExpectIssuance()
+		// Rotation-stuck alert threshold: page (edge_ca_rotation_stuck=1) once the CA Secret
+		// has sat in the OLD++NEW overlap this long — a half-applied rotation means a
+		// rotated-out edge is still trusted. Size it above a full revoke's expected duration
+		// (both convergence gates); default 24h. The reloader feeds the live overlap state.
+		edgecp.SetRotationStuckDeadline(time.Duration(envInt("EDGE_CA_ROTATION_DEADLINE", 86400)) * time.Second)
 		signerReloader := edgecp.NewSignerReloader(server, podNamespace, caSecret, clientCertTTL, clientCertSkew)
 		if err := signerReloader.LoadOnce(ctx); err != nil {
 			slog.Error("edgecp: initial edge CA signer load failed", "err", err)
