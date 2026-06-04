@@ -94,6 +94,13 @@ func main() {
 	clientCertTTL := DefaultDuration("EDGE_CLIENTCERT_TTL", edgecp.DefaultClientCertTTL)
 	clientCertSkew := DefaultDuration("EDGE_CLIENTCERT_SKEW", edgecp.DefaultClientCertSkew)
 
+	// Run-once converge-status (a Job/CLI): read the cross-plane convergence state from
+	// Prometheus and exit 0 only if every plane reached the target ca_id. Read-only, no
+	// k8s, no TLS, no serving — what sub-PR 5's revoke Job calls before the OLD-drop.
+	if os.Getenv("EDGE_CONVERGE_STATUS") == "true" {
+		runConvergeStatus() // exits
+	}
+
 	// Run-once CA bootstrap (a Job): adopt-or-generate the edge CA into its Secret
 	// (never regenerate a once-populated CA — the anti-regeneration guard), then
 	// exit. Needs neither tokens nor TLS; it never serves.

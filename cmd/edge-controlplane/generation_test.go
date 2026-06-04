@@ -74,3 +74,23 @@ func TestDuplicateEdgeID(t *testing.T) {
 		t.Errorf("duplicate id must be reported, got %q", got)
 	}
 }
+
+func TestCadenceWindowAndCheck(t *testing.T) {
+	// N reads span N-1 gaps (the off-by-one the review caught).
+	if got := cadenceWindow(30*time.Second, 2); got != 30*time.Second {
+		t.Errorf("cadenceWindow(30s,2) = %v, want 30s", got)
+	}
+	if got := cadenceWindow(60*time.Second, 3); got != 120*time.Second {
+		t.Errorf("cadenceWindow(60s,3) = %v, want 120s", got)
+	}
+	// window must cover >= 2 scrapes AND >= refresh.
+	if err := checkCadence(120*time.Second, 15*time.Second, 60*time.Second); err != nil {
+		t.Errorf("ample window must pass: %v", err)
+	}
+	if err := checkCadence(20*time.Second, 15*time.Second, 60*time.Second); err == nil {
+		t.Error("window < refresh must be refused")
+	}
+	if err := checkCadence(20*time.Second, 15*time.Second, 10*time.Second); err == nil {
+		t.Error("window < 2×scrape must be refused")
+	}
+}
