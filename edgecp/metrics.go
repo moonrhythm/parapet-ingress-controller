@@ -143,20 +143,38 @@ func recordIssuance(edgeID, signerFP string) {
 // static today). Only entries with a non-empty id are data-plane edges.
 func SetRegistryMetrics(entries map[string]Entry) {
 	registryTotal.Reset()
-	lines := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.ID == "" {
 			continue
 		}
 		v := 1.0
-		d := "0"
 		if e.Disabled {
-			v, d = 0.0, "1"
+			v = 0.0
 		}
 		registryTotal.WithLabelValues(e.ID).Set(v)
+	}
+	authzGeneration.Set(AuthzGeneration(entries))
+}
+
+// AuthzGeneration computes the deterministic authz-generation fingerprint of a token
+// registry WITHOUT touching metrics — the same value the serving CP publishes as
+// edge_authz_generation. The revoke tool calls it on the post-blacklist registry to
+// derive the ExpectedAuthzGen pin the OLD-drop interlock asserts every replica reports
+// (the proof the blacklist converged fleet-wide). Identical inputs ⇒ identical output on
+// every replica and in the tool.
+func AuthzGeneration(entries map[string]Entry) float64 {
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.ID == "" {
+			continue
+		}
+		d := "0"
+		if e.Disabled {
+			d = "1"
+		}
 		lines = append(lines, e.ID+":"+d)
 	}
-	authzGeneration.Set(registryFingerprint(lines))
+	return registryFingerprint(lines)
 }
 
 // registryFingerprint hashes the sorted "id:disabled" lines into a stable float value

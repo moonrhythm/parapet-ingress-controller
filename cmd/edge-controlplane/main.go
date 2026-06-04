@@ -113,6 +113,14 @@ func main() {
 		runConvergeStatus() // exits
 	}
 
+	// Run-once revoke (a Job): sever one edge id by driving the full phased CA rotation
+	// (widen → flip → trim), gating every irreversible step on cross-plane convergence.
+	// Like the other run-once modes it never serves; the Prometheus client stays confined
+	// to this CLI path. See runRevoke for the step/gate sequence and resumability.
+	if os.Getenv("EDGE_CA_REVOKE") == "true" {
+		runRevoke() // exits
+	}
+
 	// Run-once CA bootstrap (a Job): adopt-or-generate the edge CA into its Secret
 	// (never regenerate a once-populated CA — the anti-regeneration guard), then
 	// exit. Needs neither tokens nor TLS; it never serves.
