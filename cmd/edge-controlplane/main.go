@@ -63,6 +63,18 @@ func envInt(key string, def int) int {
 	return def
 }
 
+// envFloat reads a float64 env var (the converge authz-generation pin is a float
+// fingerprint). An unparseable value falls back to def with a loud warning.
+func envFloat(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+		slog.Warn("invalid float; using default", "key", key, "value", v, "default", def)
+	}
+	return def
+}
+
 // k8sRW adapts the package-level k8s secret read/write funcs to edgecp.SecretRW for
 // the CA bootstrap (the only writer of the CA Secret).
 type k8sRW struct{}
@@ -99,6 +111,14 @@ func main() {
 	// k8s, no TLS, no serving — what sub-PR 5's revoke Job calls before the OLD-drop.
 	if os.Getenv("EDGE_CONVERGE_STATUS") == "true" {
 		runConvergeStatus() // exits
+	}
+
+	// Run-once revoke (a Job): sever one edge id by driving the full phased CA rotation
+	// (widen → flip → trim), gating every irreversible step on cross-plane convergence.
+	// Like the other run-once modes it never serves; the Prometheus client stays confined
+	// to this CLI path. See runRevoke for the step/gate sequence and resumability.
+	if os.Getenv("EDGE_CA_REVOKE") == "true" {
+		runRevoke() // exits
 	}
 
 	// Run-once CA bootstrap (a Job): adopt-or-generate the edge CA into its Secret

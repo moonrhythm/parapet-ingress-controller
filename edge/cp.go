@@ -70,6 +70,10 @@ type CertFetch struct {
 	// force-re-mint signal that rides the edge's existing /v1/certs poll. "" means the
 	// CP didn't advertise one (old CP / no signer); the edge fail-statics on "".
 	CAID string
+	// SignerFP is the CP's active signing fp from X-Parapet-Signing-Cert-Fp (every arm) —
+	// the tuple's other half: an active=OLD→NEW flip changes THIS at an identical CAID,
+	// so the edge must re-mint on the (CAID, SignerFP) tuple to obtain a NEW-signed leaf.
+	SignerFP string
 }
 
 type certBody struct {
@@ -94,9 +98,10 @@ func (c *CpClient) FetchCert(sni, currentEtag string) (CertFetch, error) {
 	// all responses are 304), the 200, AND the 404 (a missing-cert sni still learns
 	// the CP target). Steady state is ~100% 304s, so the 304 arm is load-bearing.
 	caID := resp.Header.Get("X-Parapet-CA-Id")
+	signerFP := resp.Header.Get("X-Parapet-Signing-Cert-Fp")
 	switch resp.StatusCode {
 	case http.StatusNotModified:
-		return CertFetch{Unchanged: true, CAID: caID}, nil
+		return CertFetch{Unchanged: true, CAID: caID, SignerFP: signerFP}, nil
 	case http.StatusOK:
 		var body certBody
 		if err := json.NewDecoder(io.LimitReader(resp.Body, maxCertBody)).Decode(&body); err != nil {
@@ -107,11 +112,12 @@ func (c *CpClient) FetchCert(sni, currentEtag string) (CertFetch, error) {
 			KeyPEM:   []byte(body.KeyPEM),
 			Etag:     resp.Header.Get("ETag"),
 			CAID:     caID,
+			SignerFP: signerFP,
 		}, nil
 	default:
-		// Surface the target with the error so the caller can still observe a ca_id
-		// flip even when the per-sni cert is missing (404).
-		return CertFetch{CAID: caID}, fmt.Errorf("control plane returned %d for sni %q", resp.StatusCode, sni)
+		// Surface the target with the error so the caller can still observe a flip
+		// even when the per-sni cert is missing (404).
+		return CertFetch{CAID: caID, SignerFP: signerFP}, fmt.Errorf("control plane returned %d for sni %q", resp.StatusCode, sni)
 	}
 }
 
@@ -127,6 +133,7 @@ type WafFetch struct {
 	HostZoneMap map[string]string
 	Etag        string
 	CAID        string // signer target ca_id (secondary force-re-mint confirmer; 200 only)
+	SignerFP    string // active signing fp (200 only)
 }
 
 type wafBody struct {
@@ -135,6 +142,7 @@ type wafBody struct {
 	Zones       map[string]string `json:"zones"`
 	HostZoneMap map[string]string `json:"host_zone_map"`
 	CAID        string            `json:"ca_id"`
+	SigningFP   string            `json:"signing_cert_fp"`
 }
 
 // FetchWaf fetches the WAF payload (global YAML + zones + host->zone map) scoped
@@ -163,6 +171,7 @@ func (c *CpClient) FetchWaf(currentEtag string) (WafFetch, error) {
 			HostZoneMap: body.HostZoneMap,
 			Etag:        resp.Header.Get("ETag"),
 			CAID:        body.CAID,
+			SignerFP:    body.SigningFP,
 		}, nil
 	default:
 		return WafFetch{}, fmt.Errorf("control plane returned %d for /v1/waf", resp.StatusCode)
@@ -175,6 +184,7 @@ type EdgeCertFetch struct {
 	NotAfter string // RFC3339, for renewal scheduling
 	Serial   string
 	CAID     string // signer ca_id, so the edge self-confirms convergence post-mint
+	SignerFP string // active signing fp that minted this leaf
 	// RetryAfter is the parsed Retry-After delay on a 429/503 (signer saturated),
 	// returned ALONGSIDE the error so the coordinator can back off the whole fleet.
 	RetryAfter time.Duration
@@ -185,10 +195,11 @@ type edgeCertReqBody struct {
 }
 
 type edgeCertRespBody struct {
-	ChainPEM string `json:"chain_pem"`
-	NotAfter string `json:"not_after"`
-	Serial   string `json:"serial"`
-	CAID     string `json:"ca_id"`
+	ChainPEM  string `json:"chain_pem"`
+	NotAfter  string `json:"not_after"`
+	Serial    string `json:"serial"`
+	CAID      string `json:"ca_id"`
+	SigningFP string `json:"signing_cert_fp"`
 }
 
 // FetchEdgeCert posts a CSR to POST /v1/edge-cert and returns the signed chain. The
@@ -231,6 +242,7 @@ func (c *CpClient) FetchEdgeCert(csrPEM []byte) (EdgeCertFetch, error) {
 		NotAfter: body.NotAfter,
 		Serial:   body.Serial,
 		CAID:     body.CAID,
+		SignerFP: body.SigningFP,
 	}, nil
 }
 
@@ -256,28 +268,30 @@ func parseRetryAfter(v string) time.Duration {
 }
 
 type trustBundleBody struct {
-	CAID string `json:"ca_id"`
+	CAID      string `json:"ca_id"`
+	SigningFP string `json:"signing_cert_fp"`
 }
 
-// FetchTrustBundleCAID reads ONLY the ca_id from the tokenless GET /v1/trust-bundle
-// (the same public endpoint the core polls). It lets an mTLS edge observe a CA rotation
-// even when it polls no per-domain cert and no WAF (serve-all, no traffic, WAF off) —
-// it rides the edge-cert refresh tick, not a new loop. The bearer token is sent (the
-// endpoint ignores it). Errors are the caller's to fail-static on.
-func (c *CpClient) FetchTrustBundleCAID() (string, error) {
+// FetchTrustBundleSignal reads the (ca_id, active signer fp) tuple from the tokenless GET
+// /v1/trust-bundle (the same public endpoint the core polls). It lets an mTLS edge observe
+// a CA rotation OR an active=OLD→NEW flip even when it polls no per-domain cert and no WAF
+// (serve-all, no traffic, WAF off) — it rides the edge-cert refresh tick, not a new loop.
+// The bearer token is sent (the endpoint ignores it). Errors are the caller's to
+// fail-static on.
+func (c *CpClient) FetchTrustBundleSignal() (caID, signerFP string, err error) {
 	resp, err := c.do(c.base+"/v1/trust-bundle", "")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("control plane returned %d for /v1/trust-bundle", resp.StatusCode)
+		return "", "", fmt.Errorf("control plane returned %d for /v1/trust-bundle", resp.StatusCode)
 	}
 	var body trustBundleBody
 	if err := json.NewDecoder(io.LimitReader(resp.Body, maxCertBody)).Decode(&body); err != nil {
-		return "", fmt.Errorf("decode: %w", err)
+		return "", "", fmt.Errorf("decode: %w", err)
 	}
-	return body.CAID, nil
+	return body.CAID, body.SigningFP, nil
 }
 
 // do issues an authorized GET, optionally with If-None-Match. The body must be

@@ -38,6 +38,7 @@ type RemintCoordinator struct {
 	proactiveNoConverge int
 	proactiveBreakerEnd time.Time
 	lastTarget          string // last observed CP target ca_id (the proactive convergence yardstick)
+	lastTargetFP        string // last observed CP active signer fp (the active=OLD→NEW flip yardstick)
 }
 
 func NewRemintCoordinator(cp *CpClient, store *ClientCertStore, cfg RemintConfig) *RemintCoordinator {
@@ -65,23 +66,35 @@ func NewRemintCoordinator(cp *CpClient, store *ClientCertStore, cfg RemintConfig
 	return &RemintCoordinator{cp: cp, store: store, cfg: cfg, backoff: cfg.BackoffBase}
 }
 
-// Observe drives the PROACTIVE path: it compares the CP target ca_id against the edge's
-// OWN HELD-LEAF ca_id (never against a previous observation, so a mid-rotation boot
-// re-mints on first poll) and triggers a re-mint on a mismatch. target=="" (old CP / no
-// signer) and live=="" (held chain too short / single-CA) are both "unknown" → never
-// trigger (fail-static; avoids an infinite hot-loop). Safe to call from the public-TLS
-// handshake path (Trigger is non-blocking).
-func (c *RemintCoordinator) Observe(target string) {
+// Observe drives the PROACTIVE path: it compares the CP target TUPLE (ca_id + active
+// signer fp) against the edge's OWN HELD-LEAF tuple (never against a previous
+// observation, so a mid-rotation boot re-mints on first poll) and triggers a re-mint on
+// a mismatch on EITHER axis:
+//   - ca_id mismatch: a CA-set rotation — new trust material to mint against.
+//   - signer_fp mismatch: an active=OLD→NEW flip at an UNCHANGED bundle ca_id (both
+//     active states append the same OLD++NEW bundle, so ca_id can't see it). This is the
+//     load-bearing re-mint that re-chains the leaf to NEW so it survives the OLD-drop.
+//
+// Each axis is fail-static on "": target=="" (old CP / no signer) returns outright; a ""
+// held or target value on an axis is "unknown" and never triggers on that axis (avoids an
+// infinite hot-loop). Safe to call from the public-TLS handshake path (Trigger is
+// non-blocking).
+func (c *RemintCoordinator) Observe(target, targetFP string) {
 	if c == nil || target == "" {
 		return
 	}
 	setObservedTarget(target)
-	live := c.store.CAID()
+	setObservedSignerFP(targetFP)
+	liveCA := c.store.CAID()
+	liveFP := c.store.SignerFP()
 	c.mu.Lock()
 	c.lastTarget = target
+	c.lastTargetFP = targetFP
 	c.mu.Unlock()
-	if live == "" || target == live {
-		return // unknown held value, or already converged
+	caMismatch := liveCA != "" && target != liveCA
+	fpMismatch := targetFP != "" && liveFP != "" && targetFP != liveFP
+	if !caMismatch && !fpMismatch {
+		return // unknown held value, or already converged on both axes
 	}
 	c.Trigger("proactive")
 }
@@ -138,15 +151,16 @@ func (c *RemintCoordinator) Trigger(trigger string) {
 func (c *RemintCoordinator) runOnce(trigger string) {
 	c.mu.Lock()
 	target := c.lastTarget
+	targetFP := c.lastTargetFP
 	backoff := c.backoff
 	c.mu.Unlock()
 
-	before := c.store.CAID()
+	beforeCA, beforeFP := c.store.CAID(), c.store.SignerFP()
 	if j := fullJitter(c.cfg.Jitter); j > 0 {
 		time.Sleep(j)
 	}
 	result, retryAfter := RefreshEdgeCertOnce(c.cp, c.store, trigger)
-	after := c.store.CAID()
+	afterCA, afterFP := c.store.CAID(), c.store.SignerFP()
 
 	var openedReactive, openedProactive bool
 	var sleepFor time.Duration
@@ -154,9 +168,12 @@ func (c *RemintCoordinator) runOnce(trigger string) {
 	switch {
 	case result == "ok":
 		c.backoff = c.cfg.BackoffBase // any successful mint clears the backoff
-		flipped := after != before
+		// "flipped" = the leaf material actually changed on EITHER axis (a CA-set rotation
+		// OR an active=OLD→NEW re-chain at an unchanged bundle ca_id). Both are real new
+		// trust material, so both reset the reactive breaker.
+		flipped := afterCA != beforeCA || afterFP != beforeFP
 
-		// Reactive breaker: keyed on whether the leaf's CA SET actually changed.
+		// Reactive breaker: keyed on whether the leaf material actually changed.
 		if flipped {
 			c.reactiveNoFlip = 0
 			c.reactiveBreakerEnd = time.Time{}
@@ -168,9 +185,12 @@ func (c *RemintCoordinator) runOnce(trigger string) {
 			}
 		}
 
-		// Proactive breaker: keyed on whether the mint reached the OBSERVED target.
+		// Proactive breaker: keyed on whether the mint reached the OBSERVED target TUPLE —
+		// the ca_id AND (when known) the active signer fp. An unchanged ca_id with the fp
+		// still on OLD is NOT converged, so the active-flip re-mint isn't scored as success.
 		if trigger == "proactive" {
-			if target != "" && after == target {
+			fpConverged := targetFP == "" || afterFP == targetFP
+			if target != "" && afterCA == target && fpConverged {
 				c.proactiveNoConverge = 0
 				c.proactiveBreakerEnd = time.Time{}
 			} else {

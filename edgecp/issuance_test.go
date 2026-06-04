@@ -155,6 +155,14 @@ func TestEdgeCertEndpoint(t *testing.T) {
 		if rec.Header().Get("Cache-Control") != "no-store" {
 			t.Error("issued cert must be no-store")
 		}
+		// The active-signer fp rides both the header and the body so the edge self-confirms
+		// which CA minted its leaf (the OLD-vs-NEW active-flip signal).
+		if got := rec.Header().Get("X-Parapet-Signing-Cert-Fp"); got == "" || got != sg.ActiveFP() {
+			t.Errorf("edge-cert signing fp header = %q, want %q", got, sg.ActiveFP())
+		}
+		if resp.SigningFP != sg.ActiveFP() {
+			t.Errorf("edge-cert body signing_cert_fp = %q, want %q", resp.SigningFP, sg.ActiveFP())
+		}
 	}
 	if rec := post(""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no token: want 401, got %d", rec.Code)
@@ -211,6 +219,11 @@ func TestTrustBundleEndpoint(t *testing.T) {
 	}
 	if resp.CAID != sg.CAID() {
 		t.Errorf("ca_id = %q, want %q", resp.CAID, sg.CAID())
+	}
+	// The active-signer fp rides the trust bundle too (the idle-edge / core convergence
+	// signal), and folds into the ETag (asserted indirectly by the 304 below).
+	if resp.SigningCertFP != sg.ActiveFP() {
+		t.Errorf("trust-bundle signing_cert_fp = %q, want %q", resp.SigningCertFP, sg.ActiveFP())
 	}
 
 	// 304 on a matching If-None-Match.

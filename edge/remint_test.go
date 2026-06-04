@@ -48,8 +48,8 @@ func TestObserveNoOps(t *testing.T) {
 	cp, _ := NewCpClient(srv.URL, "tok", nil)
 	coord.cp = cp
 
-	coord.Observe("")            // unknown target → no-op
-	coord.Observe("some-target") // live=="" (no cert held) → no-op
+	coord.Observe("", "")            // unknown target → no-op
+	coord.Observe("some-target", "") // live=="" (no cert held) → no-op
 	time.Sleep(20 * time.Millisecond)
 	if reqs != 0 {
 		t.Errorf("Observe must not mint when target/live unknown, got %d requests", reqs)
@@ -69,7 +69,7 @@ func TestObserveTriggersProactive(t *testing.T) {
 		t.Fatal("pre-minted cert has no ca_id")
 	}
 	// A DIFFERENT observed target must trigger a re-mint (request count rises).
-	coord.Observe("a-different-target")
+	coord.Observe("a-different-target", "")
 	waitFor(t, func() bool { return !coordInFlight(coord) && store.CAID() == live })
 	// (the fake CP always signs the same ca_id, so the edge stays at `live`; the point
 	// is that a mint WAS attempted — verified via the proactive breaker climbing.)
@@ -78,6 +78,30 @@ func TestObserveTriggersProactive(t *testing.T) {
 	coord.mu.Unlock()
 	if noConverge == 0 {
 		t.Error("a proactive mint that didn't reach the (fake) target should increment proactiveNoConverge")
+	}
+}
+
+// The active=OLD→NEW flip leaves the bundle ca_id UNCHANGED (both append OLD++NEW) and
+// changes only the signer fp — so Observe must trigger on a signer-fp divergence even when
+// the ca_id matches the held leaf, or the edge would never re-chain to NEW and would 502 at
+// the OLD-drop.
+func TestObserveTriggersOnSignerFPFlip(t *testing.T) {
+	coord, store := testCoord(t, RemintConfig{})
+	if _, _ = RefreshEdgeCertOnce(coord.cp, store, "timer"); !store.Loaded() {
+		t.Fatal("pre-mint failed")
+	}
+	liveCA, liveFP := store.CAID(), store.SignerFP()
+	if liveCA == "" || liveFP == "" {
+		t.Fatalf("need a known held tuple, got ca=%q fp=%q", liveCA, liveFP)
+	}
+	// SAME ca_id, DIFFERENT active signer fp (the flip). Must attempt a re-mint.
+	coord.Observe(liveCA, "a-different-signer-fp")
+	waitFor(t, func() bool { return !coordInFlight(coord) && store.CAID() == liveCA })
+	coord.mu.Lock()
+	noConverge := coord.proactiveNoConverge
+	coord.mu.Unlock()
+	if noConverge == 0 {
+		t.Error("a same-ca_id signer-fp flip must trigger a proactive re-mint")
 	}
 }
 
@@ -101,7 +125,7 @@ func TestReactiveBreaker(t *testing.T) {
 
 	// Edge already AT the target but the core keeps rejecting (after==target, no flip):
 	// this must NOT reset — re-minting the same ca_id can't fix a core-side reject.
-	coord.Observe(z) // lastTarget = z (== live; converged, no trigger)
+	coord.Observe(z, "") // lastTarget = z (== live; converged, no trigger)
 	coord.runOnce("reactive")
 	coord.mu.Lock()
 	stillClimbing := coord.reactiveNoFlip

@@ -48,7 +48,8 @@ type Signer struct {
 	bundle     []byte            // every CA public cert, PEM (OLD++NEW during overlap); served as ca_pem
 	bundlePool *x509.CertPool    // roots over `bundle`, for Sign()'s post-sign chain self-verify
 	caID       string
-	certCount  int // number of CA certs in the bundle (2 during OLD++NEW overlap, else 1)
+	activeFP   string // sha256 hex of the ACTIVE signing cert — distinguishes active=OLD vs =NEW
+	certCount  int    // number of CA certs in the bundle (2 during OLD++NEW overlap, else 1)
 	ttl        time.Duration
 	skew       time.Duration
 }
@@ -148,6 +149,7 @@ func NewProvidedSignerActive(bundlePEM, keyPEM []byte, activeFP string, ttl, ske
 		bundle:     rebuilt,
 		bundlePool: pool,
 		caID:       id,
+		activeFP:   fps[activeIx],
 		certCount:  len(certs),
 		ttl:        ttl,
 		skew:       skew,
@@ -162,6 +164,12 @@ func (s *Signer) BundlePEM() []byte { return s.bundle }
 // trust-bundle ca_id). It changes whenever a CA is added to or dropped from the
 // bundle, which is the edge's proactive force-re-mint trigger.
 func (s *Signer) CAID() string { return s.caID }
+
+// ActiveFP returns the SHA-256 (hex) of the ACTIVE signing cert — the CA that signs new
+// leaves. The bundle ca_id (CAID) is identical for active=OLD and active=NEW during an
+// OLD++NEW overlap (both append the same bundle), so ActiveFP is the ONLY signal that
+// distinguishes them — the load-bearing proof that issued leaves chain to NEW.
+func (s *Signer) ActiveFP() string { return s.activeFP }
 
 // BundleLen returns the number of CA certs in the served bundle: 2 during an
 // OLD++NEW rotation overlap, 1 otherwise. Read-only, O(1) (counted at construction).

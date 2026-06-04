@@ -33,6 +33,14 @@ func runConvergeStatus() {
 		MinEdges:     envInt("EDGE_CONVERGE_MIN_EDGES", 0),
 		Freshness:    DefaultDuration("EDGE_CONVERGE_FRESHNESS", 5*time.Minute),
 		Exclude:      parseExcludes(os.Getenv("EDGE_CONVERGE_EXCLUDE")),
+		// Active-flip drop-checkpoint pins. When ExpectedActiveSignerFP is set, the predicate
+		// runs the full interlock (every CP replica + good edge NEW-signed, blacklist
+		// converged via ExpectedAuthzGen, revoked id has zero NEW issuances). The revoke tool
+		// supplies these; an operator-driven plain rotation-drop leaves them empty (ca_id-only).
+		ExpectedTargetCAID:     os.Getenv("EDGE_CONVERGE_EXPECTED_CA_ID"),
+		ExpectedActiveSignerFP: os.Getenv("EDGE_CONVERGE_EXPECTED_SIGNER_FP"),
+		ExpectedAuthzGen:       envFloat("EDGE_CONVERGE_EXPECTED_AUTHZ_GEN", 0),
+		RevokedEdgeID:          os.Getenv("EDGE_CONVERGE_REVOKED_EDGE_ID"),
 	}
 	stableReads := envInt("EDGE_CONVERGE_STABLE_READS", 2)
 	pollInterval := DefaultDuration("EDGE_CONVERGE_POLL_INTERVAL", 30*time.Second)
@@ -84,7 +92,7 @@ func runConvergeStatus() {
 		if i > 0 {
 			time.Sleep(pollInterval)
 		}
-		obs, err := converge.Snapshot(ctx, q, cfg.Freshness, time.Now())
+		obs, err := converge.Snapshot(ctx, q, cfg.Freshness, time.Now(), cfg.RevokedEdgeID, cfg.ExpectedActiveSignerFP)
 		if err != nil {
 			slog.Error("converge: prometheus query failed; NOT converged (fail-closed)", "err", err)
 			os.Exit(1)

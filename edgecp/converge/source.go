@@ -3,6 +3,7 @@ package converge
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	promapi "github.com/prometheus/client_golang/api"
@@ -48,7 +49,11 @@ func (p *promQuerier) Query(ctx context.Context, query string, ts time.Time) (mo
 //
 // `up` is joined by `instance` for CP/core (Prometheus stamps it automatically) and by
 // `edge_id` for edges (the scrape config must relabel edge_id onto the edge targets).
-func Snapshot(ctx context.Context, q Querier, freshness time.Duration, now time.Time) (Observations, error) {
+//
+// revokedEdgeID + newSignerFP scope the CP-authoritative issuance-ledger query (the
+// revoked id's leaf count under the NEW signer per replica). Both empty ⇒ that query is
+// skipped (the pre-flip / non-revoke checkpoint), leaving RevokedIssuedUnderNew at 0.
+func Snapshot(ctx context.Context, q Querier, freshness time.Duration, now time.Time, revokedEdgeID, newSignerFP string) (Observations, error) {
 	fw := model.Duration(freshness).String()
 	get := func(query string) (model.Vector, error) { return q.Query(ctx, query, now) }
 
@@ -84,11 +89,29 @@ func Snapshot(ctx context.Context, q Querier, freshness time.Duration, now time.
 	if err != nil {
 		return Observations{}, err
 	}
+	// The CA the replica is ACTUALLY signing under (active=OLD vs =NEW at an identical bundle
+	// ca_id). The sigfp label of the single live edge_ca_active_signer_fp series per instance.
+	activeFP, err := labelByInstance(get, "parapet_edge_ca_active_signer_fp", "sigfp")
+	if err != nil {
+		return Observations{}, err
+	}
+	// CP-authoritative issuance ledger: how many leaves each replica minted for the revoked
+	// id under the NEW signer. Scoped to the exact (edge_id, sigfp) so an absent series ⇒ 0
+	// ⇒ no block. Skipped unless both inputs are set (pre-flip / non-revoke checkpoint).
+	var revokedIssued map[string]float64
+	if revokedEdgeID != "" && newSignerFP != "" {
+		revokedIssued, err = valueByInstance(get, fmt.Sprintf(
+			`parapet_edge_ca_issued_total{edge_id=%q,sigfp=%q}`, promLabel(revokedEdgeID), promLabel(newSignerFP)))
+		if err != nil {
+			return Observations{}, err
+		}
+	}
 	for inst, fp := range signerFP {
 		obs.CP = append(obs.CP, CPReplica{
 			Instance: inst, Up: upByInstance[inst],
 			SignerCAID: fp, TargetCAID: targetCAID[inst],
 			SignerGen: uint64(signerGen[inst]), BundleCerts: int(bundleCerts[inst]), AuthzGen: authzGen[inst],
+			ActiveSignerFP: activeFP[inst], RevokedIssuedUnderNew: revokedIssued[inst],
 		})
 	}
 
@@ -118,10 +141,21 @@ func Snapshot(ctx context.Context, q Querier, freshness time.Duration, now time.
 	if err != nil {
 		return Observations{}, err
 	}
+	// The CA that SIGNED the edge's live leaf (OLD vs NEW), and the NEW active fp the edge
+	// has OBSERVED — the active-flip analogs of LiveCAID / ObservedTarget.
+	liveSignerFP, err := labelByLabel(get, "parapet_edge_clientcert_signer_fp", "edge_id", "sigfp")
+	if err != nil {
+		return Observations{}, err
+	}
+	observedSignerFP, err := labelByLabel(get, "parapet_edge_cp_active_signer_fp", "edge_id", "sigfp")
+	if err != nil {
+		return Observations{}, err
+	}
 	for id, ca := range liveCAID {
 		obs.Edges = append(obs.Edges, EdgeReporter{
 			EdgeID: id, Up: upByEdge[id], LiveCAID: ca,
 			ObservedTarget: observedTarget[id], RefreshedInWindow: refreshed[id], FailedRemints: failed[id],
+			LiveSignerFP: liveSignerFP[id], ObservedSignerFP: observedSignerFP[id],
 		})
 	}
 
@@ -137,6 +171,14 @@ func Snapshot(ctx context.Context, q Querier, freshness time.Duration, now time.
 	}
 
 	return obs, nil
+}
+
+// promLabel escapes a value for interpolation into a PromQL `label="..."` matcher
+// (backslash and double-quote, per the PromQL string grammar), so an edge_id / fp can't
+// break out of the matcher. The fp is hex and the edge_id a registry id, so this is
+// belt-and-suspenders, but the query is built from external input.
+func promLabel(v string) string {
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v)
 }
 
 // labelByInstance maps instance -> the value of `label` on each sample of `query`.

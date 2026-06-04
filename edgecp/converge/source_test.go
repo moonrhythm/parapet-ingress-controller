@@ -52,7 +52,7 @@ func TestSnapshotMapsAllPlanes(t *testing.T) {
 		"parapet_edge_registry_total == 1":                                 {sample(map[string]string{"edge_id": "e1"}, 1)},
 	}}
 
-	obs, err := Snapshot(context.Background(), q, 5*time.Minute, time.Now())
+	obs, err := Snapshot(context.Background(), q, 5*time.Minute, time.Now(), "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestSnapshotMapsAllPlanes(t *testing.T) {
 // A Prometheus query error must propagate (fail-closed: the caller renders no verdict).
 func TestSnapshotPropagatesQueryError(t *testing.T) {
 	q := &fakeQuerier{queryErr: errors.New("prometheus unreachable")}
-	if _, err := Snapshot(context.Background(), q, 5*time.Minute, time.Now()); err == nil {
+	if _, err := Snapshot(context.Background(), q, 5*time.Minute, time.Now(), "", ""); err == nil {
 		t.Error("a query error must propagate, not be swallowed")
 	}
 }

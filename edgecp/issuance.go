@@ -25,10 +25,11 @@ type edgeCertRequest struct {
 }
 
 type edgeCertResponse struct {
-	ChainPEM string `json:"chain_pem"`
-	NotAfter string `json:"not_after"`
-	Serial   string `json:"serial"`
-	CAID     string `json:"ca_id,omitempty"` // signer ca_id, so the edge self-confirms convergence post-mint
+	ChainPEM  string `json:"chain_pem"`
+	NotAfter  string `json:"not_after"`
+	Serial    string `json:"serial"`
+	CAID      string `json:"ca_id,omitempty"`           // signer ca_id, so the edge self-confirms convergence post-mint
+	SigningFP string `json:"signing_cert_fp,omitempty"` // the active signing fp that minted this leaf
 }
 
 // handleEdgeCert signs an edge data-plane client cert from a CSR. Token-gated: a
@@ -102,22 +103,29 @@ func (s *Server) handleEdgeCert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "sign failed", http.StatusInternalServerError)
 		return
 	}
+	// CP-authoritative issuance ledger: record (edge_id, active signer fp) for every mint.
+	// The revoke interlock asserts the revoked id has ZERO issuances under NEW — a
+	// guarantee that does NOT rest on the (forgeable) edge self-report.
+	recordIssuance(id, sg.ActiveFP())
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("X-Parapet-Signing-Cert-Fp", sg.ActiveFP())
 	_ = json.NewEncoder(w).Encode(edgeCertResponse{
-		ChainPEM: string(chainPEM),
-		NotAfter: notAfter.UTC().Format(time.RFC3339),
-		Serial:   serial,
-		CAID:     sg.CAID(),
+		ChainPEM:  string(chainPEM),
+		NotAfter:  notAfter.UTC().Format(time.RFC3339),
+		Serial:    serial,
+		CAID:      sg.CAID(),
+		SigningFP: sg.ActiveFP(),
 	})
 }
 
 type trustBundleResponse struct {
-	Generation uint64 `json:"generation"`
-	CAPEM      string `json:"ca_pem"`
-	CAID       string `json:"ca_id"`
+	Generation    uint64 `json:"generation"`
+	CAPEM         string `json:"ca_pem"`
+	CAID          string `json:"ca_id"`
+	SigningCertFP string `json:"signing_cert_fp,omitempty"` // active signing fp (the tuple half the edge re-mints on)
 }
 
 // handleTrustBundle serves the tokenless trust bundle {generation, ca_pem, ca_id}
@@ -157,11 +165,12 @@ func (s *Server) handleTrustBundle(w http.ResponseWriter, r *http.Request) {
 	sg := st.sg
 	gen := st.gen
 	resp := trustBundleResponse{
-		Generation: gen,
-		CAPEM:      string(sg.BundlePEM()),
-		CAID:       sg.CAID(),
+		Generation:    gen,
+		CAPEM:         string(sg.BundlePEM()),
+		CAID:          sg.CAID(),
+		SigningCertFP: sg.ActiveFP(),
 	}
-	etag := etagOfString(strconv.FormatUint(gen, 10) + "\x00" + resp.CAPEM + "\x00" + resp.CAID)
+	etag := etagOfString(strconv.FormatUint(gen, 10) + "\x00" + resp.CAPEM + "\x00" + resp.CAID + "\x00" + resp.SigningCertFP)
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "no-cache")
 	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {

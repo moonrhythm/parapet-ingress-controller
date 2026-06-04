@@ -4,8 +4,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"math/big"
 	"net/http/httptest"
@@ -102,5 +104,105 @@ func TestClientCertStoreAllOrNothing(t *testing.T) {
 	}
 	if s.Loaded() {
 		t.Error("a failed Update must not mark loaded")
+	}
+}
+
+// fpOfPEM returns the SHA-256 (hex) of a single cert PEM's DER — the same value the CP and
+// deriveIssuerFP compute.
+func fpOfPEM(t *testing.T, certPEM []byte) string {
+	t.Helper()
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("no PEM block")
+	}
+	sum := sha256.Sum256(block.Bytes)
+	return hex.EncodeToString(sum[:])
+}
+
+// chainDERs splits a leaf-first chain PEM into its CERTIFICATE DER blocks (leaf, then CAs).
+func chainDERs(t *testing.T, chainPEM []byte) [][]byte {
+	t.Helper()
+	var ders [][]byte
+	rest := chainPEM
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type == "CERTIFICATE" {
+			ders = append(ders, block.Bytes)
+		}
+	}
+	return ders
+}
+
+// deriveIssuerFP must resolve WHICH CA in the chain signed the leaf (the load-bearing
+// active=OLD-vs-NEW signal), matching on AuthorityKeyId==SubjectKeyId, and FAIL CLOSED ("")
+// on no/ambiguous match — a wrong answer would false-green an OLD-signed leaf at the drop.
+func TestDeriveIssuerFP(t *testing.T) {
+	// Two real edge CAs (edgecp.GenerateCA stamps an explicit SubjectKeyId, so a leaf's
+	// AuthorityKeyId equals its signer's SubjectKeyId — the anchor we match on).
+	oldCert, oldKey, err := edgecp.GenerateCA(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newCert, newKey, err := edgecp.GenerateCA(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldFP, newFP := fpOfPEM(t, oldCert), fpOfPEM(t, newCert)
+	bundle := append(append([]byte(nil), oldCert...), newCert...)
+
+	mint := func(keyPEM []byte, activeFP string) (*x509.Certificate, [][]byte) {
+		sg, _, err := edgecp.NewProvidedSignerActive(bundle, keyPEM, activeFP, time.Hour, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		chainPEM, _, _, err := sg.Sign(k.Public(), "edge-x")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ders := chainDERs(t, chainPEM)
+		leaf, err := x509.ParseCertificate(ders[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return leaf, ders
+	}
+
+	// NEW-signed leaf over the OLD++NEW chain → the NEW CA's fp.
+	newLeaf, newChain := mint(newKey, newFP)
+	if got := deriveIssuerFP(newLeaf, newChain); got != newFP {
+		t.Errorf("NEW-signed leaf: deriveIssuerFP = %s, want NEW %s", got, newFP)
+	}
+	// OLD-signed leaf → the OLD CA's fp (proves it discriminates, not first-match).
+	oldLeaf, oldChain := mint(oldKey, oldFP)
+	if got := deriveIssuerFP(oldLeaf, oldChain); got != oldFP {
+		t.Errorf("OLD-signed leaf: deriveIssuerFP = %s, want OLD %s", got, oldFP)
+	}
+
+	// Ambiguous: the signing CA appears TWICE in the chain → two SKID matches → "".
+	caDER := newChain[len(newChain)-1] // the NEW CA block
+	ambiguous := [][]byte{newChain[0], caDER, caDER}
+	if got := deriveIssuerFP(newLeaf, ambiguous); got != "" {
+		t.Errorf("ambiguous (duplicate signer): want \"\", got %s", got)
+	}
+	// No match: only an unrelated CA in the chain → "" (neither SKID nor signature matches).
+	otherCert, _, err := edgecp.GenerateCA(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDER := chainDERs(t, otherCert)[0]
+	if got := deriveIssuerFP(newLeaf, [][]byte{newChain[0], otherDER}); got != "" {
+		t.Errorf("no matching CA: want \"\", got %s", got)
+	}
+	// Too short (no CA block) → "".
+	if got := deriveIssuerFP(newLeaf, [][]byte{newChain[0]}); got != "" {
+		t.Errorf("chain with no CA: want \"\", got %s", got)
+	}
+	if got := deriveIssuerFP(nil, newChain); got != "" {
+		t.Errorf("nil leaf: want \"\", got %s", got)
 	}
 }

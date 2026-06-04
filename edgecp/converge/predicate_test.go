@@ -135,6 +135,109 @@ func TestEvaluateExcludeWaivesVeto(t *testing.T) {
 	}
 }
 
+// ---- Active-flip drop checkpoint (Config.ExpectedActiveSignerFP pinned) ----
+
+const (
+	newFP = "new-signer-fp"
+	oldFP = "old-signer-fp"
+)
+
+// dropConverged is a fully-converged snapshot at the DESTRUCTIVE drop checkpoint: every
+// CP replica + good edge is NEW-signed, the blacklist has converged (authz gen matches
+// the pin), and the revoked edge — still running on its last OLD-signed leaf — is exempt.
+func dropConverged() (Observations, Config) {
+	obs, cfg := converged()
+	for i := range obs.CP {
+		obs.CP[i].ActiveSignerFP = newFP
+	}
+	for i := range obs.Edges {
+		obs.Edges[i].LiveSignerFP = newFP
+		obs.Edges[i].ObservedSignerFP = newFP
+	}
+	// The revoked edge: registry-dropped (not in ExpectedEdges), still live on its OLD-signed
+	// leaf at the converged bundle ca_id T. It is the intended casualty — must not block.
+	obs.Edges = append(obs.Edges, EdgeReporter{
+		EdgeID: "revoked-x", Up: true, LiveCAID: T, ObservedTarget: T, RefreshedInWindow: true,
+		LiveSignerFP: oldFP, ObservedSignerFP: oldFP,
+	})
+	cfg.ExpectedTargetCAID = T
+	cfg.ExpectedActiveSignerFP = newFP
+	cfg.ExpectedAuthzGen = 42 // matches the fixture's AuthzGen
+	cfg.RevokedEdgeID = "revoked-x"
+	return obs, cfg
+}
+
+func TestEvaluateDropConverged(t *testing.T) {
+	obs, cfg := dropConverged()
+	r := Evaluate(obs, cfg, time.Now())
+	if !r.Converged {
+		t.Fatalf("drop checkpoint must converge with everyone NEW-signed + revoked exempt; blockers=%v", r.Blockers)
+	}
+}
+
+func TestEvaluateDropBlockers(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Observations, *Config)
+		reason string
+	}{
+		{"target-mismatch", func(_ *Observations, c *Config) { c.ExpectedTargetCAID = "other" }, ReasonTargetMismatch},
+		{"authz-pin-unset", func(_ *Observations, c *Config) { c.ExpectedAuthzGen = 0 }, ReasonAuthzPinUnset},
+		{"cp-not-new-signer", func(o *Observations, _ *Config) { o.CP[0].ActiveSignerFP = oldFP }, ReasonCPNotNewSigner},
+		{"cp-signer-split", func(o *Observations, _ *Config) { o.CP[1].ActiveSignerFP = "third-fp" }, ReasonCPSignerSplit},
+		{"authz-not-converged", func(o *Observations, _ *Config) { o.CP[0].AuthzGen, o.CP[1].AuthzGen = 99, 99 }, ReasonAuthzNotConverged},
+		{"revoked-issued-under-new", func(o *Observations, _ *Config) { o.CP[0].RevokedIssuedUnderNew = 3 }, ReasonRevokedIssuedUnderNew},
+		{"edge-old-signer", func(o *Observations, _ *Config) { o.Edges[0].LiveSignerFP = oldFP }, ReasonEdgeOldSigner},
+		{"edge-signer-unresolved", func(o *Observations, _ *Config) { o.Edges[0].LiveSignerFP = "" }, ReasonEdgeSignerUnresolved},
+		{"edge-signer-not-observed", func(o *Observations, _ *Config) { o.Edges[0].ObservedSignerFP = "stale" }, ReasonEdgeSignerNotObserved},
+		{"live-old-signer", func(o *Observations, _ *Config) {
+			o.Edges = append(o.Edges, EdgeReporter{EdgeID: "rogue", Up: true, LiveCAID: T, ObservedTarget: T, RefreshedInWindow: true, LiveSignerFP: oldFP, ObservedSignerFP: newFP})
+		}, ReasonLiveOldSigner},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			obs, cfg := dropConverged()
+			tc.mutate(&obs, &cfg)
+			r := Evaluate(obs, cfg, time.Now())
+			if r.Converged {
+				t.Errorf("%s: must NOT converge", tc.name)
+			}
+			if !hasBlocker(r, tc.reason) {
+				t.Errorf("%s: want blocker %q, got %v", tc.name, tc.reason, r.Blockers)
+			}
+		})
+	}
+}
+
+// The revoked edge, still live on an OLD-signed leaf, must NOT trip the live-OLD vetoes —
+// severing exactly it is the drop's purpose. Without the exemption the revoke deadlocks.
+func TestEvaluateDropRevokedEdgeExempt(t *testing.T) {
+	obs, cfg := dropConverged()
+	r := Evaluate(obs, cfg, time.Now())
+	if hasBlocker(r, ReasonLiveOldSigner) || hasBlocker(r, ReasonLiveOldLeaf) {
+		t.Errorf("the revoked edge (live on OLD) must be exempt from the live-OLD vetoes, got %v", r.Blockers)
+	}
+	// Sanity: without naming it as revoked, the SAME edge DOES veto (proves the exemption is
+	// load-bearing, not that the leaf is invisible).
+	cfg.RevokedEdgeID = ""
+	if r := Evaluate(obs, cfg, time.Now()); !hasBlocker(r, ReasonLiveOldSigner) {
+		t.Error("an unexempted edge live on OLD must trip live-old-signer")
+	}
+}
+
+// The widen checkpoint (no fp pin) must IGNORE the active-flip signals — a fleet still on
+// OLD-signed leaves is correctly converged for the pre-flip barrier.
+func TestEvaluateWidenCheckpointIgnoresSignerFP(t *testing.T) {
+	obs, cfg := converged() // no ExpectedActiveSignerFP
+	for i := range obs.Edges {
+		obs.Edges[i].LiveSignerFP = oldFP // still OLD-signed — fine pre-flip
+	}
+	r := Evaluate(obs, cfg, time.Now())
+	if !r.Converged {
+		t.Errorf("the widen checkpoint must not gate on signer fp; blockers=%v", r.Blockers)
+	}
+}
+
 // A still-RUNNING blacklisted edge (live on OLD, registry-dropped from ExpectedEdges)
 // must STILL block — registry==0 does not silently waive a live OLD leaf.
 func TestEvaluateRunningBlacklistedEdgeStillBlocks(t *testing.T) {

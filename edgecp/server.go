@@ -100,20 +100,29 @@ func (s *Server) SetSigner(sg *Signer, generation uint64) {
 	// Convergence metrics: set all signer gauges together inside the held genMu so a
 	// scrape never tears across them. Done before close(genNotify) so a long-poll
 	// waiter that wakes and re-scrapes always observes the new series.
-	setSignerMetrics(sg.CAID(), generation, sg.BundleLen())
+	setSignerMetrics(sg.CAID(), sg.ActiveFP(), generation, sg.BundleLen())
 	close(s.genNotify)
 	s.genNotify = make(chan struct{})
+}
+
+// currentSignerKey returns the live signer's (ca_id, active-cert fingerprint) from ONE
+// atomic Load, so the two never tear across a concurrent SetSigner during a re-mint
+// storm. "" / "" when no signer is loaded.
+func (s *Server) currentSignerKey() (caID, activeFP string) {
+	if st := s.signerState.Load(); st != nil && st.sg != nil {
+		return st.sg.CAID(), st.sg.ActiveFP()
+	}
+	return "", ""
 }
 
 // CurrentCAID returns the live signer's ca_id, or "" if no signer is loaded. The
 // serving reloader compares it to a rebuilt candidate to gate SetSigner (a no-op
 // re-list must not churn the generation).
-func (s *Server) CurrentCAID() string {
-	if st := s.signerState.Load(); st != nil && st.sg != nil {
-		return st.sg.CAID()
-	}
-	return ""
-}
+func (s *Server) CurrentCAID() string { caID, _ := s.currentSignerKey(); return caID }
+
+// CurrentActiveFP returns the live signer's ACTIVE cert fingerprint — distinguishes
+// active=OLD from active=NEW during an overlap (the bundle ca_id is identical for both).
+func (s *Server) CurrentActiveFP() string { _, fp := s.currentSignerKey(); return fp }
 
 // SignerLoaded reports whether a signer has been installed (issuance is live).
 func (s *Server) SignerLoaded() bool { return s.signerState.Load() != nil }
@@ -183,8 +192,14 @@ func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
 	// leaf issuer; it is deliberately NOT folded into entry.etag — a pure CA rotation
 	// must never force a fleet-wide cert+key re-download. Set after Known()/Allowed()
 	// (never to an unauthorized caller), before any WriteHeader so it rides the 304/404.
-	if id := s.CurrentCAID(); id != "" {
-		w.Header().Set("X-Parapet-CA-Id", id)
+	if caID, activeFP := s.currentSignerKey(); caID != "" {
+		w.Header().Set("X-Parapet-CA-Id", caID)
+		// The active signing fp rides the SAME response: during an overlap the ca_id is
+		// identical for active=OLD/NEW, so the edge must re-mint on the (ca_id, sigfp)
+		// TUPLE to pick up an active flip and obtain a NEW-signed leaf before the OLD-drop.
+		if activeFP != "" {
+			w.Header().Set("X-Parapet-Signing-Cert-Fp", activeFP)
+		}
 	}
 
 	entry, ok := s.certs.Get(sni)
@@ -211,9 +226,10 @@ func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
 type wafResponse struct {
 	Generation  uint64            `json:"generation"`
 	GlobalRules string            `json:"global_rules"`
-	Zones       map[string]string `json:"zones"`           // zoneKey -> rules YAML
-	HostZoneMap map[string]string `json:"host_zone_map"`   // host -> zoneKey
-	CAID        string            `json:"ca_id,omitempty"` // signer target ca_id (best-effort SECONDARY force-re-mint confirmer)
+	Zones       map[string]string `json:"zones"`                     // zoneKey -> rules YAML
+	HostZoneMap map[string]string `json:"host_zone_map"`             // host -> zoneKey
+	CAID        string            `json:"ca_id,omitempty"`           // signer target ca_id (best-effort SECONDARY force-re-mint confirmer)
+	SigningFP   string            `json:"signing_cert_fp,omitempty"` // active signing fp (the tuple's other half)
 }
 
 // handleWAF serves the WAF payload scoped to the edge's allowed domains: the
@@ -231,16 +247,18 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snap := s.waf.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
+	caID, activeFP := s.currentSignerKey()
 	resp := wafResponse{
 		Generation:  snap.generation,
 		GlobalRules: snap.global,
 		Zones:       snap.zones,
 		HostZoneMap: snap.hostZone,
-		// In-body ca_id busts the ETag on the 200 arm for free (the WAF snapshot is
-		// ca_id-independent — SetSigner leaves it untouched). The steady-state 304 arm
-		// carries NOTHING, so /v1/waf is only a SECONDARY confirmer; the /v1/certs
-		// X-Parapet-CA-Id header is the guaranteed steady-state carrier.
-		CAID: s.CurrentCAID(),
+		// In-body ca_id + signing fp bust the ETag on the 200 arm for free (the WAF
+		// snapshot is signer-independent). The steady-state 304 arm carries NOTHING, so
+		// /v1/waf is only a SECONDARY confirmer; the /v1/certs headers are the guaranteed
+		// steady-state carrier.
+		CAID:      caID,
+		SigningFP: activeFP,
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {

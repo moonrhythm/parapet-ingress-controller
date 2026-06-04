@@ -71,6 +71,36 @@ var (
 		Name:      "edge_ca_signer_rv_unparsed",
 		Help:      "1 when the CA Secret resourceVersion is non-numeric (signer frozen at last-good); 0 when parseable.",
 	})
+
+	// activeSignerFP is the fingerprint of the ACTIVE signing cert (what signs new leaves).
+	// During an OLD++NEW overlap the bundle ca_id is identical for active=OLD and =NEW, so
+	// this is the ONLY signal that distinguishes them — the interlock asserts every CP
+	// replica signs under NEW (sigfp == target) before the OLD-drop, proving issued leaves
+	// chain to NEW. Reset-then-Set under genMu like the others.
+	activeSignerFP = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_ca_active_signer_fp",
+		Help:      "The active signing cert fingerprint, by ca_id + sigfp (value 1).",
+	}, []string{"ca_id", "sigfp"})
+
+	// signerActiveFlipFailed is 1 when an active=new reload was requested but the candidate
+	// signer wouldn't build (fingerprint pin / reordered bundle) — the replica is wedged
+	// minting OLD-signed leaves. Without this it surfaces only as an unexplained converge stall.
+	signerActiveFlipFailed = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_ca_signer_active_flip_failed",
+		Help:      "1 when an active=new signer reload failed to build (replica wedged on OLD signing); 0 otherwise.",
+	})
+
+	// issuedUnderSigner is the CP-AUTHORITATIVE issuance ledger: every minted edge leaf by
+	// edge_id + the active signer fp. The revoke interlock asserts the REVOKED edge_id has
+	// ZERO issuances under NEW across all replicas — a guarantee that does NOT rest on the
+	// (forgeable) edge self-report.
+	issuedUnderSigner = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_ca_issued_total",
+		Help:      "Edge client certs minted, by edge_id + the active signer fp that signed them.",
+	}, []string{"edge_id", "sigfp"})
 )
 
 var (
@@ -100,7 +130,12 @@ var (
 )
 
 func init() {
-	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration)
+	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration, activeSignerFP, signerActiveFlipFailed, issuedUnderSigner)
+}
+
+// recordIssuance ledgers one minted edge leaf under the active signer fp (CP-authoritative).
+func recordIssuance(edgeID, signerFP string) {
+	issuedUnderSigner.WithLabelValues(edgeID, signerFP).Inc()
 }
 
 // SetRegistryMetrics publishes the expected-edge reporter set and the authz-generation
@@ -108,20 +143,38 @@ func init() {
 // static today). Only entries with a non-empty id are data-plane edges.
 func SetRegistryMetrics(entries map[string]Entry) {
 	registryTotal.Reset()
-	lines := make([]string, 0, len(entries))
 	for _, e := range entries {
 		if e.ID == "" {
 			continue
 		}
 		v := 1.0
-		d := "0"
 		if e.Disabled {
-			v, d = 0.0, "1"
+			v = 0.0
 		}
 		registryTotal.WithLabelValues(e.ID).Set(v)
+	}
+	authzGeneration.Set(AuthzGeneration(entries))
+}
+
+// AuthzGeneration computes the deterministic authz-generation fingerprint of a token
+// registry WITHOUT touching metrics — the same value the serving CP publishes as
+// edge_authz_generation. The revoke tool calls it on the post-blacklist registry to
+// derive the ExpectedAuthzGen pin the OLD-drop interlock asserts every replica reports
+// (the proof the blacklist converged fleet-wide). Identical inputs ⇒ identical output on
+// every replica and in the tool.
+func AuthzGeneration(entries map[string]Entry) float64 {
+	lines := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.ID == "" {
+			continue
+		}
+		d := "0"
+		if e.Disabled {
+			d = "1"
+		}
 		lines = append(lines, e.ID+":"+d)
 	}
-	authzGeneration.Set(registryFingerprint(lines))
+	return registryFingerprint(lines)
 }
 
 // registryFingerprint hashes the sorted "id:disabled" lines into a stable float value
@@ -137,7 +190,7 @@ func registryFingerprint(lines []string) float64 {
 // Reset()s each ca_id vec first so only one live series remains across rotations. Call
 // it under Server.genMu (the same critical section that swaps the signer) so all five
 // gauges move together and no scrape sees a torn snapshot.
-func setSignerMetrics(caID string, gen uint64, certCount int) {
+func setSignerMetrics(caID, activeFP string, gen uint64, certCount int) {
 	signerFingerprint.Reset()
 	signerFingerprint.WithLabelValues(caID).Set(1)
 	signerGeneration.Reset()
@@ -149,4 +202,9 @@ func setSignerMetrics(caID string, gen uint64, certCount int) {
 	// convergence PromQL compares the core + edge ca_ids against, with no hardcoded value.
 	targetCAID.Reset()
 	targetCAID.WithLabelValues(caID).Set(1)
+	// the active signing fp — distinguishes active=OLD vs =NEW at an identical bundle ca_id.
+	activeSignerFP.Reset()
+	if activeFP != "" {
+		activeSignerFP.WithLabelValues(caID, activeFP).Set(1)
+	}
 }

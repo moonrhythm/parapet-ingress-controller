@@ -43,6 +43,21 @@ const (
 	ReasonEdgeCountBelowFloor = "edge-count-below-floor" // fewer expected edges than the operator floor (registry/scrape drift)
 	ReasonRevokedUnverified   = "revoked-unverified"     // the revoked-token absence probe did not run (fail-closed)
 	ReasonRevokedLeafPresent  = "revoked-leaf-present"   // the revoked token can still mint (probe got 2xx)
+
+	// Active-flip drop-checkpoint reasons (fire only when cfg.ExpectedActiveSignerFP is
+	// pinned — the destructive TrimCA gate). ca_id convergence proves the OLD++NEW bundle
+	// is everywhere but NOT that a leaf is SIGNED by NEW; these gate on the signer fp so a
+	// good edge's OLD-signed leaf can't 502 after the OLD-drop.
+	ReasonTargetMismatch        = "target-mismatch"          // resolved target T != the tool's pinned ExpectedTargetCAID
+	ReasonAuthzPinUnset         = "authz-pin-unset"          // fp pinned but ExpectedAuthzGen unset (misconfig — the blacklist barrier can't be checked)
+	ReasonCPSignerSplit         = "cp-signer-split"          // CP replicas disagree on the active signer fp (some OLD, some NEW)
+	ReasonCPNotNewSigner        = "cp-not-new-signer"        // a CP replica still signs under OLD (active fp != NEW) — its mints wouldn't survive the drop
+	ReasonAuthzNotConverged     = "authz-not-converged"      // a CP replica's authz gen != the expected post-blacklist value (revoke not loaded there)
+	ReasonRevokedIssuedUnderNew = "revoked-issued-under-new" // the revoked id has >0 issuances under NEW on some replica (a NEW leaf is in flight — the drop wouldn't sever it)
+	ReasonEdgeSignerUnresolved  = "edge-signer-unresolved"   // an expected edge reports no live signer fp (deriveIssuerFP failed) — fail-closed
+	ReasonEdgeOldSigner         = "edge-old-signer"          // an expected edge's live leaf is OLD-signed (fp != NEW) — would 502 after the drop
+	ReasonEdgeSignerNotObserved = "edge-signer-not-observed" // an expected edge hasn't observed the NEW active fp target yet (its re-mint can't have aimed at it)
+	ReasonLiveOldSigner         = "live-old-signer"          // ANY non-revoked edge (even registry-disabled) live on an OLD-signed leaf
 )
 
 // Config is the operator/Job input. The target ca_id is NOT configured — it is derived
@@ -56,6 +71,28 @@ type Config struct {
 	// a `<` floor (the fleet is registry-scaled, so `!=` would over-block).
 	Freshness time.Duration // window within which a reporter must have refreshed
 	Exclude   []ExcludedEdge
+
+	// ExpectedTargetCAID, when non-empty, PINS the resolved target: the self-described CP
+	// target T must equal it, else ReasonTargetMismatch. The revoke tool sets it to the NEW
+	// ca_id it rotated to, so a concurrent or unrelated rotation can't false-converge the drop.
+	ExpectedTargetCAID string
+
+	// Drop-checkpoint pins (the destructive TrimCA gate). When ExpectedActiveSignerFP is
+	// non-empty, Evaluate runs the ACTIVE-FLIP interlock on TOP of the ca_id convergence:
+	// every CP replica + every good edge must be NEW-SIGNED (active signer fp == it), the
+	// blacklist must have converged on every replica (authz gen == ExpectedAuthzGen), and —
+	// when RevokedEdgeID is set — that id must have ZERO issuances under NEW on every
+	// replica. Empty ⇒ the ca_id-only checkpoint (the pre-flip widen barrier; back-compat).
+	ExpectedActiveSignerFP string
+	// ExpectedAuthzGen is the post-blacklist authz fingerprint every CP replica must report
+	// (the deterministic registry hash WITH the revoke applied). Required (non-zero) when
+	// ExpectedActiveSignerFP is set: it is the proof the blacklist converged fleet-wide, the
+	// precondition that drops the revoked id from the expected set and stops its minting.
+	ExpectedAuthzGen float64
+	// RevokedEdgeID, when set, is the id being severed: it is EXEMPT from the live-OLD vetoes
+	// (it is the intended casualty of the drop), and its issuance count under NEW must be
+	// zero on every replica (else a NEW-signed leaf would survive the OLD-drop).
+	RevokedEdgeID string
 }
 
 // ExcludedEdge is a LOUD, reason-required convergence-veto waiver for a decommissioned
@@ -74,6 +111,13 @@ type CPReplica struct {
 	SignerGen   uint64  // edge_ca_signer_generation value
 	BundleCerts int     // edge_ca_bundle_certs value (2 during OLD++NEW overlap)
 	AuthzGen    float64 // edge_authz_generation value
+	// ActiveSignerFP is the sigfp label of edge_ca_active_signer_fp at ca_id==T — the CA
+	// this replica is ACTUALLY signing under now. Identical bundle ca_id for active=OLD/NEW,
+	// so this is the only CP-side signal that the active flip landed here.
+	ActiveSignerFP string
+	// RevokedIssuedUnderNew is edge_ca_issued_total{edge_id=<revoked>, sigfp=<NEW>} on this
+	// replica — how many leaves it minted for the revoked id under the NEW signer. Must be 0.
+	RevokedIssuedUnderNew float64
 }
 
 // CoreReplica is one core's scraped state.
@@ -91,6 +135,12 @@ type EdgeReporter struct {
 	ObservedTarget    string // edge_cp_target_ca_id label
 	RefreshedInWindow bool   // increase(edge_refresh_total[Freshness]) >= 1
 	FailedRemints     bool   // increase(edge_clientcert_remint_total{result!="ok"}[Freshness]) > 0
+	// LiveSignerFP is edge_clientcert_signer_fp — the fp of the CA that SIGNED the live leaf.
+	// This (not LiveCAID) is what proves the leaf chains to NEW and survives the OLD-drop.
+	LiveSignerFP string
+	// ObservedSignerFP is edge_cp_active_signer_fp — the NEW active fp the edge has observed
+	// from the CP (the re-mint target's other half, mirroring ObservedTarget for ca_id).
+	ObservedSignerFP string
 }
 
 // Observations is the cross-plane metric snapshot Evaluate scores. source.go builds it
@@ -105,6 +155,12 @@ type Observations struct {
 	RevokedProbeStatus int  // its HTTP status (401/403 ⇒ revoked; 2xx ⇒ still mints)
 }
 
+// Note: the active-flip drop checkpoint (Config.ExpectedActiveSignerFP) adds NO new
+// top-level Observations fields — its signals ride existing reporters: CPReplica gains
+// ActiveSignerFP + RevokedIssuedUnderNew, EdgeReporter gains LiveSignerFP +
+// ObservedSignerFP. The single top-level revoked probe stays the live cross-check; the
+// per-replica blacklist proof is AuthzGen == Config.ExpectedAuthzGen.
+
 // Result is the verdict. Converged is true ONLY when Blockers is empty.
 type Result struct {
 	Converged bool
@@ -116,6 +172,16 @@ type Result struct {
 // Evaluate scores convergence against the target ca_id derived from the CP target series.
 // Pure: no I/O, no clock beyond `now`. Returns Converged=false with named Blockers for
 // every reason the drop is unsafe.
+//
+// Two checkpoints share this predicate, selected by Config.ExpectedActiveSignerFP:
+//   - empty ⇒ the ca_id WIDEN barrier (every plane holds the OLD++NEW bundle) — the
+//     gate the operator clears before flipping the active signer to NEW.
+//   - set ⇒ the destructive OLD-DROP gate — additionally every CP replica + every good
+//     edge must be NEW-SIGNED (signer fp == it), the blacklist converged everywhere
+//     (authz gen == ExpectedAuthzGen), and the revoked id has zero NEW issuances. ca_id
+//     convergence alone does NOT prove a leaf is signed by NEW (Sign() appends the same
+//     bundle for active=OLD/NEW), so without these gates a good edge's OLD-signed leaf
+//     would 502 the moment OLD drops.
 func Evaluate(obs Observations, cfg Config, now time.Time) Result {
 	r := Result{Excluded: cfg.Exclude}
 
@@ -135,6 +201,13 @@ func Evaluate(obs Observations, cfg Config, now time.Time) Result {
 	// misconfig — the floor must not be silently disabled.
 	if cfg.ExpectedCP <= 0 || cfg.ExpectedCore <= 0 || cfg.MinEdges <= 0 {
 		r.Blockers = append(r.Blockers, Blocker{Plane: "config", Reason: "expected-counts-unset"})
+	}
+	// The drop checkpoint is only safe with the blacklist-barrier proof: pinning the NEW
+	// signer fp WITHOUT pinning the expected authz generation would gate "everyone NEW-signed"
+	// while leaving "the revoke loaded everywhere" unchecked — a half-interlock. Refuse it.
+	fpPinned := cfg.ExpectedActiveSignerFP != ""
+	if fpPinned && cfg.ExpectedAuthzGen == 0 {
+		r.Blockers = append(r.Blockers, Blocker{Plane: "config", Reason: ReasonAuthzPinUnset})
 	}
 	if len(obs.CP) == 0 && len(obs.Core) == 0 && len(obs.Edges) == 0 && len(obs.ExpectedEdges) == 0 {
 		r.Blockers = append(r.Blockers, Blocker{Plane: "config", Reason: ReasonExpectedSetEmpty})
@@ -163,9 +236,18 @@ func Evaluate(obs Observations, cfg Config, now time.Time) Result {
 	}
 	T := r.Target
 
+	// Tool pin: the self-described target must be the SAME rotation the revoke tool drove.
+	// A mismatch means an unrelated/concurrent rotation moved T — converging the drop against
+	// it would sever the wrong CA. Fail closed and stop (downstream gates are meaningless).
+	if cfg.ExpectedTargetCAID != "" && T != cfg.ExpectedTargetCAID {
+		r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reason: ReasonTargetMismatch})
+		return finalize(r)
+	}
+
 	// (2) CP plane: every replica up, signing under T, still serving OLD++NEW (2 certs),
 	// with ONE generation for T (the generation-split tripwire) and agreement on authz.
 	cpAtT, gens, authz := 0, map[uint64]bool{}, map[float64]bool{}
+	signerFPs := map[string]bool{} // distinct active signer fps across up replicas (split tripwire)
 	for _, cp := range obs.CP {
 		if !cp.Up {
 			r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reporter: cp.Instance, Reason: ReasonUpDown})
@@ -181,12 +263,31 @@ func Evaluate(obs Observations, cfg Config, now time.Time) Result {
 		gens[cp.SignerGen] = true
 		authz[cp.AuthzGen] = true
 		cpAtT++
+
+		// Active-flip drop checkpoint (fp-pinned only): this replica must SIGN under NEW, have
+		// loaded the post-blacklist registry, and have minted nothing for the revoked id under
+		// NEW. Each is per-replica because each replica signs + enforces authz independently.
+		if fpPinned {
+			signerFPs[cp.ActiveSignerFP] = true
+			if cp.ActiveSignerFP != cfg.ExpectedActiveSignerFP {
+				r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reporter: cp.Instance, Reason: ReasonCPNotNewSigner})
+			}
+			if cp.AuthzGen != cfg.ExpectedAuthzGen {
+				r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reporter: cp.Instance, Reason: ReasonAuthzNotConverged})
+			}
+			if cfg.RevokedEdgeID != "" && cp.RevokedIssuedUnderNew > 0 {
+				r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reporter: cp.Instance, Reason: ReasonRevokedIssuedUnderNew})
+			}
+		}
 	}
 	if len(gens) > 1 {
 		r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reason: ReasonGenerationSplit})
 	}
 	if len(authz) > 1 {
 		r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reason: ReasonAuthzSplit})
+	}
+	if fpPinned && len(signerFPs) > 1 {
+		r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reason: ReasonCPSignerSplit})
 	}
 	if cpAtT != cfg.ExpectedCP {
 		r.Blockers = append(r.Blockers, Blocker{Plane: "cp", Reason: ReasonCountMismatch})
@@ -246,19 +347,37 @@ func Evaluate(obs Observations, cfg Config, now time.Time) Result {
 			r.Blockers = append(r.Blockers, Blocker{Plane: "edge", Reporter: id, Reason: ReasonRefreshStale})
 		case e.FailedRemints:
 			r.Blockers = append(r.Blockers, Blocker{Plane: "edge", Reporter: id, Reason: ReasonRemintChurn})
+		// Active-flip gates (fp-pinned only), AFTER the ca_id gates: a bundle that converged
+		// (LiveCAID==T) but whose leaf is still OLD-signed would 502 the moment OLD drops.
+		case fpPinned && e.LiveSignerFP == "":
+			r.Blockers = append(r.Blockers, Blocker{Plane: "edge", Reporter: id, Reason: ReasonEdgeSignerUnresolved})
+		case fpPinned && e.LiveSignerFP != cfg.ExpectedActiveSignerFP:
+			r.Blockers = append(r.Blockers, Blocker{Plane: "edge", Reporter: id, Reason: ReasonEdgeOldSigner})
+		case fpPinned && e.ObservedSignerFP != cfg.ExpectedActiveSignerFP:
+			r.Blockers = append(r.Blockers, Blocker{Plane: "edge", Reporter: id, Reason: ReasonEdgeSignerNotObserved})
 		}
 	}
 
-	// (5) Live-OLD-leaf veto: ANY edge observed live on a non-target leaf blocks — even
-	// one merely registry-disabled but still RUNNING — unless explicitly excluded. The
+	// (5) Live-OLD vetoes: ANY edge observed live on OLD trust material blocks — even one
+	// merely registry-disabled but still RUNNING — unless explicitly excluded. The
 	// expected-to-converge set (the veto driver) is decoupled from the still-running-and-
 	// trusted set (the actual blast radius); registry==0 does NOT silently waive it.
+	//
+	// The REVOKED id is EXEMPT: it is the intended casualty of the drop. It is still running
+	// on its last OLD-signed leaf (it can no longer mint), and severing exactly that is the
+	// drop's purpose — vetoing on it would deadlock the revoke forever.
 	for _, e := range obs.Edges {
-		if excluded[e.EdgeID] {
+		if excluded[e.EdgeID] || (cfg.RevokedEdgeID != "" && e.EdgeID == cfg.RevokedEdgeID) {
 			continue
 		}
 		if e.Up && e.LiveCAID != "" && e.LiveCAID != T {
 			r.Blockers = append(r.Blockers, Blocker{Plane: "edge", Reporter: e.EdgeID, Reason: ReasonLiveOldLeaf})
+		}
+		// Signer veto (fp-pinned): the bundle ca_id can be T (converged) while the leaf is
+		// STILL OLD-signed — that leaf fails verification the moment OLD drops. Block on any
+		// non-revoked edge holding an OLD-signed leaf.
+		if fpPinned && e.Up && e.LiveSignerFP != "" && e.LiveSignerFP != cfg.ExpectedActiveSignerFP {
+			r.Blockers = append(r.Blockers, Blocker{Plane: "edge", Reporter: e.EdgeID, Reason: ReasonLiveOldSigner})
 		}
 	}
 
