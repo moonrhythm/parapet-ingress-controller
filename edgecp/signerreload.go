@@ -187,14 +187,29 @@ func (r *SignerReloader) reload(ctx context.Context) error {
 
 	cand, warnings, err := NewProvidedSignerActive(crt, keyPEM, activeFP, r.ttl, r.skew)
 	if err != nil {
+		// A FAILED active=new candidate (the fingerprint pin won't build / reordered
+		// bundle) keeps last-good = still active=old SILENTLY — the replica would mint
+		// OLD-signed leaves forever. Raise a distinct alertable gauge so a wedged replica
+		// is diagnosable, not just an unexplained converge stall.
+		if active == caActiveNew {
+			signerActiveFlipFailed.Set(1)
+		}
 		slog.Error("edgecp: build edge CA signer; keeping last-good", "err", err, "active", active)
 		return nil
+	}
+	if active == caActiveNew {
+		signerActiveFlipFailed.Set(0)
 	}
 	for _, msg := range warnings {
 		slog.Warn("edge CA: " + msg)
 	}
-	if cand.CAID() == r.server.CurrentCAID() {
-		return nil // unchanged bundle; do not churn the generation (RV-only writes are no-ops)
+	// Guard on the (ca_id, active-fp) TUPLE: an active=old→new flip leaves the OLD++NEW
+	// bundle byte-identical (same ca_id), so a ca_id-only short-circuit would make the
+	// flip a SILENT no-op and the NEW signer would never install. The active-fp is the
+	// only thing that changes at the flip.
+	curCAID, curFP := r.server.currentSignerKey()
+	if cand.CAID() == curCAID && cand.ActiveFP() == curFP {
+		return nil // unchanged bundle AND active key; do not churn the generation
 	}
 	r.server.SetSigner(cand, generation)
 	if active == "" {

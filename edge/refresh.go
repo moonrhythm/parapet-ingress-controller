@@ -78,9 +78,9 @@ func RunEdgeCertRefresh(ctx context.Context, coord *RemintCoordinator, interval 
 			return
 		case <-t.C:
 			coord.MaybeRenew()
-			if caID, err := coord.cp.FetchTrustBundleCAID(); err == nil {
+			if caID, signerFP, err := coord.cp.FetchTrustBundleSignal(); err == nil {
 				edgeRefreshOK() // liveness for the idle edge that polls no per-domain cert
-				coord.Observe(caID)
+				coord.Observe(caID, signerFP)
 			}
 		}
 	}
@@ -88,9 +88,10 @@ func RunEdgeCertRefresh(ctx context.Context, coord *RemintCoordinator, interval 
 
 // RefreshCertOnce fetches one domain's cert from the control plane
 // (ETag-revalidated) and swaps it into the store; fail-static on error. It then
-// Observes the X-Parapet-CA-Id force-re-mint signal that rides EVERY response arm
-// (200/304/404 — res.CAID is set even on the error arm), so a CA rotation is detected
-// on the edge's existing cert poll regardless of cert outcome. coord is nil when
+// Observes the (X-Parapet-CA-Id, X-Parapet-Signing-Cert-Fp) force-re-mint tuple that
+// rides EVERY response arm (200/304/404 — both are set even on the error arm), so a CA
+// rotation OR an active=OLD→NEW flip is detected on the edge's existing cert poll
+// regardless of cert outcome. coord is nil when
 // data-plane mTLS is off (Observe is a no-op). Used by the periodic loop and
 // (serve-all) by the on-demand TLS handshake path.
 func RefreshCertOnce(cp *CpClient, store *CertStore, domain string, coord *RemintCoordinator) {
@@ -111,7 +112,7 @@ func RefreshCertOnce(cp *CpClient, store *CertStore, domain string, coord *Remin
 	if err == nil {
 		edgeRefreshOK() // liveness: a successful CP poll (200 or 304), independent of any ca_id change
 	}
-	coord.Observe(res.CAID)
+	coord.Observe(res.CAID, res.SignerFP)
 }
 
 // RefreshCertsAll fetches every domain once (sequentially). Returns how many are

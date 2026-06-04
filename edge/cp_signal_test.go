@@ -49,16 +49,19 @@ func TestFetchCertCarriesCAIDOnEveryArm(t *testing.T) {
 	}
 }
 
-func TestFetchTrustBundleCAID(t *testing.T) {
+func TestFetchTrustBundleSignal(t *testing.T) {
 	cp := newSignalCP(t, func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"generation":3,"ca_pem":"x","ca_id":"tb-abc"}`))
+		_, _ = w.Write([]byte(`{"generation":3,"ca_pem":"x","ca_id":"tb-abc","signing_cert_fp":"fp-new"}`))
 	})
-	id, err := cp.FetchTrustBundleCAID()
+	id, fp, err := cp.FetchTrustBundleSignal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if id != "tb-abc" {
 		t.Errorf("ca_id = %q, want tb-abc", id)
+	}
+	if fp != "fp-new" {
+		t.Errorf("signer fp = %q, want fp-new", fp)
 	}
 }
 

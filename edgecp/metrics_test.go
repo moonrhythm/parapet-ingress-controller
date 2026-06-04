@@ -10,8 +10,8 @@ import (
 // (Reset()-then-Set) — the only guard against ca_id-label cardinality growth in a
 // long-running process — and reflect the latest signer's values.
 func TestSetSignerMetricsOneSeriesPerVec(t *testing.T) {
-	setSignerMetrics("ca-old", 1, 2)
-	setSignerMetrics("ca-new", 2, 1) // rotate: a new ca_id must not accumulate a series
+	setSignerMetrics("ca-old", "fp-old", 1, 2)
+	setSignerMetrics("ca-new", "fp-new", 2, 1) // rotate: a new ca_id must not accumulate a series
 
 	for name, c := range map[string]int{
 		"signer_fingerprint": testutil.CollectAndCount(signerFingerprint),

@@ -9,8 +9,8 @@ import (
 // setClientCertMetrics keeps exactly one ca_id series across re-mints, and an empty
 // ca_id (too-short chain) sets only loaded without leaving a ca_id series.
 func TestSetClientCertMetricsOneSeries(t *testing.T) {
-	setClientCertMetrics("ca-old", 100)
-	setClientCertMetrics("ca-new", 200) // re-mint onto a new CA set
+	setClientCertMetrics("ca-old", "", 100)
+	setClientCertMetrics("ca-new", "", 200) // re-mint onto a new CA set
 
 	if c := testutil.CollectAndCount(edgeClientCertCAID); c != 1 {
 		t.Errorf("ca_id: want 1 live series after re-mint, got %d", c)
@@ -26,7 +26,7 @@ func TestSetClientCertMetricsOneSeries(t *testing.T) {
 	}
 
 	// Empty ca_id: loaded stays 1, but no ca_id/not_after series.
-	setClientCertMetrics("", 0)
+	setClientCertMetrics("", "", 0)
 	if c := testutil.CollectAndCount(edgeClientCertCAID); c != 0 {
 		t.Errorf("empty ca_id must leave no series, got %d", c)
 	}
@@ -64,7 +64,7 @@ func TestEdgeIDStampingAndLiveness(t *testing.T) {
 	edgeID = "edge-7"
 	defer func() { edgeID = old }()
 
-	setClientCertMetrics("ca-z", 123)
+	setClientCertMetrics("ca-z", "", 123)
 	if v := testutil.ToFloat64(edgeClientCertCAID.WithLabelValues("ca-z", "edge-7")); v != 1 {
 		t.Error("ca_id series must carry the edge_id label")
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -74,9 +75,20 @@ func GenerateCA(ttl time.Duration) (certPEM, keyPEM []byte, err error) {
 		return nil, nil, fmt.Errorf("ca serial: %w", err)
 	}
 	now := time.Now()
+	// Explicit SubjectKeyId (SHA-256 of the SPKI). x509.CreateCertificate copies the
+	// issuer's SubjectKeyId into a leaf's AuthorityKeyId, so an overlap leaf carries the
+	// SKID of the CA that SIGNED it — the anchor the edge uses to derive the active
+	// signer fingerprint (OLD vs NEW). Set it ourselves rather than rely on the stdlib's
+	// implicit SHA-1 derivation (asserted non-empty in ca_test).
+	spki, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca spki: %w", err)
+	}
+	skid := sha256.Sum256(spki)
 	tmpl := &x509.Certificate{
 		SerialNumber:          sn,
 		Subject:               pkix.Name{CommonName: "parapet-edge-ca"},
+		SubjectKeyId:          skid[:],
 		NotBefore:             now.Add(-DefaultClientCertSkew),
 		NotAfter:              now.Add(ttl),
 		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,

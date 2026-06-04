@@ -62,10 +62,27 @@ var (
 		Name:      "edge_refresh_total",
 		Help:      "Successful control-plane polls (proves the refresh loop is alive, independent of ca_id change).",
 	}, []string{"edge_id"})
+
+	// edgeClientCertSignerFP is the fp of the CA that SIGNED the edge's live leaf — the
+	// load-bearing proof the leaf chains to NEW (survives the OLD-drop). The ca_id is
+	// identical for active=OLD/NEW, so the interlock gates the drop on THIS, not ca_id.
+	edgeClientCertSignerFP = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_clientcert_signer_fp",
+		Help:      "Fingerprint of the CA that signed the edge's live data-plane leaf (value 1).",
+	}, []string{"sigfp", "edge_id"})
+
+	// edgeCPActiveSignerFP is the CP-announced active signing fp the edge last observed —
+	// the target the edge re-mints toward (the tuple's other half beside cp_target_ca_id).
+	edgeCPActiveSignerFP = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cp_active_signer_fp",
+		Help:      "CP active signing fp the edge last observed (value 1).",
+	}, []string{"sigfp", "edge_id"})
 )
 
 func init() {
-	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID, edgeRefresh)
+	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID, edgeRefresh, edgeClientCertSignerFP, edgeCPActiveSignerFP)
 }
 
 // edgeID is the process's logical identity, stamped on every metric. Defaults to
@@ -86,14 +103,26 @@ func SetEdgeID(id string) {
 // only one ca_id series survives a rotation) and marks the cert loaded. An empty caID
 // (chain too short to carry a CA block) sets only loaded, leaving the ca_id vecs clear.
 // Called only from the single ClientCertStore.Update writer (the re-mint loop).
-func setClientCertMetrics(caID string, notAfterUnix int64) {
+func setClientCertMetrics(caID, signerFP string, notAfterUnix int64) {
 	edgeClientCertCAID.Reset()
 	edgeClientCertNotAfter.Reset()
+	edgeClientCertSignerFP.Reset()
 	if caID != "" {
 		edgeClientCertCAID.WithLabelValues(caID, edgeID).Set(1)
 		edgeClientCertNotAfter.WithLabelValues(caID, edgeID).Set(float64(notAfterUnix))
 	}
+	if signerFP != "" {
+		edgeClientCertSignerFP.WithLabelValues(signerFP, edgeID).Set(1)
+	}
 	edgeClientCertLoaded.WithLabelValues(edgeID).Set(1)
+}
+
+// setObservedSignerFP records the CP-announced active signing fp the edge last observed.
+func setObservedSignerFP(fp string) {
+	edgeCPActiveSignerFP.Reset()
+	if fp != "" {
+		edgeCPActiveSignerFP.WithLabelValues(fp, edgeID).Set(1)
+	}
 }
 
 // remint counts one re-mint attempt by result and trigger. Re-mints are infrequent

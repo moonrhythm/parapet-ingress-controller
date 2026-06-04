@@ -24,10 +24,10 @@ func RefreshWafOnce(cp *CpClient, w *EdgeWAF, coord *RemintCoordinator) {
 			slog.Info("edge: WAF rulesets updated", "generation", res.Generation)
 		}
 	}
-	// Secondary force-re-mint confirmer: the WAF body carries ca_id on the 200 arm only
-	// (the 304 carries nothing — /v1/certs is the guaranteed carrier). res.CAID is ""
-	// on 304/err, and Observe("") is a no-op.
-	coord.Observe(res.CAID)
+	// Secondary force-re-mint confirmer: the WAF body carries the (ca_id, signer fp) tuple
+	// on the 200 arm only (the 304 carries nothing — /v1/certs is the guaranteed carrier).
+	// Both are "" on 304/err, and Observe("", …) is a no-op.
+	coord.Observe(res.CAID, res.SignerFP)
 }
 
 // RunWafRefresh runs the periodic WAF refresh forever. The first tick is jittered by

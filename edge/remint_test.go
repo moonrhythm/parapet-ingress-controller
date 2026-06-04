@@ -48,8 +48,8 @@ func TestObserveNoOps(t *testing.T) {
 	cp, _ := NewCpClient(srv.URL, "tok", nil)
 	coord.cp = cp
 
-	coord.Observe("")            // unknown target → no-op
-	coord.Observe("some-target") // live=="" (no cert held) → no-op
+	coord.Observe("", "")            // unknown target → no-op
+	coord.Observe("some-target", "") // live=="" (no cert held) → no-op
 	time.Sleep(20 * time.Millisecond)
 	if reqs != 0 {
 		t.Errorf("Observe must not mint when target/live unknown, got %d requests", reqs)
@@ -69,7 +69,7 @@ func TestObserveTriggersProactive(t *testing.T) {
 		t.Fatal("pre-minted cert has no ca_id")
 	}
 	// A DIFFERENT observed target must trigger a re-mint (request count rises).
-	coord.Observe("a-different-target")
+	coord.Observe("a-different-target", "")
 	waitFor(t, func() bool { return !coordInFlight(coord) && store.CAID() == live })
 	// (the fake CP always signs the same ca_id, so the edge stays at `live`; the point
 	// is that a mint WAS attempted — verified via the proactive breaker climbing.)
@@ -101,7 +101,7 @@ func TestReactiveBreaker(t *testing.T) {
 
 	// Edge already AT the target but the core keeps rejecting (after==target, no flip):
 	// this must NOT reset — re-minting the same ca_id can't fix a core-side reject.
-	coord.Observe(z) // lastTarget = z (== live; converged, no trigger)
+	coord.Observe(z, "") // lastTarget = z (== live; converged, no trigger)
 	coord.runOnce("reactive")
 	coord.mu.Lock()
 	stillClimbing := coord.reactiveNoFlip
