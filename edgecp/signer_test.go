@@ -154,6 +154,28 @@ func TestSignerSelfVerifyFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSignerBundleLen(t *testing.T) {
+	single, singleKey := mustGenerateCA(t)
+	sg, _, err := NewProvidedSigner(single, singleKey, time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sg.BundleLen() != 1 {
+		t.Errorf("single CA: BundleLen = %d, want 1", sg.BundleLen())
+	}
+
+	oldCert, oldKey := mustGenerateCA(t)
+	newCert, _ := mustGenerateCA(t)
+	bundle := append(append([]byte(nil), oldCert...), newCert...)
+	sg2, _, err := NewProvidedSignerActive(bundle, oldKey, fpOf(t, oldCert), time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sg2.BundleLen() != 2 {
+		t.Errorf("OLD++NEW overlap: BundleLen = %d, want 2", sg2.BundleLen())
+	}
+}
+
 func TestSignerBackCompatSingleCert(t *testing.T) {
 	certPEM, keyPEM := mustGenerateCA(t)
 	sg, warnings, err := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)

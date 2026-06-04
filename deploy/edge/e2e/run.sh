@@ -27,6 +27,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 WORK="$(mktemp -d)"
 CP_PORT=18443
+CP_METRICS_PORT=18187
 EDGE_PORT=18080
 EDGE_HTTP_PORT=18081
 UP_PORT=18090
@@ -67,6 +68,14 @@ gen_cert() { # name CN  -> name.key/name.crt signed by the CA, SAN=CN
 }
 gen_cert cp localhost      # control-plane HTTPS server cert
 gen_cert leaf "$DOMAIN"    # the cert the edge will fetch + serve for $DOMAIN
+
+# A dedicated edge CA (provided mode) so the CP loads a signer and exposes the
+# convergence metrics (parapet_edge_ca_signer_fingerprint) on its /metrics listener.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+  -keyout "$WORK/edge-ca.key" -out "$WORK/edge-ca.crt" -days 1 -subj "/CN=parapet-edge-ca" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign" \
+  -addext "extendedKeyUsage=clientAuth" 2>/dev/null
 
 # ---------------------------------------------------------------------------
 say "2. write static manifests (TLS Secret + global WAF ConfigMap) + tokens.json"
@@ -182,9 +191,11 @@ wait_for_port "$UP_PORT" upstream
 
 say "5. start the Go control plane (fs backend, WAF enabled)"
 KUBERNETES_BACKEND=fs KUBERNETES_FS="$WORK/manifests" \
-  CP_LISTEN=":$CP_PORT" CP_TLS_CERT="$WORK/cp.crt" CP_TLS_KEY="$WORK/cp.key" \
+  CP_LISTEN=":$CP_PORT" CP_METRICS_LISTEN="127.0.0.1:$CP_METRICS_PORT" \
+  CP_TLS_CERT="$WORK/cp.crt" CP_TLS_KEY="$WORK/cp.key" \
   CP_TOKENS_FILE="$WORK/tokens.json" WATCH_NAMESPACE="" \
   POD_NAMESPACE=default CP_WAF_ENABLED=true \
+  EDGE_CA_CERT="$WORK/edge-ca.crt" EDGE_CA_KEY="$WORK/edge-ca.key" \
   "$WORK/edge-controlplane" > "$WORK/cp.log" 2>&1 & PIDS+=($!)
 wait_for_port "$CP_PORT" "control plane"
 
@@ -276,5 +287,19 @@ if curl -sf --cacert "$WORK/ca.crt" --resolve "other.local:$EDGE_PORT:127.0.0.1"
   fail "unknown SNI unexpectedly validated against our CA"
 fi
 echo "  ✓ unknown SNI falls back to self-signed (not served the real cert)"
+
+# Convergence metrics: the CP exposes /metrics on a SEPARATE, unauthenticated
+# listener (no bearer token), and with a signer loaded it publishes the
+# signer-fingerprint series — so a scraper can detect which CA the CP signs under.
+# This guards against an unwired/zero-target CP showing a false-green convergence board.
+say "8. CP convergence /metrics (separate listener, signer fingerprint present)"
+wait_for_port "$CP_METRICS_PORT" "cp metrics"
+MET="$(curl -sS "http://127.0.0.1:$CP_METRICS_PORT/metrics")" \
+  || { cat "$WORK/cp.log" >&2; fail "curl CP /metrics failed"; }
+grep -q "parapet_edge_ca_signer_fingerprint{" <<<"$MET" \
+  || { grep parapet_edge <<<"$MET" >&2; fail "CP /metrics missing signer_fingerprint series"; }
+grep -qE "^parapet_edge_ca_signer_loaded 1$" <<<"$MET" \
+  || { grep signer_loaded <<<"$MET" >&2; fail "CP signer_loaded != 1"; }
+echo "  ✓ CP /metrics (tokenless) serves signer_fingerprint + signer_loaded=1"
 
 say "E2E PASSED"

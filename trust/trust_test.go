@@ -42,7 +42,7 @@ func TestManagerForwardOnlyAndFailStatic(t *testing.T) {
 	if m.ClientCAs() != nil {
 		t.Fatal("pool should be nil before first apply")
 	}
-	if err := m.apply(Bundle{Generation: 5, CAPEM: caPEM, CAID: "a"}); err != nil {
+	if _, err := m.apply(Bundle{Generation: 5, CAPEM: caPEM, CAID: "a"}); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
 	if m.Generation() != 5 || m.ClientCAs() == nil {
@@ -50,10 +50,10 @@ func TestManagerForwardOnlyAndFailStatic(t *testing.T) {
 	}
 
 	// Rollback (lower) and replay (equal) are rejected; the live pool is unchanged.
-	if err := m.apply(Bundle{Generation: 3, CAPEM: caPEM}); err == nil {
+	if _, err := m.apply(Bundle{Generation: 3, CAPEM: caPEM}); err == nil {
 		t.Error("rollback to lower generation must be rejected")
 	}
-	if err := m.apply(Bundle{Generation: 5, CAPEM: caPEM}); err == nil {
+	if _, err := m.apply(Bundle{Generation: 5, CAPEM: caPEM}); err == nil {
 		t.Error("replay of equal generation must be rejected")
 	}
 	if m.Generation() != 5 {
@@ -62,7 +62,7 @@ func TestManagerForwardOnlyAndFailStatic(t *testing.T) {
 
 	// Strict parse: a non-empty but cert-less ca_pem is rejected, last-good kept.
 	prev := m.ClientCAs()
-	if err := m.apply(Bundle{Generation: 6, CAPEM: []byte("garbage")}); err == nil {
+	if _, err := m.apply(Bundle{Generation: 6, CAPEM: []byte("garbage")}); err == nil {
 		t.Error("ca_pem with no certs must be rejected")
 	}
 	if m.Generation() != 5 || m.ClientCAs() != prev {
@@ -70,11 +70,39 @@ func TestManagerForwardOnlyAndFailStatic(t *testing.T) {
 	}
 
 	// A higher generation applies.
-	if err := m.apply(Bundle{Generation: 6, CAPEM: caPEM, CAID: "b"}); err != nil {
+	if _, err := m.apply(Bundle{Generation: 6, CAPEM: caPEM, CAID: "b"}); err != nil {
 		t.Fatalf("forward apply: %v", err)
 	}
 	if m.Generation() != 6 || m.CAID() != "b" {
 		t.Error("forward apply did not take")
+	}
+}
+
+// TestApplyResultEnum pins the typed applyResult each branch returns — the label fed
+// to metric.TrustApply. parse_rejected (a valid CERTIFICATE block with non-cert DER)
+// is otherwise unexercised; the others back the rejection/apply metric counts.
+func TestApplyResultEnum(t *testing.T) {
+	caPEM, _ := caPEMFor(t)
+	m := NewManager()
+
+	if res, err := m.apply(Bundle{Generation: 5, CAPEM: caPEM, CAID: "a"}); err != nil || res != resultApplied {
+		t.Fatalf("apply: res=%v err=%v, want resultApplied", res, err)
+	}
+	if res, err := m.apply(Bundle{Generation: 5, CAPEM: caPEM}); err == nil || res != resultRollbackRejected {
+		t.Errorf("replay: res=%v err=%v, want resultRollbackRejected", res, err)
+	}
+	// No CERTIFICATE block at all → empty_rejected.
+	if res, err := m.apply(Bundle{Generation: 6, CAPEM: []byte("garbage")}); err == nil || res != resultEmptyRejected {
+		t.Errorf("no certs: res=%v err=%v, want resultEmptyRejected", res, err)
+	}
+	// A well-formed CERTIFICATE block whose DER body is not a cert → parse_rejected.
+	badDER := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte{0x30, 0x03, 0x01, 0x02, 0x03}})
+	if res, err := m.apply(Bundle{Generation: 6, CAPEM: badDER}); err == nil || res != resultParseRejected {
+		t.Errorf("bad DER: res=%v err=%v, want resultParseRejected", res, err)
+	}
+	// Every rejection kept last-good.
+	if m.Generation() != 5 || m.CAID() != "a" {
+		t.Errorf("rejections must keep last-good, got gen=%d ca_id=%q", m.Generation(), m.CAID())
 	}
 }
 
@@ -107,7 +135,7 @@ func TestTrustBundleOverTLSEndToEnd(t *testing.T) {
 	}
 
 	m := NewManager()
-	if err := m.apply(b); err != nil {
+	if _, err := m.apply(b); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 

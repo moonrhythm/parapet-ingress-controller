@@ -524,11 +524,84 @@ CP recovery SLO. **CP HA (≥2 replicas) is REQUIRED.**
 | **Renewal failure inside the renew-before margin lets a leaf expire** | An expired client cert hard-fails the upstream handshake (502, same symptom as a CA drop). Guard: renew-before-fraction strictly in (0,1) with renew-instant leaving ≥ several `EDGE_REFRESH_INTERVAL` of slack, plus backoff+jitter retries; CP-outage budget = `TTL` × renew-before-fraction must exceed the CP recovery SLO. |
 | **Bootstrap Job race / re-run / silent fail** | The `resourceVersion`-CAS linearizes concurrent Job pods (loser adopts); the anti-regeneration guard makes a re-blank a HARD ANOMALY (never regenerate); exit non-zero + re-GET-verify before exit 0; alerts on `kube_job_failed`, absence-of-populated-CA-after-deadline, and `parapet_edge_ca_generated_total > 1`. |
 
+## Convergence metrics (observability)
+
+The rotation is observable from Prometheus across all three planes. Every series is
+labelled (or joined) by **`ca_id`** — the order-independent fingerprint of a CA *set*
+(`caid.FromPEM`/`FromDER`, byte-identical wherever it is computed). All are
+pure-instrumentation Prometheus metrics on the shared `parapet` registry / `:9187`
+`/metrics` (the control plane adds a **separate** `:9187` listener; see below).
+
+| Metric | Plane | Type | Labels | Meaning |
+|---|---|---|---|---|
+| `parapet_edge_ca_target_ca_id` | CP | gauge=1 | `ca_id` | **The convergence target** — the `ca_id` the serving CP signs under; what the fleet should reach. |
+| `parapet_edge_ca_signer_fingerprint` | CP | gauge=1 | `ca_id` | The CA this CP replica signs under (== target on a healthy fleet). |
+| `parapet_edge_ca_signer_generation` | CP | gauge=gen | `ca_id` | Monotonic generation of the serving signer; a lagging replica shows a stale value. |
+| `parapet_edge_ca_bundle_certs` | CP | gauge=n | `ca_id` | CA count in the served bundle: **2 during `OLD++NEW` overlap**, else 1. |
+| `parapet_edge_ca_signer_loaded` | CP | gauge 0/1 | — | 1 once a signer is loaded; 0 = CP up but not yet provisioned (vs scrape-missing). |
+| `parapet_trust_bundle_generation` | core | gauge=gen | `ca_id` | The `ca_id`/generation the core currently trusts. |
+| `parapet_trust_bundle_age_seconds` | core | gaugefunc | — | Seconds since the core last applied a bundle; rising fleet-wide = convergence stalled. |
+| `parapet_trust_apply_total` | core | counter | `result` | `applied`/`rollback_rejected`/`parse_rejected`/`empty_rejected` — `rollback_rejected` is the anti-replay signal. |
+| `parapet_trust_fetch_failed_total` | core | counter | — | Couldn't reach/decode the CP (vs reached-but-rejected). |
+| `parapet_trust_source_total` | core | counter | `source` | Per-request trust decision: `cidr`/`verified-chain`/`none`. |
+| `parapet_edge_clientcert_ca_id` | edge | gauge=1 | `ca_id` | CA set that issued the edge's **live** client leaf (lags the target until the edge re-mints). |
+| `parapet_edge_clientcert_not_after_seconds` | edge | gauge=unix | `ca_id` | Expiry of the edge's live leaf — an edge stuck on OLD with imminent expiry is the danger case. |
+| `parapet_edge_clientcert_loaded` | edge | gauge 0/1 | — | 1 once the edge holds a usable client cert. |
+| `parapet_edge_clientcert_remint_total` | edge | counter | `result` | `ok`/`keygen_fail`/`csr_fail`/`fetch_fail`/`marshal_fail`/`store_fail` — is the re-mint loop succeeding. |
+
+**Convergence model — all three planes reach the CP target `ca_id`.** Because `Sign()`
+appends the full served bundle (`OLD++NEW` during overlap) to every leaf, the edge's
+`ca_id` (computed over its chain's CA blocks) equals the CP/core `ca_id` *once the edge
+re-mints*. So convergence is a single predicate against the self-describing target
+series — no hardcoded value, no recording rule:
+
+```promql
+# CP target ca_id (one series); compare every plane to its label value.
+parapet_edge_ca_target_ca_id                      # → {ca_id="<TARGET>"} 1
+# Edges NOT yet converged (still on the old CA — the re-mint lag indicator):
+count(parapet_edge_clientcert_ca_id) by (instance)
+  unless on() group_left() (parapet_edge_ca_target_ca_id * 0
+    + on(ca_id) group_right() parapet_edge_clientcert_ca_id)
+```
+
+The edge lags by design (it converges when it re-mints); a non-zero lagging count is
+*expected* during a rotation and must drain before OLD is dropped (the sub-PR 4/5
+interlock gates the destructive drop on exactly this).
+
+**Operational caveats (read before writing alerts):**
+- **`ca_id` is a set fingerprint, never key material** (public-cert SHA-256). Safe as a label.
+- **Aggregate `ca_id` vecs with `max by (instance)`, never `sum`** — mid-rotation a replica
+  transiently emits both the overlap and a single-CA `ca_id`, so `sum` double-counts.
+- **Cardinality is bounded, not free.** Each vec is `Reset()`-then-`Set()` so exactly one
+  live series exists *per process*; across TSDB retention the distinct `ca_id` count is
+  bounded by `rotation_rate × retention × 3` (overlap), not unbounded. There is a
+  sub-microsecond `Reset→Set` absence window on each swap — a known benign flap; don't alert on it.
+- **`source=verified-chain` undercounts** dual-path edges: `cidr` takes precedence in the
+  per-request decision, so an edge that *also* matches a trusted CIDR counts as `cidr`. A
+  `verified-chain` flatline *after* a rotation is still the earliest convergence-failure signal.
+- **Pod identity comes only from scrape relabeling** (kube-SD `job`/`pod` labels), never an
+  in-process label. The `count(... ) == count(up{job})` style predicate depends on the
+  deploy wiring those labels.
+
+**Control-plane `/metrics` is a new, unauthenticated `:9187` listener** (`CP_METRICS_LISTEN`,
+default `:9187`, set `""` to disable). It is **separate** from the token-gated API mux, so a
+scraper reaches it without the bearer token. The payload is non-secret (fingerprints,
+counters, generations — no key material), but rotation/generation transitions are observable
+recon, so **a NetworkPolicy must restrict it to the scraper** (shipped in
+`deploy/edge/controlplane.yaml`). The listener starts **only in the serving process** — the
+run-once bootstrap/rotate Jobs `os.Exit` before it. A failed metrics bind is fatal (loud).
+
+**Run-once Job observability is logs, not scraped counters.** `EnsureCA`/`RotateCA` run in
+Jobs that `os.Exit` before any scrape, so CA-generated / unexpected-empty events are
+**structured `slog` lines + non-zero exit codes** (alert via `kube_job_failed`), deliberately
+not Prometheus counters (a Pushgateway would be a new failure domain).
+
 ## Configuration
 
 | Variable | Where | Default | Meaning |
 |---|---|---|---|
 | `TRUST_PROXY` | core | `cloudflare` | **Unchanged** — the `cidrTrust` OR-branch. Never add edge egress CIDRs here. |
+| `CP_METRICS_LISTEN` | CP | `:9187` | Separate unauthenticated `/metrics` listener (serving process only); `""` disables. Restrict via NetworkPolicy. |
 | `EDGE_TRUST_CP_ENDPOINT` | core | `""` (off) | HTTPS base URL of the CP. Set ⇒ the core pulls `GET /v1/trust-bundle`. **MUST be `https://`** — non-https is fatal, no plaintext analog ever. |
 | `EDGE_TRUST_CP_CA` | core | `""` | PEM of the CA that signs the **CP server** cert → `RootCAs`. **Mandatory + fatal** if missing/empty/unparseable; no system-roots fallback, no skip-verify. Dedicated single-purpose CA; distinct from the edge CA in `ca_pem`. |
 | `EDGE_TRUST_CP_WATCH_TIMEOUT` / `_POLL_INTERVAL` | core/CP | `30s` / `5m` | Long-poll ceiling; safety-net poll. The poll now bounds **CA-rotation** propagation only (not per-request revocation), so it may lengthen; keep the long-poll for fast rotation convergence. |

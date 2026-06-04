@@ -16,35 +16,44 @@ import (
 // the store. Fail-static: on any error the prior cert is kept. The key is generated
 // here and never written to disk — only the public-key CSR and the returned chain
 // transit. The CP stamps the SAN from the token identity, so the CSR carries none.
-func RefreshEdgeCertOnce(cp *CpClient, store *ClientCertStore) {
+// It returns (and counts) the outcome so the re-mint loop's health is observable; the
+// returned string is the parapet_edge_clientcert_remint_total result label.
+func RefreshEdgeCertOnce(cp *CpClient, store *ClientCertStore) string {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		slog.Warn("edge: client keygen failed; keeping cached cert", "error", err)
-		return
+		remint("keygen_fail")
+		return "keygen_fail"
 	}
 	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
 	if err != nil {
 		slog.Warn("edge: CSR build failed; keeping cached cert", "error", err)
-		return
+		remint("csr_fail")
+		return "csr_fail"
 	}
 	csrPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
 
 	res, err := cp.FetchEdgeCert(csrPEM)
 	if err != nil {
 		slog.Warn("edge: data-plane cert fetch failed; keeping cached cert", "error", err)
-		return
+		remint("fetch_fail")
+		return "fetch_fail"
 	}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		slog.Warn("edge: key marshal failed; keeping cached cert", "error", err)
-		return
+		remint("marshal_fail")
+		return "marshal_fail"
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	if err := store.Update(res.ChainPEM, keyPEM); err != nil {
 		slog.Warn("edge: data-plane cert unusable; keeping cached cert", "error", err)
-		return
+		remint("store_fail")
+		return "store_fail"
 	}
 	slog.Info("edge: data-plane client cert updated", "not_after", res.NotAfter, "serial", res.Serial)
+	remint("ok")
+	return "ok"
 }
 
 // RunEdgeCertRefresh refreshes the data-plane client cert on a timer. The first

@@ -112,7 +112,7 @@ func pullInto(t *testing.T, c *Client, m *Manager) {
 	if err != nil || unchanged {
 		t.Fatalf("trust fetch: err=%v unchanged=%v", err, unchanged)
 	}
-	if err := m.apply(b); err != nil {
+	if _, err := m.apply(b); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
 }

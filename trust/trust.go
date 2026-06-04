@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/moonrhythm/parapet-ingress-controller/metric"
 )
 
 const maxBundleBody = 4 << 20
@@ -154,26 +156,54 @@ func (m *Manager) ServerTLSConfig(
 	return base
 }
 
+// applyResult classifies an apply attempt so the caller can emit the right metric
+// (the rejection reasons are otherwise indistinguishable at a single error return).
+type applyResult int
+
+const (
+	resultApplied applyResult = iota
+	resultParseRejected
+	resultEmptyRejected
+	resultRollbackRejected
+)
+
+func (r applyResult) label() string {
+	switch r {
+	case resultApplied:
+		return "applied"
+	case resultParseRejected:
+		return "parse_rejected"
+	case resultEmptyRejected:
+		return "empty_rejected"
+	case resultRollbackRejected:
+		return "rollback_rejected"
+	default:
+		return "unknown"
+	}
+}
+
 // apply validate-then-swaps a bundle: strict all-or-nothing PEM parse (a non-empty
 // input that yields fewer certs than CERTIFICATE blocks is rejected; never a partial
 // AppendCertsFromPEM), forward-only (reject generation <= current), then atomic swap.
-func (m *Manager) apply(b Bundle) error {
+// It returns a typed result so Run can count the exact reason (rollback_rejected is the
+// anti-replay security signal, kept distinct). Called only from the single Run goroutine.
+func (m *Manager) apply(b Bundle) (applyResult, error) {
 	pool, n, err := strictPool(b.CAPEM)
 	if err != nil {
-		return err
+		return resultParseRejected, err
 	}
 	if n == 0 {
-		return fmt.Errorf("trust bundle ca_pem has no certificates")
+		return resultEmptyRejected, fmt.Errorf("trust bundle ca_pem has no certificates")
 	}
 	cur := m.gen.Load()
 	if cur != 0 && b.Generation <= cur {
-		return fmt.Errorf("rollback: bundle generation %d <= current %d", b.Generation, cur)
+		return resultRollbackRejected, fmt.Errorf("rollback: bundle generation %d <= current %d", b.Generation, cur)
 	}
 	m.clientCAs.Store(pool)
 	m.gen.Store(b.Generation)
 	caID := b.CAID
 	m.caID.Store(&caID)
-	return nil
+	return resultApplied, nil
 }
 
 // strictPool parses every CERTIFICATE block and fails if any block is malformed, so
@@ -219,6 +249,7 @@ func (m *Manager) Run(ctx context.Context, c *Client, pollInterval time.Duration
 		first = false
 		switch {
 		case err != nil:
+			metric.TrustFetchFailed()
 			slog.Warn("core: trust-bundle fetch failed; keeping last-good", "error", err)
 			select {
 			case <-ctx.Done():
@@ -233,9 +264,12 @@ func (m *Manager) Run(ctx context.Context, c *Client, pollInterval time.Duration
 			backoff = time.Second
 			continue
 		default:
-			if err := m.apply(b); err != nil {
+			res, err := m.apply(b)
+			metric.TrustApply(res.label())
+			if err != nil {
 				slog.Warn("core: trust-bundle rejected; keeping last-good", "error", err)
 			} else {
+				metric.TrustBundleApplied(b.CAID, b.Generation)
 				slog.Info("core: edge trust bundle applied", "generation", b.Generation, "ca_id", b.CAID)
 			}
 			backoff = time.Second
