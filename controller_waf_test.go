@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -277,6 +278,51 @@ rules:
 	ctrl.reloadWAFDebounced()
 	assert.NotEqual(t, fp1, ctrl.globalWAFFingerprint, "changed global input advances the fingerprint")
 	assert.Equal(t, []string{"block-bots"}, ctrl.globalWAF.Rules())
+}
+
+func TestReloadWAF_ConcurrentReloadsRaceFree(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newWAFController()
+
+	// Seed a global ruleset plus several zones so each pass read-modify-writes
+	// both globalWAFFingerprint (string) and the zoneFingerprints map.
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+rules:
+  - id: block-scanners
+    expression: request.user_agent.contains("sqlmap")
+    action: block
+`))
+	for _, z := range []string{"acme", "beta", "gamma", "delta"} {
+		ctrl.watchedConfigMaps.Store("cust/"+z, wafCM("cust", z, wafRoleZone, `
+rules:
+  - id: block-admin
+    expression: request.path.startsWith("/admin")
+    action: block
+`))
+	}
+
+	// The debounce does not guarantee single-flight execution, so two
+	// reloadWAFDebounced passes can overlap. Drive that directly: without
+	// wafReloadMu this trips `go test -race` on globalWAFFingerprint /
+	// zoneFingerprints (and can fatal on a concurrent map read+write).
+	const workers = 6
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				ctrl.reloadWAFDebounced()
+			}
+		}()
+	}
+	wg.Wait()
+
+	// State stays consistent after the concurrent storm.
+	assert.Equal(t, []string{"block-scanners"}, ctrl.globalWAF.Rules())
+	require.NotNil(t, ctrl.LookupZone("cust/acme"))
+	require.NotNil(t, ctrl.LookupZone("cust/delta"))
 }
 
 func TestReloadWAF_DisabledIsNoop(t *testing.T) {

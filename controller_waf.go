@@ -117,10 +117,14 @@ func (ctrl *Controller) watchConfigMaps(ctx context.Context) {
 	watchFn := func(ctx context.Context, namespace string) (watch.Interface, error) {
 		return k8s.WatchConfigMaps(ctx, namespace, wafLabelKey)
 	}
-	watchResource(ctx, ctrl.watchNamespace, "configmaps", watchFn,
+	listFn := func(ctx context.Context, namespace string) ([]v1.ConfigMap, error) {
+		return k8s.GetConfigMaps(ctx, namespace, wafLabelKey)
+	}
+	watchResource(ctx, ctrl.watchNamespace, "configmaps", watchFn, listFn,
 		&ctrl.watchedConfigMaps,
 		func(_ *v1.ConfigMap) { ctrl.reloadWAF() },
 		func(_ *v1.ConfigMap) { ctrl.reloadWAF() },
+		ctrl.reloadWAF,
 	)
 }
 
@@ -137,6 +141,12 @@ func (ctrl *Controller) reloadWAFDebounced() {
 		return
 	}
 	slog.Info("reload waf")
+
+	// Serialize the whole pass: the debounce can fire two reloadWAFDebounced
+	// goroutines concurrently (see wafReloadMu), and the fingerprint string + map
+	// below are a read-modify-write that must be atomic across the pass.
+	ctrl.wafReloadMu.Lock()
+	defer ctrl.wafReloadMu.Unlock()
 
 	defer func() {
 		if err := recover(); err != nil {

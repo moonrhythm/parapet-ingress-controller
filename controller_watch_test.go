@@ -28,9 +28,11 @@ func TestWatchResource(t *testing.T) {
 	go watchResource[v1.Service](
 		context.Background(), "", "services",
 		func(context.Context, string) (watch.Interface, error) { return w, nil },
+		func(context.Context, string) ([]v1.Service, error) { return nil, nil },
 		&store,
 		func(_ *v1.Service) { upserts.Add(1) },
 		func(_ *v1.Service) { deletes.Add(1) },
+		func() {},
 	)
 
 	svc := &v1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "web"}}
@@ -57,4 +59,49 @@ func TestWatchResource(t *testing.T) {
 	// the ignored Pod event never produced a callback or store entry
 	assert.Equal(t, int32(1), upserts.Load())
 	assert.Equal(t, int32(1), deletes.Load())
+}
+
+// When a watch ends, watchResource relists and reconciles the store before
+// reconnecting. This recovers from a Deleted event dropped in the watch gap: the
+// stale store entry (which would otherwise route traffic to a vanished backend
+// forever) is removed, and onResync fires to rebuild routing.
+func TestWatchResourceResyncReconcilesStore(t *testing.T) {
+	var store sync.Map
+	// "default/stale" is in the store but NOT in the authoritative list — i.e. a
+	// missed Deleted. "default/web" is the live object the list returns.
+	store.Store("default/stale", &v1.Service{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "stale"}})
+
+	listFn := func(context.Context, string) ([]v1.Service, error) {
+		return []v1.Service{
+			{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "web"}},
+		}, nil
+	}
+
+	// First watch hands back an already-closed channel so the event loop exits
+	// immediately and triggers the resync; subsequent watches block forever so the
+	// resync runs exactly once.
+	var calls atomic.Int32
+	watchFn := func(context.Context, string) (watch.Interface, error) {
+		if calls.Add(1) == 1 {
+			closed := make(chan watch.Event)
+			close(closed)
+			return &fakeWatcher{ch: closed}, nil
+		}
+		return &fakeWatcher{ch: make(chan watch.Event)}, nil
+	}
+
+	var resyncs atomic.Int32
+	go watchResource[v1.Service](
+		context.Background(), "", "services",
+		watchFn, listFn, &store,
+		func(*v1.Service) {}, func(*v1.Service) {},
+		func() { resyncs.Add(1) },
+	)
+
+	assert.Eventually(t, func() bool {
+		_, staleOK := store.Load("default/stale")
+		_, webOK := store.Load("default/web")
+		return !staleOK && webOK && resyncs.Load() >= 1
+	}, 2*time.Second, time.Millisecond,
+		"resync must drop the stale entry, keep the listed one, and fire onResync")
 }

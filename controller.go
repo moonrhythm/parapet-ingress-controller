@@ -75,8 +75,14 @@ type Controller struct {
 
 	// WAF rule-input fingerprints from the last reload, used to skip recompiling
 	// CEL rulesets whose effective input (the sorted concatenated rule YAML) is
-	// byte-for-byte unchanged. Only ever read/written from reloadWAFDebounced,
-	// which the debounce serializes, so they need no lock.
+	// byte-for-byte unchanged. These are read/written only from reloadWAFDebounced,
+	// but the debounce does NOT guarantee single-flight execution (a timer-fired
+	// run executes in its own goroutine without the debounce lock, and an
+	// already-fired Timer.Stop is a no-op), so two reloadWAFDebounced passes can
+	// overlap under rapid ConfigMap churn when one pass outlives the debounce
+	// window. wafReloadMu serializes the whole pass so the fingerprint string and
+	// map are never raced (a concurrent map read/write is an unrecoverable fatal).
+	wafReloadMu          sync.Mutex
 	globalWAFFingerprint string
 	zoneFingerprints     map[string]string
 
@@ -195,6 +201,12 @@ func (ctrl *Controller) firstReload() {
 // metav1.Object constraint gives access to the object's namespace and name.
 // onDelete receives the deleted object so a caller can reload incrementally
 // (e.g. drop just that one host) instead of rebuilding from the whole store.
+//
+// On every watch re-establishment it relists via listFn and reconciles store
+// (resyncStore), then runs onResync — recovering any event dropped in the gap
+// between one watch closing and the next opening (the bare Watch carries no
+// resourceVersion and never replays history, so a missed Deleted would otherwise
+// leave a stale entry — and stale route — forever).
 func watchResource[T any, PT interface {
 	*T
 	metav1.Object
@@ -202,9 +214,11 @@ func watchResource[T any, PT interface {
 	ctx context.Context,
 	namespace, name string,
 	watchFn func(ctx context.Context, namespace string) (watch.Interface, error),
+	listFn func(ctx context.Context, namespace string) ([]T, error),
 	store *sync.Map,
 	onUpsert func(obj PT),
 	onDelete func(obj PT),
+	onResync func(),
 ) {
 	for {
 		w, err := watchFn(ctx, namespace)
@@ -235,14 +249,69 @@ func watchResource[T any, PT interface {
 
 		w.Stop()
 		slog.Info("restart " + name + " watcher")
+
+		// The watch just ended; reconcile against the authoritative list before
+		// reconnecting so anything dropped in the gap (e.g. a 410 Gone / watch-cache
+		// compaction) self-heals instead of lingering forever.
+		resyncStore[T, PT](ctx, namespace, name, listFn, store, onResync)
+	}
+}
+
+// resyncStore relists the authoritative set via listFn and reconciles store to
+// it: every listed object is stored, and any store key absent from the list is
+// deleted (a missed Deleted). It then runs onResync to rebuild routing from the
+// reconciled store. This needs no extra locking: each store is written only by
+// its single watch goroutine, and resyncStore runs in that goroutine while the
+// watch is stopped.
+func resyncStore[T any, PT interface {
+	*T
+	metav1.Object
+}](
+	ctx context.Context,
+	namespace, name string,
+	listFn func(ctx context.Context, namespace string) ([]T, error),
+	store *sync.Map,
+	onResync func(),
+) {
+	if listFn == nil {
+		return
+	}
+	items, err := listFn(ctx, namespace)
+	if err != nil {
+		slog.Error("can not relist "+name+" for resync", "error", err)
+		return
+	}
+
+	present := make(map[string]struct{}, len(items))
+	for i := range items {
+		obj := PT(&items[i])
+		key := obj.GetNamespace() + "/" + obj.GetName()
+		present[key] = struct{}{}
+		store.Store(key, obj)
+	}
+
+	var removed int
+	store.Range(func(k, _ any) bool {
+		key := k.(string)
+		if _, ok := present[key]; !ok {
+			store.Delete(key)
+			removed++
+		}
+		return true
+	})
+
+	slog.Info("resync "+name, "listed", len(items), "removed_stale", removed)
+	if onResync != nil {
+		onResync()
 	}
 }
 
 func (ctrl *Controller) watchIngresses(ctx context.Context) {
-	watchResource(ctx, ctrl.watchNamespace, "ingresses", k8s.WatchIngresses,
+	watchResource(ctx, ctrl.watchNamespace, "ingresses", k8s.WatchIngresses, k8s.GetIngresses,
 		&ctrl.watchedIngresses,
 		func(_ *networking.Ingress) { ctrl.reloadIngress() },
 		func(_ *networking.Ingress) { ctrl.reloadIngress() },
+		ctrl.reloadIngress,
 	)
 }
 
@@ -253,18 +322,20 @@ func (ctrl *Controller) watchServices(ctx context.Context) {
 		ctrl.reloadService()
 		ctrl.reloadIngress()
 	}
-	watchResource(ctx, ctrl.watchNamespace, "services", k8s.WatchServices,
+	watchResource(ctx, ctrl.watchNamespace, "services", k8s.WatchServices, k8s.GetServices,
 		&ctrl.watchedServices,
 		func(_ *v1.Service) { reload() },
 		func(_ *v1.Service) { reload() },
+		reload,
 	)
 }
 
 func (ctrl *Controller) watchSecrets(ctx context.Context) {
-	watchResource(ctx, ctrl.watchNamespace, "secrets", k8s.WatchSecrets,
+	watchResource(ctx, ctrl.watchNamespace, "secrets", k8s.WatchSecrets, k8s.GetSecrets,
 		&ctrl.watchedSecrets,
 		func(_ *v1.Secret) { ctrl.reloadSecret() },
 		func(_ *v1.Secret) { ctrl.reloadSecret() },
+		ctrl.reloadSecret,
 	)
 }
 
@@ -274,10 +345,12 @@ func (ctrl *Controller) watchEndpoints(ctx context.Context) {
 	// the whole endpoint table. The full rebuild (reloadEndpointDebounced) is
 	// reserved for the initial sync / resync in firstReload, where the entire
 	// set is (re)listed.
-	watchResource(ctx, ctrl.watchNamespace, "endpoints", k8s.WatchEndpoints,
+	watchResource(ctx, ctrl.watchNamespace, "endpoints", k8s.WatchEndpoints, k8s.GetEndpoints,
 		&ctrl.watchedEndpoints,
 		ctrl.reloadSingleEndpoint,
 		ctrl.deleteSingleEndpoint,
+		// resync: rebuild the full host-route table from the reconciled store.
+		ctrl.reloadEndpointDebounced,
 	)
 }
 
