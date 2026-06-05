@@ -244,7 +244,7 @@ func main() {
 	// to it — in addition to the static TRUST_PROXY CIDRs. See EDGE-AUTOTRUST.md.
 	var trustMgr *trust.Manager
 	if ep := config.String("EDGE_TRUST_CP_ENDPOINT"); ep != "" {
-		mode, err := trust.ClassifyEndpoint(ep, config.Bool("EDGE_TRUST_CP_INSECURE_HTTP"))
+		mode, err := trust.ClassifyEndpoint(ep)
 		if err != nil {
 			slog.Error("EDGE_TRUST_CP_ENDPOINT rejected", "endpoint", ep, "error", err)
 			os.Exit(1)
@@ -253,24 +253,36 @@ func main() {
 		var tc *trust.Client
 		switch mode {
 		case trust.ModeHTTPS:
-			caPath := config.String("EDGE_TRUST_CP_CA")
-			caPEM, err := os.ReadFile(caPath)
-			if err != nil {
-				slog.Error("EDGE_TRUST_CP_CA must be set and readable — it is the mandatory server-TLS anchor that makes the tokenless trust channel safe", "path", caPath, "error", err)
-				os.Exit(1)
-			}
-			tc, err = trust.NewClient(ep, caPEM)
-			if err != nil {
-				slog.Error("edge trust client", "error", err)
-				os.Exit(1)
+			if caPath := config.String("EDGE_TRUST_CP_CA"); caPath != "" {
+				// Pinned CA: trust only this CA for the CP server cert (tightest).
+				caPEM, err := os.ReadFile(caPath)
+				if err != nil {
+					// Explicitly set but unreadable is a misconfiguration — don't silently
+					// downgrade to system roots; stay fatal.
+					slog.Error("EDGE_TRUST_CP_CA is set but not readable", "path", caPath, "error", err)
+					os.Exit(1)
+				}
+				tc, err = trust.NewClient(ep, caPEM)
+				if err != nil {
+					slog.Error("edge trust client", "error", err)
+					os.Exit(1)
+				}
+			} else {
+				// No pinned CA: verify the CP server cert against the host's system trust
+				// store (the image ships ca-certificates). Real verified TLS with hostname
+				// checks — weaker than pinning (any system-trusted CA could impersonate the
+				// CP), so set EDGE_TRUST_CP_CA for the tightest trust on this tokenless
+				// channel.
+				slog.Info("edge trust: EDGE_TRUST_CP_CA unset — verifying the CP server cert against the system trust store", "endpoint", ep)
+				tc = trust.NewSystemRootsClient(ep)
 			}
 		case trust.ModeInsecureHTTP:
-			// Opt-in plaintext: only safe when the transport already provides mutual
-			// auth + encryption. The in-process server-TLS integrity guarantee is gone,
-			// so say so loudly (mirrors the CP's own plaintext-mode warning).
-			slog.Warn("edge trust: PLAINTEXT trust channel enabled (EDGE_TRUST_CP_INSECURE_HTTP) — the "+
-				"tokenless trust-bundle has NO on-wire integrity; a MITM can inject a forged CA and forge "+
-				"the ENTIRE edge fleet (spoof X-Forwarded-For, bypass WAF/rate-limits). Only run this on a "+
+			// http:// endpoint: plaintext, no in-process integrity guarantee, so say so
+			// loudly (mirrors the CP's own plaintext-mode warning). Only safe when the
+			// transport already provides mutual auth + encryption.
+			slog.Warn("edge trust: PLAINTEXT trust channel (http:// endpoint) — the tokenless "+
+				"trust-bundle has NO on-wire integrity; a MITM can inject a forged CA and forge the "+
+				"ENTIRE edge fleet (spoof X-Forwarded-For, bypass WAF/rate-limits). Only run this on a "+
 				"transport that already provides mutual auth + encryption (mesh/tunnel/VPC).", "endpoint", ep)
 			tc = trust.NewInsecureHTTPClient(ep)
 		}
