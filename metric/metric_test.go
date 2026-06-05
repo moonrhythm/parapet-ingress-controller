@@ -20,8 +20,10 @@ func TestHostGetMCaching(t *testing.T) {
 	// differing on either field yields a distinct handle
 	c := _host.getM("cache-test.example.com", "websocket")
 	d := _host.getM("other.example.com", "")
+	e := _host.getM("cache-test.example.com", "sse")
 	assert.NotSame(t, a, c)
 	assert.NotSame(t, a, d)
+	assert.NotSame(t, a, e)
 }
 
 func TestMethodLabel(t *testing.T) {
