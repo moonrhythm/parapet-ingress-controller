@@ -71,23 +71,28 @@ not a source IP.
    live `GetClientCertificate` callback. A client cert can only ride TLS, so edge
    trust is conferred **only on `:443`**; plaintext `:80` is never mTLS-trusted.
 
-4. **The core verifies it.** The `:443` `tls.Config` gets
-   `ClientAuth = tls.VerifyClientCertIfGiven` (the cert is optional — Cloudflare /
-   browsers present none) and a `ClientCAs` pool sourced from the trust-bundle
-   `ca_pem`. The stdlib populates `r.TLS.VerifiedChains` only after cryptographic
-   verification against `ClientCAs`; a presented-but-unverifiable cert aborts the
-   handshake.
+4. **The core verifies it — per request, not at the TLS layer.** The `:443`
+   `tls.Config` uses `ClientAuth = tls.RequestClientCert`: it *requests* a client cert
+   but **never verifies it during the handshake**, so a non-edge client cert never
+   aborts the connection. This is what lets the edge **and** another mTLS client that
+   hits `:443` directly (e.g. **Cloudflare Authenticated Origin Pulls**, whose cert
+   chains to Cloudflare's CA, not the edge CA) coexist on the same port — Cloudflare's
+   cert would otherwise fail `VerifyClientCertIfGiven` and break every Cloudflare
+   request. Verification is instead done per request by `trust.Manager.VerifyClientCert`
+   against the live edge-CA pool (`ca_pem`), with a per-generation memo cache.
 
 5. **The per-request trust predicate** (installed once; see [Core wiring](#core-wiring)):
 
    ```
    trust(r) := cidrTrust(r)                         // existing TRUST_PROXY (e.g. cloudflare)
-            OR len(r.TLS.VerifiedChains) > 0        // a chain cryptographically verified to the edge CA
+            OR trustMgr.VerifyClientCert(r.TLS)     // client cert chains to the edge CA (verified here)
    ```
 
-   The edge CA signs nothing but edge leaves, so a verified chain **is** the trust
-   grant — a single non-empty check, no SAN lookup, no allow-set, no operator-asserted
-   string set in the per-request path.
+   The edge CA signs nothing but edge leaves, so a chaining cert **is** the trust
+   grant — no SAN lookup, no allow-set, no operator-asserted string set in the
+   per-request path. A cert that doesn't chain (Cloudflare AOP, a browser, an attacker)
+   simply returns false and falls through to the CIDR branch; the handshake already
+   completed.
 
 ### Single source of truth (onboard in one place); the SAN is not load-bearing
 
@@ -139,18 +144,20 @@ Install **one** closure, assigned to **both** servers' `TrustProxy`:
 
 ```go
 trustProxy = func(r *http.Request) bool {
-    if cidrTrust != nil && cidrTrust(r) { return true }               // metric: cidr
-    if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 { return false } // metric: none / not-:443
-    return true                                                        // verified chain to the edge CA == trust
+    if cidrTrust != nil && cidrTrust(r) { return true }   // metric: cidr
+    if trustMgr.VerifyClientCert(r.TLS) { return true }   // client cert chains to the edge CA
+    return false                                          // metric: none (incl. :80, no cert, Cloudflare AOP)
 }
 ```
 
-`sanAllowed`, the `requireSAN` branch, and `trustPol.Load()` are gone. Keep the `:80`
-`r.TLS == nil` short-circuit (CIDR-only on plaintext) and the `GetConfigForClient`
-hot-swap (`c.ClientCAs = clientCAs.Load()`, fresh per handshake, never nil) +
-startup self-test (asserts `GetCertificate` + `ClientCAs` +
-`ClientAuth == VerifyClientCertIfGiven`) **verbatim**. Only the *feed* into
-`clientCAs` changes; trust no longer reads any per-request map.
+`sanAllowed`, the `requireSAN` branch, and `trustPol.Load()` are gone. `:443` uses
+`ClientAuth = tls.RequestClientCert` (request-but-never-verify) so a non-edge client
+cert (Cloudflare Authenticated Origin Pulls) can't abort the handshake; the edge-CA
+chain check is done per request by `VerifyClientCert` (nil `r.TLS` / `:80` ⇒ false,
+i.e. CIDR-only on plaintext). The pool is no longer fed into the `tls.Config`'s
+`ClientCAs`; it lives in the manager for the per-request verify (memoized by leaf
+fingerprint per generation). Only the *feed* into the pool changes; trust still reads
+no per-request map.
 
 ### The trust pull (tokenless CP client)
 

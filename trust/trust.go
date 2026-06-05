@@ -7,6 +7,7 @@ package trust
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -166,8 +168,8 @@ func (c *Client) Fetch(sinceGen uint64, watch bool) (b Bundle, unchanged bool, e
 	}
 }
 
-// Manager holds the live edge-CA pool the core's :443 GetConfigForClient reads per
-// handshake, hot-swapped from the CP bundle with strict-parse + forward-only +
+// Manager holds the live edge-CA pool the core's :443 VerifyClientCert checks per
+// request, hot-swapped from the CP bundle with strict-parse + forward-only +
 // fail-static (a bad/rollback bundle keeps last-good; the live pool is never nilled
 // once set).
 //
@@ -196,7 +198,20 @@ type Manager struct {
 	// CA change — otherwise a stable fleet's months-old cache would always exceed MAX_STALE
 	// and the floor would never load. Set before Run starts, then touched only in Run.
 	lastGood *cacheEntry
+
+	// verifyCache memoizes VerifyClientCert results (leaf fingerprint -> chains-to-pool)
+	// for the current generation, so the edge fleet's repeated requests skip the
+	// per-request x509 chain build. Keyed alongside verifyGen: a pool swap (rotation)
+	// advances the generation and the next access starts a fresh generation's map.
+	// Bounded by clear-when-full so a flood of distinct client certs can't grow it.
+	verifyMu    sync.RWMutex
+	verifyGen   uint64
+	verifyCache map[string]bool
 }
+
+// verifyCacheCap bounds the per-generation VerifyClientCert memo; over it, the map is
+// cleared wholesale (cheap, results recompute) rather than evicted per entry.
+const verifyCacheCap = 4096
 
 func NewManager() *Manager { return &Manager{} }
 
@@ -312,41 +327,80 @@ func (m *Manager) CAID() string {
 	return ""
 }
 
-// ServerTLSConfig builds the core's :443 *tls.Config so it verifies an OPTIONAL
-// edge client cert against the live, hot-reloaded CA pool — CA-only trust. The SNI
-// server cert is unchanged: getCertificate (the controller's cert table) and the
-// self-signed fallback are served exactly as before. Per handshake, ClientCAs is
-// loaded fresh from the manager; before the bundle loads (pool nil) it
-// requests-but-does-not-verify (tls.RequestClientCert) so the cold-start window
-// degrades to CIDR-only rather than aborting edge handshakes. Once loaded it is
-// tls.VerifyClientCertIfGiven (no cert → fine; a presented cert must verify to the
-// edge CA, else the handshake aborts). A verified cert populates
-// r.TLS.VerifiedChains, which the per-request trust predicate keys on.
+// ServerTLSConfig builds the core's :443 *tls.Config. It REQUESTS an optional client
+// cert (tls.RequestClientCert) but NEVER verifies it at the TLS layer — so a client
+// cert that doesn't chain to the edge CA (e.g. Cloudflare Authenticated Origin Pulls)
+// can't abort the handshake. Edge trust is decided per request by VerifyClientCert
+// against the live edge-CA pool: a chaining cert is mTLS-trusted, anything else falls
+// through to CIDR, and the handshake always completes. The SNI server cert is
+// unchanged — getCertificate (the controller's cert table) and the self-signed
+// fallback are served exactly as before.
 func (m *Manager) ServerTLSConfig(
 	getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error),
 	fallback []tls.Certificate,
 ) *tls.Config {
-	base := &tls.Config{
+	return &tls.Config{
 		MinVersion:     tls.VersionTLS12,
 		Certificates:   fallback,
 		GetCertificate: getCertificate,
 		ClientAuth:     tls.RequestClientCert,
 	}
-	base.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
-		c := &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			Certificates:   fallback,
-			GetCertificate: getCertificate,
-		}
-		if pool := m.ClientCAs(); pool != nil {
-			c.ClientCAs = pool
-			c.ClientAuth = tls.VerifyClientCertIfGiven
-		} else {
-			c.ClientAuth = tls.RequestClientCert
-		}
-		return c, nil
+}
+
+// VerifyClientCert reports whether the peer presented a client cert that chains to the
+// live edge-CA pool (CA-only trust) — the per-request replacement for the TLS-layer
+// VerifyClientCertIfGiven (see ServerTLSConfig). No cert, no loaded pool, or a cert
+// that doesn't chain (Cloudflare AOP, a browser, an attacker) all return false; the
+// caller then falls back to CIDR trust. A successful verify is memoized by leaf
+// fingerprint for the current generation, so the edge fleet's repeated requests skip
+// the x509 chain build; a pool swap (CA rotation) advances the generation and
+// re-verifies.
+func (m *Manager) VerifyClientCert(cs *tls.ConnectionState) bool {
+	if cs == nil || len(cs.PeerCertificates) == 0 {
+		return false
 	}
-	return base
+	pool := m.clientCAs.Load()
+	if pool == nil {
+		return false
+	}
+	// Read pool before generation: apply() Stores the pool before the generation, so
+	// pool-then-gen never yields (old pool, new gen) — at worst (new pool, old gen),
+	// which only caches under a stale generation that the next access re-verifies.
+	gen := m.gen.Load()
+	sum := sha256.Sum256(cs.PeerCertificates[0].Raw)
+	key := string(sum[:])
+
+	m.verifyMu.RLock()
+	if m.verifyGen == gen {
+		if v, ok := m.verifyCache[key]; ok {
+			m.verifyMu.RUnlock()
+			return v
+		}
+	}
+	m.verifyMu.RUnlock()
+
+	inter := x509.NewCertPool()
+	for _, c := range cs.PeerCertificates[1:] {
+		inter.AddCert(c)
+	}
+	_, err := cs.PeerCertificates[0].Verify(x509.VerifyOptions{
+		Roots:         pool,
+		Intermediates: inter,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	ok := err == nil
+
+	m.verifyMu.Lock()
+	if m.verifyGen != gen || m.verifyCache == nil {
+		m.verifyCache = make(map[string]bool, 64)
+		m.verifyGen = gen
+	}
+	if len(m.verifyCache) >= verifyCacheCap {
+		clear(m.verifyCache)
+	}
+	m.verifyCache[key] = ok
+	m.verifyMu.Unlock()
+	return ok
 }
 
 // applyResult classifies an apply attempt so the caller can emit the right metric

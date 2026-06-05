@@ -316,7 +316,11 @@ func main() {
 			src := metric.TrustSrcNone
 			if cidrTrust != nil && cidrTrust(r) {
 				src = metric.TrustSrcCIDR
-			} else if r.TLS != nil && len(r.TLS.VerifiedChains) > 0 {
+			} else if trustMgr.VerifyClientCert(r.TLS) {
+				// An edge client cert that chains to the live edge CA, verified per
+				// request. A non-edge client cert (e.g. Cloudflare Authenticated Origin
+				// Pulls) simply isn't trusted here — the handshake was never aborted for
+				// it — so it falls through to the CIDR branch above.
 				src = metric.TrustSrcVerifiedChain
 			}
 			metric.TrustSource(src)
