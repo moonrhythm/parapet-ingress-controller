@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/moonrhythm/parapet"
@@ -447,4 +448,63 @@ func BenchmarkBuildHostPortStringConcat(b *testing.B) {
 		r = name + "." + namespace + ".svc.cluster.local" + ":" + strconv.Itoa(port)
 	}
 	_ = r
+}
+
+// TestServeHandlerConcurrentWithReload exercises the lock-free routing snapshot:
+// the request path (ServeHandler + IsKnownHost) must read a consistent mux /
+// known-host set while reloadIngressDebounced concurrently swaps it. Run under
+// `go test -race`; a torn read or nil mux would trip the detector or panic.
+func TestServeHandlerConcurrentWithReload(t *testing.T) {
+	ctrl := New("", proxy.New())
+	ctrl.watchedServices.Store("default/web", clusterIPService("default", "web", 80, 8080))
+	ctrl.watchedIngresses.Store("default/ing",
+		ingressToService("default", "ing", "example.com", "/", networking.PathTypeImplementationSpecific, "web", 80))
+	ctrl.reloadIngressDebounced()
+
+	handler := ctrl.ServeHandler(nil)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// reloader: keep swapping the route state
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				ctrl.reloadIngressDebounced()
+			}
+		}
+	}()
+
+	// readers: serve requests and probe IsKnownHost against the live snapshot
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 500; j++ {
+				r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+				w := httptest.NewRecorder()
+				handler.ServeHTTP(w, r)
+				_ = ctrl.IsKnownHost("example.com")
+			}
+		}()
+	}
+
+	// let the readers run, then stop the reloader
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// readers do bounded work; close stop once they're likely done
+		for i := 0; i < 4000; i++ {
+			ctrl.IsKnownHost("example.com")
+		}
+		close(stop)
+	}()
+
+	wg.Wait()
+	assert.True(t, ctrl.IsKnownHost("example.com"), "served host stays known after the reload storm")
 }
