@@ -53,12 +53,13 @@ func TestManagerForwardOnlyAndFailStatic(t *testing.T) {
 		t.Fatal("first apply did not take")
 	}
 
-	// Rollback (lower) and replay (equal) are rejected; the live pool is unchanged.
+	// A lower generation is rejected (rollback) and an equal one is a no-op
+	// (unchanged); neither is applied, so the live pool stays put.
 	if _, err := m.apply(Bundle{Generation: 3, CAPEM: caPEM}); err == nil {
-		t.Error("rollback to lower generation must be rejected")
+		t.Error("rollback to lower generation must not apply")
 	}
 	if _, err := m.apply(Bundle{Generation: 5, CAPEM: caPEM}); err == nil {
-		t.Error("replay of equal generation must be rejected")
+		t.Error("replay of equal generation must not apply")
 	}
 	if m.Generation() != 5 {
 		t.Error("a rejected bundle must not change generation")
@@ -165,8 +166,13 @@ func TestApplyResultEnum(t *testing.T) {
 	if res, err := m.apply(Bundle{Generation: 5, CAPEM: caPEM, CAID: "a"}); err != nil || res != resultApplied {
 		t.Fatalf("apply: res=%v err=%v, want resultApplied", res, err)
 	}
-	if res, err := m.apply(Bundle{Generation: 5, CAPEM: caPEM}); err == nil || res != resultRollbackRejected {
-		t.Errorf("replay: res=%v err=%v, want resultRollbackRejected", res, err)
+	// Equal generation is a benign replay → resultUnchanged (NOT a rollback, so it
+	// won't WARN); a strictly-lower generation is the real rollback.
+	if res, err := m.apply(Bundle{Generation: 5, CAPEM: caPEM}); err == nil || res != resultUnchanged {
+		t.Errorf("replay (equal gen): res=%v err=%v, want resultUnchanged", res, err)
+	}
+	if res, err := m.apply(Bundle{Generation: 4, CAPEM: caPEM}); err == nil || res != resultRollbackRejected {
+		t.Errorf("rollback (lower gen): res=%v err=%v, want resultRollbackRejected", res, err)
 	}
 	// No CERTIFICATE block at all → empty_rejected.
 	if res, err := m.apply(Bundle{Generation: 6, CAPEM: []byte("garbage")}); err == nil || res != resultEmptyRejected {
@@ -348,9 +354,9 @@ func TestWarmStartFloorRoundTrip(t *testing.T) {
 		t.Fatal("revalidation must flip on mTLS trust (pool loaded, gen=7)")
 	}
 
-	// Forward-only resumes: replay of 7 is now a rollback, 8 advances.
-	if res, _ := b.apply(Bundle{Generation: 7, CAPEM: caPEM}); res != resultRollbackRejected {
-		t.Errorf("post-revalidation replay: res=%v, want resultRollbackRejected", res)
+	// Forward-only resumes: replay of 7 is a no-op (unchanged), 8 advances.
+	if res, _ := b.apply(Bundle{Generation: 7, CAPEM: caPEM}); res != resultUnchanged {
+		t.Errorf("post-revalidation replay: res=%v, want resultUnchanged", res)
 	}
 	if res, err := b.apply(Bundle{Generation: 8, CAPEM: caPEM, CAID: "ca8"}); err != nil || res != resultApplied {
 		t.Errorf("forward apply: res=%v err=%v, want resultApplied", res, err)
