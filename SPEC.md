@@ -180,7 +180,7 @@ invariants:
 | `WATCH_NAMESPACE` | `""` (all) | both | Restrict the watch to one namespace |
 | `POD_NAMESPACE` | `""` | both | Controller's namespace (bounds global WAF rules) |
 | `LOAD_ALL_CERTS` | `false` | both | Index every TLS secret, not just `spec.tls`-referenced |
-| `TRUST_PROXY` | `""` | both | `true`/`false`/CIDRs (+ `cloudflare`/`google`/`bunny`) |
+| `TRUST_PROXY` | `""` | both | `true`/`false`/CIDRs (+ `cloudflare`/`google`/`bunny`). Whether to honor inbound `X-Forwarded-*` (real client IP) from a trusted front proxy vs. overwrite with the peer. The Go edge proxy honors the same knob to sit behind an L7 proxy (e.g. Cloudflare) — see EDGE.md; the Rust edge does not yet |
 | `WAIT_BEFORE_SHUTDOWN` | `30s` | both | Drain delay on SIGTERM |
 | `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host in-flight cap / queue size. Slot is released when upstream response headers arrive (or on a 101 upgrade), not at end-of-body — so SSE / WebSocket / long-poll streams don't pin a slot for the stream lifetime. The cap exists to shed load while upstreams are *unresponsive*. |
 | `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host+country cap / queue (same release semantics as `HOST_CONCURRENT_CAPACITY`) |

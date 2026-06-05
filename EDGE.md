@@ -220,9 +220,13 @@ on a timer with overlap, honor the ETag/version, and on a fetch failure
 Unchanged from the keyless design — the WAF half never depended on how TLS keys
 are handled. The edge runs **global + zone** WAF as a first layer:
 
-1. Terminate TLS locally → build the `request` map. The edge is the first hop, so
-   `request.remote_ip` is the **true peer**, and GeoIP/ASN are resolved from it at
-   the edge — *more* accurate than parapet behind it. The edge loads the IPLocate
+1. Terminate TLS locally → build the `request` map. By default the edge is the
+   first hop, so `request.remote_ip` is the **true peer**, and GeoIP/ASN are
+   resolved from it at the edge — *more* accurate than parapet behind it. If the
+   edge instead sits behind another L7 proxy (e.g. Cloudflare), set `TRUST_PROXY`
+   so it honors the inbound `X-Forwarded-For` and `request.remote_ip` becomes the
+   real client (see [Edge behind another proxy](#edge-behind-another-proxy-trust_proxy)).
+   The edge loads the IPLocate
    `.mmdb`s via the same env contract as the controller (`WAF_GEOIP_DB` /
    `WAF_ASN_DB`; `""` disables; baked default path; ASN DB ~74 MB), so
    `request.country` / `request.asn` work for edge-evaluated rules. When a DB is
@@ -256,6 +260,40 @@ the zone from its own router. So:
 
 Because the edge sets `X-Forwarded-For` and parapet trusts it
 (`TRUST_PROXY=<edge CIDR>`), both evaluate against the same client IP.
+
+### Edge behind another proxy (`TRUST_PROXY`)
+
+The edge is internet-facing by default and trusts **no** upstream: parapet's
+inbound proxy layer overwrites `X-Forwarded-For` / `X-Real-Ip` /
+`X-Forwarded-Proto` with the true TCP peer + connection scheme, so a client can't
+spoof its IP. That's the right posture when the edge is the first hop (directly,
+or behind an **L4 / TCP-passthrough** LB that preserves the client IP).
+
+When the edge instead sits behind another **L7** proxy that terminates TLS and
+re-originates the connection (Cloudflare, an L7 load balancer, an API gateway),
+the peer is *that proxy*, not the client — so geo/ASN, WAF IP rules, the access
+log, and the forwarded `X-Forwarded-For` would all see the front proxy. Set
+`TRUST_PROXY` to recover the real client IP. It is the **same knob with the same
+spec as the in-cluster core** (`cmd/parapet-ingress-controller`), resolved by the
+shared [`trustcidr`](trustcidr/) package:
+
+| Value | Effect |
+|---|---|
+| `""` / `false` (default) | distrust — overwrite `X-Forwarded-*` with the peer (first-hop posture) |
+| `true` | trust every remote (only behind a closed network you fully control) |
+| CIDR list | trust those source IPs, e.g. `TRUST_PROXY=10.0.0.0/8,192.168.1.1/32` |
+| named group(s) | `cloudflare` / `google` / `bunny` expand to that provider's published ranges; combinable, e.g. `TRUST_PROXY=cloudflare,10.0.0.0/8` |
+
+Because parapet's proxy layer is the **outermost** handler (it runs before the
+edge WAF, the geo-header middleware, the access log, and the forwarder), trusting
+the front proxy flows the real client IP through the entire edge pipeline in one
+shot. A malformed value fails fast at startup. Trust is **by source IP only** —
+it is no stronger than the front proxy's own ingress filtering, so an attacker who
+can reach the edge directly from a trusted CIDR can spoof `X-Forwarded-For`; keep
+the edge reachable only from the front proxy.
+
+> **Implementation parity:** the edge-side `TRUST_PROXY` knob currently exists in
+> the **Go** edge (`cmd/edge-proxy`); the Rust edge does not yet honor it.
 
 ## Response cache at the edge
 

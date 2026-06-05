@@ -32,6 +32,7 @@ import (
 
 	"github.com/moonrhythm/parapet-ingress-controller/edge"
 	"github.com/moonrhythm/parapet-ingress-controller/geoip"
+	"github.com/moonrhythm/parapet-ingress-controller/trustcidr"
 )
 
 var version = "HEAD"
@@ -99,6 +100,15 @@ func main() {
 	domains := splitDomains(os.Getenv("EDGE_DOMAINS"))
 	serveAll := len(domains) == 0
 
+	// TRUST_PROXY mirrors the controller (same spec: true/false/CIDRs +
+	// cloudflare/google/bunny). Default "" → nil → the edge distrusts every
+	// upstream and overwrites X-Forwarded-* with the true peer (first-hop posture).
+	// Set it when the edge sits behind another L7 proxy (e.g. TRUST_PROXY=cloudflare)
+	// so the real client IP from the inbound X-Forwarded-For flows through to the
+	// edge WAF, GeoIP/ASN, access log, and the upstream hop. See EDGE.md.
+	trustProxySpec := envOr("TRUST_PROXY", "")
+	trustProxy := trustcidr.Parse(trustProxySpec)
+
 	slog.Info("parapet-edge",
 		"version", version,
 		"https_listen", httpsListen,
@@ -109,6 +119,7 @@ func main() {
 		"serve_all", serveAll,
 		"domains", len(domains),
 		"waf_enabled", wafEnabled,
+		"trust_proxy", trustProxySpec,
 		"refresh_interval", refreshInterval,
 	)
 
@@ -165,7 +176,8 @@ func main() {
 	}
 
 	// Optional edge WAF (early-drop; parapet stays authoritative). GeoIP/ASN are
-	// resolved from the TRUE client IP (the edge is the first hop).
+	// resolved from the client IP — the true peer when the edge is the first hop,
+	// or the inbound X-Forwarded-For client when TRUST_PROXY trusts the front proxy.
 	var ewaf *edge.EdgeWAF
 	var country func(*http.Request) string
 	var asn func(*http.Request) int64
@@ -285,6 +297,7 @@ func main() {
 		}
 		s := &parapet.Server{
 			Addr:               httpsListen,
+			TrustProxy:         trustProxy,
 			IdleTimeout:        320 * time.Second,
 			TCPKeepAlivePeriod: time.Minute,
 			GraceTimeout:       time.Minute,
@@ -315,6 +328,7 @@ func main() {
 	if httpListen != "" {
 		s := &parapet.Server{
 			Addr:               httpListen,
+			TrustProxy:         trustProxy,
 			IdleTimeout:        60 * time.Second,
 			TCPKeepAlivePeriod: time.Minute,
 			GraceTimeout:       time.Minute,

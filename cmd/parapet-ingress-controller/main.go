@@ -29,6 +29,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 	"github.com/moonrhythm/parapet-ingress-controller/trust"
+	"github.com/moonrhythm/parapet-ingress-controller/trustcidr"
 )
 
 var version = "HEAD"
@@ -213,30 +214,7 @@ func main() {
 	}
 	m.Use(ctrl)
 
-	var cidrTrust parapet.Conditional
-	{
-		p := config.String("TRUST_PROXY")
-		switch p {
-		case "true":
-			cidrTrust = parapet.Trusted()
-		case "false", "":
-		default:
-			// parse CIDRs
-
-			var list []string
-			for _, x := range strings.Split(p, ",") {
-				x = strings.TrimSpace(x)
-
-				if t := predefinedCIDRs[x]; len(t) > 0 {
-					list = append(list, t...)
-				} else {
-					list = append(list, x)
-				}
-			}
-
-			cidrTrust = parapet.TrustCIDRs(list)
-		}
-	}
+	cidrTrust := trustcidr.Parse(config.String("TRUST_PROXY"))
 
 	// Edge auto-trust (CA-only mTLS). When EDGE_TRUST_CP_ENDPOINT is set, the core
 	// pulls the edge CA from the control plane (GET /v1/trust-bundle, tokenless,
