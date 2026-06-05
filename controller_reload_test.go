@@ -170,6 +170,68 @@ func TestReloadServiceAndEndpoint(t *testing.T) {
 	assert.Empty(t, ctrl.routeTable.Lookup("missing.default.svc.cluster.local:80"))
 }
 
+func namedPortService(namespace, name, portName string, port int) *v1.Service {
+	return &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: v1.ServiceSpec{
+			Type: v1.ServiceTypeClusterIP,
+			Ports: []v1.ServicePort{
+				// NAMED targetPort: no number lives in the Service object.
+				{Name: portName, Port: int32(port), TargetPort: intstr.FromString(portName)},
+			},
+		},
+	}
+}
+
+func endpointsNamedPort(namespace, name, ip, portName string, port int) *v1.Endpoints {
+	return &v1.Endpoints{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Subsets: []v1.EndpointSubset{
+			{
+				Addresses: []v1.EndpointAddress{{IP: ip}},
+				Ports:     []v1.EndpointPort{{Name: portName, Port: int32(port)}},
+			},
+		},
+	}
+}
+
+func TestReloadServiceNamedTargetPort(t *testing.T) {
+	// A named targetPort ("http") carries no number in the Service; it must be
+	// resolved from the matching EndpointPort, not read as IntVal (which is 0 and
+	// would route every request to ":0" → dial failure → 503).
+	ctrl := New("", proxy.New())
+	ctrl.watchedServices.Store("default/web", namedPortService("default", "web", "http", 80))
+	ctrl.watchedEndpoints.Store("default/web", endpointsNamedPort("default", "web", "10.0.0.1", "http", 8080))
+
+	ctrl.reloadServiceDebounced()
+	ctrl.reloadEndpointDebounced()
+
+	assert.Equal(t, "10.0.0.1:8080",
+		ctrl.routeTable.Lookup("web.default.svc.cluster.local:80"),
+		"named targetPort resolves to the matching EndpointPort number")
+}
+
+func TestReloadServiceNamedTargetPortConvergesWhenEndpointsArrive(t *testing.T) {
+	// Service reloads before its endpoints exist: the named port can't resolve
+	// yet, so no dead ":0" route is produced (Lookup is empty, fail-fast 503). It
+	// converges once endpoints arrive and reloadService runs again (which the
+	// endpoint watch triggers in production).
+	ctrl := New("", proxy.New())
+	ctrl.watchedServices.Store("default/web", namedPortService("default", "web", "http", 80))
+
+	ctrl.reloadServiceDebounced()
+	assert.Empty(t, ctrl.routeTable.Lookup("web.default.svc.cluster.local:80"),
+		"unresolved named port must not create a ':0' route")
+
+	ctrl.watchedEndpoints.Store("default/web", endpointsNamedPort("default", "web", "10.0.0.2", "http", 9090))
+	ctrl.reloadServiceDebounced()  // endpoint watch triggers this in production
+	ctrl.reloadEndpointDebounced() // host routes (pod IPs)
+
+	assert.Equal(t, "10.0.0.2:9090",
+		ctrl.routeTable.Lookup("web.default.svc.cluster.local:80"),
+		"named port converges once endpoints arrive")
+}
+
 func TestReloadEndpointEmptySubsetIsNotRouted(t *testing.T) {
 	ctrl := New("", proxy.New())
 	ctrl.watchedServices.Store("default/web", clusterIPService("default", "web", 80, 8080))

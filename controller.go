@@ -17,6 +17,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/moonrhythm/parapet-ingress-controller/cert"
@@ -276,7 +277,15 @@ func (ctrl *Controller) watchEndpoints(ctx context.Context) {
 	// set is (re)listed.
 	watchResource(ctx, ctrl.watchNamespace, "endpoints", k8s.WatchEndpoints,
 		&ctrl.watchedEndpoints,
-		ctrl.reloadSingleEndpoint,
+		func(ep *v1.Endpoints) {
+			ctrl.reloadSingleEndpoint(ep)
+			// Endpoints carry the numeric port a *named* Service targetPort resolves
+			// to, so a service whose named port wasn't resolvable at service-reload
+			// time (endpoints not yet present) converges once its endpoints arrive.
+			// Debounced, so high endpoint churn coalesces into at most one cheap
+			// port-table rebuild per window.
+			ctrl.reloadService()
+		},
 		ctrl.deleteSingleEndpoint,
 	)
 }
@@ -450,8 +459,14 @@ func (ctrl *Controller) reloadServiceDebounced() {
 
 		// build route target port
 		for _, p := range s.Spec.Ports {
+			target, ok := ctrl.resolveTargetPort(s, p)
+			if !ok {
+				// named targetPort not resolvable yet (no endpoints / no matching
+				// subset port); skip rather than route to ":0". It converges when the
+				// service's endpoints arrive (watchEndpoints triggers reloadService).
+				continue
+			}
 			addr := buildHostPort(s.Namespace, s.Name, int(p.Port))
-			target := strconv.Itoa(int(p.TargetPort.IntVal))
 			addrToPort[addr] = target
 		}
 
@@ -459,6 +474,38 @@ func (ctrl *Controller) reloadServiceDebounced() {
 	})
 
 	ctrl.routeTable.SetPortRoutes(addrToPort)
+}
+
+// resolveTargetPort returns the concrete numeric pod port (as a string) a
+// ServicePort routes to. A numeric targetPort is used directly. A *named*
+// targetPort (intstr.String) carries no number in the Service object, so it is
+// resolved from the service's Endpoints — matching the EndpointPort whose Name
+// equals this ServicePort's Name (Kubernetes keys EndpointPort.Name to
+// ServicePort.Name). Returns ok=false when a named port can't be resolved yet,
+// so the caller skips it instead of producing a dead ":0" route.
+func (ctrl *Controller) resolveTargetPort(s *v1.Service, p v1.ServicePort) (string, bool) {
+	if p.TargetPort.Type == intstr.Int {
+		if p.TargetPort.IntVal > 0 {
+			return strconv.Itoa(int(p.TargetPort.IntVal)), true
+		}
+		// An unset targetPort is normally defaulted to the service port by the
+		// apiserver; fall back to that identity mapping defensively.
+		return strconv.Itoa(int(p.Port)), true
+	}
+
+	v, ok := ctrl.watchedEndpoints.Load(s.Namespace + "/" + s.Name)
+	if !ok {
+		return "", false
+	}
+	ep := v.(*v1.Endpoints)
+	for _, ss := range ep.Subsets {
+		for _, epp := range ss.Ports {
+			if epp.Name == p.Name && epp.Port > 0 {
+				return strconv.Itoa(int(epp.Port)), true
+			}
+		}
+	}
+	return "", false
 }
 
 func (ctrl *Controller) reloadSecret() {
@@ -642,17 +689,20 @@ func getBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (conf
 	// specifies port by number
 	config.PortNumber = int(backend.Service.Port.Number)
 
-	// find port name
-	// since port name is required in kubernetes, we can assume that port name is always available
+	// find the matching service port (for its name + appProtocol). A backend that
+	// references a numeric port the service does not expose must be reported as
+	// not-found (ok=false), mirroring the port-by-name branch — otherwise the
+	// caller registers a route whose Lookup always misses, silently 503-ing every
+	// request with no "port not found" log.
 	for _, p := range svc.Spec.Ports {
 		if p.Port == backend.Service.Port.Number {
 			config.PortName = p.Name
 			if p.AppProtocol != nil {
 				config.Protocol = *p.AppProtocol
 			}
+			ok = true
 		}
 	}
-	ok = true
 	return
 }
 

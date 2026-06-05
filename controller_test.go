@@ -345,6 +345,41 @@ func TestGetBackendConfig(t *testing.T) {
 		assert.Equal(t, 8080, config.PortNumber)
 		assert.Equal(t, "h2c", config.Protocol)
 	})
+
+	t.Run("Port Number not exposed by service returns ok=false", func(t *testing.T) {
+		// A numeric backend port the service does not expose must be reported as
+		// not-found, so the caller logs "port not found" and skips it instead of
+		// registering a dead route that silently 503s every request.
+		backend := networking.IngressBackend{
+			Service: &networking.IngressServiceBackend{
+				Name: "service",
+				Port: networking.ServiceBackendPort{Number: 9999},
+			},
+		}
+		service := v1.Service{
+			Spec: v1.ServiceSpec{
+				Ports: []v1.ServicePort{{Name: "http", Port: 8080}},
+			},
+		}
+		_, ok := getBackendConfig(&backend, &service)
+		assert.False(t, ok, "unexposed numeric port must not be reported as found")
+	})
+
+	t.Run("Port Name not exposed by service returns ok=false", func(t *testing.T) {
+		backend := networking.IngressBackend{
+			Service: &networking.IngressServiceBackend{
+				Name: "service",
+				Port: networking.ServiceBackendPort{Name: "missing"},
+			},
+		}
+		service := v1.Service{
+			Spec: v1.ServiceSpec{
+				Ports: []v1.ServicePort{{Name: "http", Port: 8080}},
+			},
+		}
+		_, ok := getBackendConfig(&backend, &service)
+		assert.False(t, ok)
+	})
 }
 
 func TestEndpointToRRLB(t *testing.T) {
