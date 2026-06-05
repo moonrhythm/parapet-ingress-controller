@@ -373,8 +373,6 @@ func (ctrl *Controller) reloadIngress() {
 }
 
 func (ctrl *Controller) reloadIngressDebounced() {
-	slog.Info("reload ingresses")
-
 	defer func() {
 		if err := recover(); err != nil {
 			slog.Error("reload ingresses failed", "error", err)
@@ -385,16 +383,19 @@ func (ctrl *Controller) reloadIngressDebounced() {
 	}()
 
 	routes := make(map[string]http.Handler, routeSizeHint)
+	var loaded, skipped int
 
 	ctrl.watchedIngresses.Range(func(_, value any) bool {
 		ing := value.(*networking.Ingress)
 
 		if getIngressClass(ing) != IngressClass {
-			slog.Info("skip ingress", "namespace", ing.Namespace, "name", ing.Name)
+			slog.Debug("skip ingress", "namespace", ing.Namespace, "name", ing.Name)
+			skipped++
 			return true
 		}
 
-		slog.Info("load ingress", "namespace", ing.Namespace, "name", ing.Name)
+		slog.Debug("load ingress", "namespace", ing.Namespace, "name", ing.Name)
+		loaded++
 
 		var h parapet.Middlewares
 		for _, m := range ctrl.plugins {
@@ -489,6 +490,7 @@ func (ctrl *Controller) reloadIngressDebounced() {
 	mux := buildRoutes(routes)
 	knownHosts := buildKnownHosts(routes)
 	ctrl.routes.Store(&routeState{mux: mux, knownHosts: knownHosts})
+	slog.Info("reloaded ingresses", "loaded", loaded, "skipped", skipped, "routes", len(routes))
 	ctrl.reloadSecret()
 }
 
@@ -523,8 +525,6 @@ func (ctrl *Controller) reloadService() {
 }
 
 func (ctrl *Controller) reloadServiceDebounced() {
-	slog.Info("reload services")
-
 	defer func() {
 		if err := recover(); err != nil {
 			slog.Error("reload services failed", "error", err)
@@ -553,6 +553,7 @@ func (ctrl *Controller) reloadServiceDebounced() {
 	})
 
 	ctrl.routeTable.SetPortRoutes(addrToPort)
+	slog.Info("reloaded services", "ports", len(addrToPort))
 }
 
 // resolveTargetPort returns the concrete numeric pod port (as a string) a
@@ -592,8 +593,6 @@ func (ctrl *Controller) reloadSecret() {
 }
 
 func (ctrl *Controller) reloadSecretDebounced() {
-	slog.Info("reload secrets")
-
 	defer func() {
 		if err := recover(); err != nil {
 			slog.Error("reload secrets failed", "error", err)
@@ -621,6 +620,7 @@ func (ctrl *Controller) reloadSecretDebounced() {
 			return true
 		})
 		ctrl.certTable.Set(certs)
+		slog.Info("reloaded secrets", "certs", len(certs))
 		return
 	}
 
@@ -652,6 +652,7 @@ func (ctrl *Controller) reloadSecretDebounced() {
 	}
 
 	ctrl.certTable.Set(certs)
+	slog.Info("reloaded secrets", "certs", len(certs))
 }
 
 // reloadEndpointDebounced rebuilds the entire host -> pod-IP table from the
@@ -659,8 +660,6 @@ func (ctrl *Controller) reloadSecretDebounced() {
 // from firstReload); steady-state endpoint events are applied incrementally
 // per host by reloadSingleEndpoint / deleteSingleEndpoint and never come here.
 func (ctrl *Controller) reloadEndpointDebounced() {
-	slog.Info("reload endpoints")
-
 	defer func() {
 		if err := recover(); err != nil {
 			slog.Error("reload endpoints failed", "error", err)
@@ -677,16 +676,17 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 	})
 
 	ctrl.routeTable.SetHostRoutes(routes)
+	slog.Info("reloaded endpoints", "hosts", len(routes))
 }
 
 func (ctrl *Controller) reloadSingleEndpoint(ep *v1.Endpoints) {
-	slog.Info("reload single endpoint", "namespace", ep.Namespace, "name", ep.Name)
+	slog.Debug("reload single endpoint", "namespace", ep.Namespace, "name", ep.Name)
 
 	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), endpointToRRLB(ep))
 }
 
 func (ctrl *Controller) deleteSingleEndpoint(ep *v1.Endpoints) {
-	slog.Info("delete single endpoint", "namespace", ep.Namespace, "name", ep.Name)
+	slog.Debug("delete single endpoint", "namespace", ep.Namespace, "name", ep.Name)
 
 	// the host is gone, so drop just that one entry; passing nil makes
 	// SetHostRoute delete it, leaving the rest of the table untouched.

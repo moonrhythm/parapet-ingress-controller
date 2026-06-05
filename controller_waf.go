@@ -140,8 +140,6 @@ func (ctrl *Controller) reloadWAFDebounced() {
 	if !ctrl.WAFConfig.Enabled || ctrl.globalWAF == nil {
 		return
 	}
-	slog.Info("reload waf")
-
 	// Serialize the whole pass: the debounce can fire two reloadWAFDebounced
 	// goroutines concurrently (see wafReloadMu), and the fingerprint string + map
 	// below are a read-modify-write that must be atomic across the pass.
@@ -252,6 +250,7 @@ func (ctrl *Controller) reloadWAFDebounced() {
 	}
 	ctrl.zones.Store(&newZones)
 	ctrl.zoneFingerprints = newFingerprints
+	slog.Info("reloaded waf", "global_rules", len(ctrl.globalWAF.Rules()), "zones", len(newZones))
 }
 
 // fingerprintDocs returns a content fingerprint of the rule documents that feed
