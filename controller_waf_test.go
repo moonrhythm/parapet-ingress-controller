@@ -325,6 +325,44 @@ rules:
 	require.NotNil(t, ctrl.LookupZone("cust/delta"))
 }
 
+func TestReloadWAF_MultipleGlobalConfigMapsDeterministicOrder(t *testing.T) {
+	t.Parallel()
+
+	// Two global ConfigMaps in the controller namespace, each contributing one
+	// equal-priority rule. The concatenation order must follow namespace/name
+	// (waf-a before waf-b), not the random sync.Map.Range order — otherwise
+	// equal-priority precedence and the fingerprint would flip between reloads.
+	ctrl := newWAFController()
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-a", wafCM("ctrl-ns", "waf-a", wafRoleGlobal, `
+rules:
+  - id: rule-a
+    expression: "true"
+    action: log
+`))
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-b", wafCM("ctrl-ns", "waf-b", wafRoleGlobal, `
+rules:
+  - id: rule-b
+    expression: "true"
+    action: log
+`))
+
+	// Reload many times: the order must be stable and sorted on every pass. Before
+	// the deterministic sort, the random Range order flips this with high
+	// probability across this many iterations.
+	var firstFP string
+	for i := 0; i < 20; i++ {
+		ctrl.reloadWAFDebounced()
+		assert.Equal(t, []string{"rule-a", "rule-b"}, ctrl.globalWAF.Rules(),
+			"global rule order must be namespace/name-sorted and stable")
+		if i == 0 {
+			firstFP = ctrl.globalWAFFingerprint
+		} else {
+			assert.Equal(t, firstFP, ctrl.globalWAFFingerprint,
+				"a stable concatenation order keeps the fingerprint stable (no needless recompile)")
+		}
+	}
+}
+
 func TestReloadWAF_DisabledIsNoop(t *testing.T) {
 	t.Parallel()
 
