@@ -90,6 +90,14 @@ spec:
               value: /geoip/ip-to-country.mmdb
             - name: WAF_ASN_DB
               value: /geoip/ip-to-asn.mmdb
+            # By default the edge is the first hop and distrusts every upstream
+            # (overwrites X-Forwarded-* with the true peer). If the edge sits
+            # BEHIND another L7 proxy (e.g. Cloudflare), set TRUST_PROXY to honor
+            # its X-Forwarded-For so the real client IP flows through to WAF/geo/
+            # log. Same spec as the core: true/false/CIDRs (+ cloudflare/google/
+            # bunny). Keep the edge reachable only from that front proxy.
+            # - name: TRUST_PROXY
+            #   value: cloudflare
             # Optional response cache (off by default), from parapet/pkg/cache.
             # honor-origin policy; LRU-bounded. Backend = disk (default;
             # restart-persistent; mount a writable volume at EDGE_CACHE_DIR, see

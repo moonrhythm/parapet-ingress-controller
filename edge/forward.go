@@ -21,9 +21,12 @@ import (
 // forwarded, as in the Rust edge.
 //
 // The X-Forwarded-For / X-Real-Ip / X-Forwarded-Proto headers are set by the
-// parapet server's own inbound proxy layer (the edge is the first hop and trusts
-// no upstream, so it overwrites them with the true peer / connection scheme).
-// X-Forwarded-Country / X-Forwarded-ASN are set by forwardGeoHeaders.
+// parapet server's own inbound proxy layer. By default the edge is the first hop
+// and trusts no upstream, so it overwrites them with the true peer / connection
+// scheme; when TRUST_PROXY matches the immediate peer (e.g. the edge sits behind
+// Cloudflare) parapet instead honors the inbound X-Forwarded-* so the real client
+// IP flows through. X-Forwarded-Country / X-Forwarded-ASN are set by
+// forwardGeoHeaders.
 type Forwarder struct {
 	rp *httputil.ReverseProxy
 }
