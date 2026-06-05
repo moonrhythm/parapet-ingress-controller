@@ -73,27 +73,27 @@ func TestAutoTrustEndToEnd(t *testing.T) {
 	edgeCert, _ := ccStore.GetClientCertificate(nil)
 
 	// (1) A request presenting the CP-issued edge cert is TRUSTED by the core
-	// (the core's per-request predicate keys on len(VerifiedChains) > 0).
-	if n := getVerifiedChains(t, coreURL, edgeCert); n == 0 {
-		t.Error("edge with a CP-issued cert should be trusted (verified chain), got 0")
+	// (VerifyClientCert chains it to the pulled edge CA).
+	if n := getTrust(t, coreURL, edgeCert); n == 0 {
+		t.Error("edge with a CP-issued cert should be trusted, got untrusted")
 	}
 
-	// (2) A request with NO client cert completes but is UNTRUSTED (0 chains) —
+	// (2) A request with NO client cert completes but is UNTRUSTED —
 	// Cloudflare-direct / browser traffic must still work, just CIDR-only.
-	if n := getVerifiedChains(t, coreURL, nil); n != 0 {
-		t.Errorf("no-cert request should be untrusted (0 chains), got %d", n)
+	if n := getTrust(t, coreURL, nil); n != 0 {
+		t.Errorf("no-cert request should be untrusted, got %d", n)
 	}
 
-	// (3) A leaf from a DIFFERENT (rogue) CA must NOT be trusted: the security
-	// property is "no verified chain", i.e. the core treats it as untrusted
-	// (CIDR-only). Go's VerifyClientCertIfGiven may either abort the handshake or
-	// (on TLS 1.3) accept the connection without a verified chain — both are safe,
-	// because the per-request predicate keys on len(VerifiedChains) > 0.
+	// (3) A leaf from a DIFFERENT (rogue) CA — the Cloudflare-AOP coexistence case:
+	// the handshake MUST complete (ClientAuth is RequestClientCert, never verified at
+	// the TLS layer) and the request is simply UNTRUSTED (VerifyClientCert false).
 	rogue := genRogueLeaf(t)
 	rn, rerr := tryGet(coreURL, rogue)
-	t.Logf("rogue cert: chains=%d err=%v (either 0-chains or a handshake error is acceptable)", rn, rerr)
-	if rerr == nil && rn > 0 {
-		t.Error("a rogue-CA client cert was TRUSTED (got a verified chain) — must never be")
+	if rerr != nil {
+		t.Errorf("a non-edge client cert must NOT abort the handshake (Cloudflare AOP coexistence), got: %v", rerr)
+	}
+	if rn != 0 {
+		t.Error("a rogue-CA client cert was TRUSTED — must never be")
 	}
 
 	// (4) Cold start: a core whose trust bundle hasn't loaded (nil pool) must
@@ -105,7 +105,7 @@ func TestAutoTrustEndToEnd(t *testing.T) {
 	if n, err := tryGet(coldURL, rogue); err != nil {
 		t.Errorf("cold-start must not abort a presented cert, got error: %v", err)
 	} else if n != 0 {
-		t.Errorf("cold-start must not verify (0 chains), got %d", n)
+		t.Errorf("cold-start must be untrusted, got %d", n)
 	}
 }
 
@@ -123,15 +123,16 @@ func pullInto(t *testing.T, c *Client, m *Manager) {
 }
 
 // startCore runs an http.Server whose TLS config is the core's real ServerTLSConfig
-// (built from the trust manager). The handler reports the number of verified client
-// chains the handshake produced. Returns the base URL and a closer.
+// (built from the trust manager). The handler reports the real per-request trust
+// decision — 1 if m.VerifyClientCert trusts the presented client cert, else 0 —
+// exactly as the core's TrustProxy predicate does. Returns the base URL and a closer.
 func startCore(t *testing.T, m *Manager) (string, func()) {
 	t.Helper()
 	serverCert := genServerCert(t)
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := 0
-		if r.TLS != nil {
-			n = len(r.TLS.VerifiedChains)
+		if m.VerifyClientCert(r.TLS) {
+			n = 1
 		}
 		_, _ = io.WriteString(w, strconv.Itoa(n))
 	})
@@ -147,7 +148,7 @@ func startCore(t *testing.T, m *Manager) (string, func()) {
 	return "https://" + ln.Addr().String() + "/", func() { _ = srv.Close() }
 }
 
-func getVerifiedChains(t *testing.T, url string, clientCert *tls.Certificate) int {
+func getTrust(t *testing.T, url string, clientCert *tls.Certificate) int {
 	t.Helper()
 	n, err := tryGet(url, clientCert)
 	if err != nil {

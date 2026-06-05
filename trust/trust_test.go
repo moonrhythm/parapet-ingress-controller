@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
@@ -77,6 +78,79 @@ func TestManagerForwardOnlyAndFailStatic(t *testing.T) {
 	}
 	if m.Generation() != 6 || m.CAID() != "b" {
 		t.Error("forward apply did not take")
+	}
+}
+
+// TestVerifyClientCert is the Cloudflare-coexistence contract: only a client cert that
+// chains to the live edge CA confers mTLS trust; no cert / a foreign cert (Cloudflare
+// AOP) returns false (never aborts), and a CA rotation re-verifies (the per-generation
+// cache is invalidated).
+func TestVerifyClientCert(t *testing.T) {
+	caCertPEM, caKeyPEM := caPEMFor(t)
+	signer, _, err := edgecp.NewProvidedSigner(caCertPEM, caKeyPEM, time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leafFor := func(sg *edgecp.Signer, id string) *x509.Certificate {
+		key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		chainPEM, _, _, err := sg.Sign(key.Public(), id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		block, _ := pem.Decode(chainPEM)
+		leaf, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return leaf
+	}
+	csFor := func(leaf *x509.Certificate) *tls.ConnectionState {
+		if leaf == nil {
+			return &tls.ConnectionState{}
+		}
+		return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
+	}
+
+	m := NewManager()
+	edge := leafFor(signer, "edge-1")
+
+	// No bundle loaded yet → no mTLS trust (cold start degrades to CIDR-only).
+	if m.VerifyClientCert(csFor(edge)) {
+		t.Fatal("no loaded pool must not confer mTLS trust")
+	}
+
+	if _, err := m.apply(Bundle{Generation: 1, CAPEM: caCertPEM, CAID: "a"}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// Edge leaf verifies (second call exercises the memo cache).
+	if !m.VerifyClientCert(csFor(edge)) || !m.VerifyClientCert(csFor(edge)) {
+		t.Fatal("edge leaf must verify against the loaded edge CA")
+	}
+
+	// Absent client cert (nil and empty) → not trusted; never aborts.
+	if m.VerifyClientCert(nil) || m.VerifyClientCert(csFor(nil)) {
+		t.Fatal("absent client cert must not confer mTLS trust")
+	}
+
+	// A cert from a DIFFERENT CA (the Cloudflare-AOP case) → not trusted.
+	otherCertPEM, otherKeyPEM := caPEMFor(t)
+	otherSigner, _, _ := edgecp.NewProvidedSigner(otherCertPEM, otherKeyPEM, time.Hour, time.Minute)
+	other := leafFor(otherSigner, "intruder")
+	if m.VerifyClientCert(csFor(other)) {
+		t.Fatal("a cert not chaining to the edge CA must not be trusted")
+	}
+
+	// Rotate to the other CA: the cache is invalidated by the generation bump, so the
+	// old-CA leaf is now rejected and the other leaf accepted.
+	if _, err := m.apply(Bundle{Generation: 2, CAPEM: otherCertPEM, CAID: "b"}); err != nil {
+		t.Fatalf("rotate apply: %v", err)
+	}
+	if m.VerifyClientCert(csFor(edge)) {
+		t.Fatal("after rotating CAs, the old-CA leaf must no longer verify")
+	}
+	if !m.VerifyClientCert(csFor(other)) {
+		t.Fatal("the new-CA leaf must verify after rotation")
 	}
 }
 
