@@ -1,28 +1,12 @@
 # parapet-ingress-controller
 
 [![Go Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml/badge.svg?branch=main)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml)
-[![Rust Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/rust-test.yaml/badge.svg?branch=main)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/rust-test.yaml)
-[![codecov](https://codecov.io/gh/moonrhythm/parapet-ingress-controller/branch/main/graph/badge.svg)](https://codecov.io/gh/moonrhythm/parapet-ingress-controller)
 [![Go Report Card](https://goreportcard.com/badge/github.com/moonrhythm/parapet-ingress-controller)](https://goreportcard.com/report/github.com/moonrhythm/parapet-ingress-controller)
 
-A Kubernetes ingress controller. The page you're reading is the **usage**
-contract — Ingresses, annotations, WAF, and metrics work the same regardless of
-which build you run.
-
-## Implementations
-
-The controller ships as **two co-maintained implementations of one behavior
-contract** ([`SPEC.md`](SPEC.md)):
-
-| | [`./` (root)](.) | [`rust/`](rust/) |
-|---|---|---|
-| Framework | [parapet](https://github.com/moonrhythm/parapet) | [Pingora](https://github.com/cloudflare/pingora) |
-| Image | `…/parapet-ingress-controller:<tag>` | `…/parapet-ingress-controller:rust-<sha>` |
-| Notes | the established build; Cloud Profiler/Trace | smaller image, no Go runtime; see [`rust/README.md`](rust/README.md) |
-
-Both honor the same Ingresses, annotations, env vars, and metric names. Where
-they intentionally differ, [`SPEC.md`](SPEC.md) marks it **Go-only** / **Rust-only**.
-Pick per deployment; they're interchangeable behind the same contract.
+A Kubernetes ingress controller built on the
+[parapet](https://github.com/moonrhythm/parapet) middleware framework. The page
+you're reading is the **usage** contract — Ingresses, annotations, WAF, and
+metrics. The full behavior contract lives in [`SPEC.md`](SPEC.md).
 
 ## Deploy
 
@@ -78,8 +62,8 @@ spec:
 ## Plugins
 
 Plugins use annotation in ingress to config. The full annotation reference,
-env-var table, and per-request order are in [`SPEC.md`](SPEC.md) (the contract
-both implementations track); the Go plugins live in [`plugin`](plugin).
+env-var table, and per-request order are in [`SPEC.md`](SPEC.md); the plugins
+live in [`plugin`](plugin).
 
 ## Configuration
 

@@ -144,7 +144,7 @@ combined `make test` (Go + Rust) target.
 ## CI / Release
 
 All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`) so they never fire on Rust-only changes:
-- **Push & PR touching Go files** → `go-test.yaml`: `go vet` + `go test -race` with coverage → Codecov
+- **Push & PR touching Go files** → `go-test.yaml`: `go vet` + `go test -race`
 - **Push to `main`** → `go-build.yaml`: pushes two images tagged with `$GITHUB_SHA` (`:$sha` GOAMD64=v3, `:$sha-amd64v1` GOAMD64=v1). Docker build context is the repo root.
 - **Push a tag** → `go-release.yaml`: same plus `:latest` and `:{tag}`
 - Registries: `us-docker.pkg.dev/moonrhythm-containers/gcr.io/` and `asia-southeast3-docker.pkg.dev/moonrhythm-core/public/`
