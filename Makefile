@@ -1,17 +1,13 @@
-# Umbrella Makefile. The Go implementation lives at the repo root; the Rust
-# implementation lives in rust/ (build tooling: rust/Cargo).
-.PHONY: test go-test rust-test run-local go-build-dev
+# Umbrella Makefile. Go is the sole maintained implementation and lives at the
+# repo root. The Rust implementation in rust/ is DEPRECATED and FROZEN — it is
+# no longer built or tested here; do not edit it.
+.PHONY: test go-test run-local go-build-dev
 
-# Run both implementations' test suites.
-test: go-test rust-test
+# Run the test suite.
+test: go-test
 
 go-test:
 	go vet ./... && go test ./...
-
-# Fast Rust core, then the full proxy+cluster surface.
-rust-test:
-	cd rust && cargo test -p parapet-ingress-controller
-	cd rust && cargo test -p parapet-ingress-controller --features proxy,cluster
 
 # Run the Go controller locally against the current kube context.
 run-local:
