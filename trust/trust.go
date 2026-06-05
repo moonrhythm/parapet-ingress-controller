@@ -11,12 +11,14 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -38,13 +40,67 @@ type bundleBody struct {
 	CAID       string `json:"ca_id"`
 }
 
-// Client is the tokenless HTTPS client to the control plane's GET /v1/trust-bundle.
-// Server-TLS verification is MANDATORY and non-skippable: it is the sole integrity
-// guarantee that justifies dropping the bearer token (a forged bundle would be a
-// trust-boundary takeover). NewClient fails if the CP server CA can't be loaded.
+// Client is the tokenless client to the control plane's GET /v1/trust-bundle.
+//
+// By default it is HTTPS with MANDATORY, non-skippable server-TLS verification: that
+// is the sole integrity guarantee that justifies dropping the bearer token (a forged
+// bundle would be a trust-boundary takeover). NewClient fails if the CP server CA
+// can't be loaded.
+//
+// NewInsecureHTTPClient builds a PLAINTEXT variant for transports that already provide
+// mutual auth + encryption (mesh/tunnel/VPC); it is gated behind
+// EDGE_TRUST_CP_INSECURE_HTTP and is never the default. See ClassifyEndpoint.
 type Client struct {
 	http *http.Client
 	base string
+}
+
+// EndpointMode is how the core dials EDGE_TRUST_CP_ENDPOINT, decided by ClassifyEndpoint.
+type EndpointMode int
+
+const (
+	// ModeHTTPS pulls the trust bundle over verified server-TLS — the default and
+	// only safe-by-default mode. EDGE_TRUST_CP_CA is mandatory and the CP cert is
+	// verified, because the bundle is tokenless and a forged ca_pem is a fleet-wide
+	// trust takeover.
+	ModeHTTPS EndpointMode = iota
+	// ModeInsecureHTTP pulls the trust bundle over PLAINTEXT http://. It exists only
+	// for transports that already provide mutual auth + encryption (mesh/tunnel/VPC)
+	// and must be explicitly opted into via EDGE_TRUST_CP_INSECURE_HTTP — the on-wire
+	// integrity guarantee then lives in the transport, not in-process.
+	ModeInsecureHTTP
+)
+
+// ClassifyEndpoint decides how to dial endpoint. https:// is always ModeHTTPS.
+// http:// is ModeInsecureHTTP only when allowHTTP (EDGE_TRUST_CP_INSECURE_HTTP) is
+// set; a plaintext trust channel without that explicit opt-in, or any other scheme,
+// is an error.
+func ClassifyEndpoint(endpoint string, allowHTTP bool) (EndpointMode, error) {
+	switch {
+	case strings.HasPrefix(endpoint, "https://"):
+		return ModeHTTPS, nil
+	case strings.HasPrefix(endpoint, "http://"):
+		if allowHTTP {
+			return ModeInsecureHTTP, nil
+		}
+		return 0, errors.New("EDGE_TRUST_CP_ENDPOINT is http:// but EDGE_TRUST_CP_INSECURE_HTTP is not set: " +
+			"the tokenless trust channel has no on-wire integrity over plaintext; only enable it on an " +
+			"already mutually-authenticated transport (mesh/tunnel/VPC)")
+	default:
+		return 0, errors.New("EDGE_TRUST_CP_ENDPOINT must be https:// (or http:// with EDGE_TRUST_CP_INSECURE_HTTP=true)")
+	}
+}
+
+// NewInsecureHTTPClient builds a PLAINTEXT trust client (no server-TLS, no CA). It is
+// only safe when the transport (mesh/tunnel/VPC) already provides mutual auth +
+// encryption; gated behind EDGE_TRUST_CP_INSECURE_HTTP, never the default. The
+// forward-only / strict-parse / fail-static guards in Manager still apply, but they do
+// NOT defend against a live MITM on a plaintext channel.
+func NewInsecureHTTPClient(base string) *Client {
+	return &Client{
+		base: base,
+		http: &http.Client{Timeout: 60 * time.Second},
+	}
 }
 
 // NewClient builds the client. caPEM (EDGE_TRUST_CP_CA) is the CA that signs the

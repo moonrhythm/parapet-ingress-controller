@@ -244,21 +244,37 @@ func main() {
 	// to it — in addition to the static TRUST_PROXY CIDRs. See EDGE-AUTOTRUST.md.
 	var trustMgr *trust.Manager
 	if ep := config.String("EDGE_TRUST_CP_ENDPOINT"); ep != "" {
-		if !strings.HasPrefix(ep, "https://") {
-			slog.Error("EDGE_TRUST_CP_ENDPOINT must be https:// (the trust channel has no plaintext mode, ever)", "endpoint", ep)
-			os.Exit(1)
-		}
-		caPath := config.String("EDGE_TRUST_CP_CA")
-		caPEM, err := os.ReadFile(caPath)
+		mode, err := trust.ClassifyEndpoint(ep, config.Bool("EDGE_TRUST_CP_INSECURE_HTTP"))
 		if err != nil {
-			slog.Error("EDGE_TRUST_CP_CA must be set and readable — it is the mandatory server-TLS anchor that makes the tokenless trust channel safe", "path", caPath, "error", err)
+			slog.Error("EDGE_TRUST_CP_ENDPOINT rejected", "endpoint", ep, "error", err)
 			os.Exit(1)
 		}
-		tc, err := trust.NewClient(ep, caPEM)
-		if err != nil {
-			slog.Error("edge trust client", "error", err)
-			os.Exit(1)
+
+		var tc *trust.Client
+		switch mode {
+		case trust.ModeHTTPS:
+			caPath := config.String("EDGE_TRUST_CP_CA")
+			caPEM, err := os.ReadFile(caPath)
+			if err != nil {
+				slog.Error("EDGE_TRUST_CP_CA must be set and readable — it is the mandatory server-TLS anchor that makes the tokenless trust channel safe", "path", caPath, "error", err)
+				os.Exit(1)
+			}
+			tc, err = trust.NewClient(ep, caPEM)
+			if err != nil {
+				slog.Error("edge trust client", "error", err)
+				os.Exit(1)
+			}
+		case trust.ModeInsecureHTTP:
+			// Opt-in plaintext: only safe when the transport already provides mutual
+			// auth + encryption. The in-process server-TLS integrity guarantee is gone,
+			// so say so loudly (mirrors the CP's own plaintext-mode warning).
+			slog.Warn("edge trust: PLAINTEXT trust channel enabled (EDGE_TRUST_CP_INSECURE_HTTP) — the "+
+				"tokenless trust-bundle has NO on-wire integrity; a MITM can inject a forged CA and forge "+
+				"the ENTIRE edge fleet (spoof X-Forwarded-For, bypass WAF/rate-limits). Only run this on a "+
+				"transport that already provides mutual auth + encryption (mesh/tunnel/VPC).", "endpoint", ep)
+			tc = trust.NewInsecureHTTPClient(ep)
 		}
+
 		trustMgr = trust.NewManager()
 		// Warm-start cache (optional): persist the last-good bundle so a restart-during-outage
 		// can't resurrect a rotated-out CA via a stale CP replica. The cache seeds an
