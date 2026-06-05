@@ -87,7 +87,7 @@ func TestReloadIngress(t *testing.T) {
 
 		ctrl.reloadIngressDebounced()
 
-		assert.Equal(t, "example.com/", matchedPattern(t, ctrl.mux, "example.com", "/"))
+		assert.Equal(t, "example.com/", matchedPattern(t, ctrl.currentMux(), "example.com", "/"))
 	})
 
 	t.Run("Prefix registers both exact and subtree", func(t *testing.T) {
@@ -98,8 +98,8 @@ func TestReloadIngress(t *testing.T) {
 
 		ctrl.reloadIngressDebounced()
 
-		assert.Equal(t, "example.com/app", matchedPattern(t, ctrl.mux, "example.com", "/app"))
-		assert.Equal(t, "example.com/app/", matchedPattern(t, ctrl.mux, "example.com", "/app/sub"))
+		assert.Equal(t, "example.com/app", matchedPattern(t, ctrl.currentMux(), "example.com", "/app"))
+		assert.Equal(t, "example.com/app/", matchedPattern(t, ctrl.currentMux(), "example.com", "/app/sub"))
 	})
 
 	t.Run("Exact registers single path", func(t *testing.T) {
@@ -110,9 +110,9 @@ func TestReloadIngress(t *testing.T) {
 
 		ctrl.reloadIngressDebounced()
 
-		assert.Equal(t, "example.com/app", matchedPattern(t, ctrl.mux, "example.com", "/app"))
+		assert.Equal(t, "example.com/app", matchedPattern(t, ctrl.currentMux(), "example.com", "/app"))
 		// Exact must not match the subtree
-		assert.Empty(t, matchedPattern(t, ctrl.mux, "example.com", "/app/sub"))
+		assert.Empty(t, matchedPattern(t, ctrl.currentMux(), "example.com", "/app/sub"))
 	})
 
 	t.Run("skips ingress with non-matching class", func(t *testing.T) {
@@ -124,7 +124,7 @@ func TestReloadIngress(t *testing.T) {
 
 		ctrl.reloadIngressDebounced()
 
-		assert.Empty(t, matchedPattern(t, ctrl.mux, "example.com", "/"))
+		assert.Empty(t, matchedPattern(t, ctrl.currentMux(), "example.com", "/"))
 	})
 
 	t.Run("skips path when backend service is missing", func(t *testing.T) {
@@ -135,7 +135,7 @@ func TestReloadIngress(t *testing.T) {
 
 		ctrl.reloadIngressDebounced()
 
-		assert.Empty(t, matchedPattern(t, ctrl.mux, "example.com", "/"))
+		assert.Empty(t, matchedPattern(t, ctrl.currentMux(), "example.com", "/"))
 	})
 
 	t.Run("recovers from a panicking plugin", func(t *testing.T) {

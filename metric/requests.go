@@ -69,6 +69,25 @@ func init() {
 	prom.Registry().MustRegister(_promRequests.vec, _promRequests.durations)
 }
 
+// methodLabel collapses the client-controlled request method to a bounded label
+// set for the `requests` metric. net/http admits any RFC7230 token as a method
+// (it only rejects invalid token characters), so labeling the counter — and
+// keying the handle cache — with the raw method lets a client mint unbounded
+// permanent series, and grow the cache, by sending random method tokens to a
+// host the router serves (the same OOM class host/upgrade are sanitized
+// against). Only the registered HTTP methods pass through; anything else
+// collapses to "other".
+func methodLabel(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
+		http.MethodPatch, http.MethodDelete, http.MethodConnect,
+		http.MethodOptions, http.MethodTrace:
+		return method
+	default:
+		return "other"
+	}
+}
+
 func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 	duration := time.Since(start)
 
@@ -76,6 +95,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 	s := state.Get(ctx)
 
 	host := HostLabel(r.Host, p.isKnownHost)
+	method := methodLabel(r.Method)
 
 	// Edge rejection: a tracked rejection status where the request never reached
 	// a backend (makeHandler sets serviceTarget only when it proxies). Counted in
@@ -91,7 +111,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 		ingress:     s["ingress"],
 		serviceName: s["serviceName"],
 		serviceType: s["serviceType"],
-		method:      r.Method,
+		method:      method,
 		status:      status,
 	}
 
@@ -99,7 +119,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 		return &requestMetric{
 			counter: p.vec.With(prometheus.Labels{
 				"host":              host,
-				"method":            r.Method,
+				"method":            method,
 				"ingress_name":      s["ingress"],
 				"ingress_namespace": s["namespace"],
 				"service_type":      s["serviceType"],

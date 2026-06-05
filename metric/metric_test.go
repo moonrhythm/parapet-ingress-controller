@@ -2,6 +2,7 @@ package metric
 
 import (
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -21,6 +22,58 @@ func TestHostGetMCaching(t *testing.T) {
 	d := _host.getM("other.example.com", "")
 	assert.NotSame(t, a, c)
 	assert.NotSame(t, a, d)
+}
+
+func TestMethodLabel(t *testing.T) {
+	// registered methods pass through unchanged
+	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "OPTIONS", "TRACE"} {
+		assert.Equal(t, m, methodLabel(m))
+	}
+	// anything else collapses to the bounded sentinel (case-sensitive: lower-case
+	// and arbitrary tokens are non-standard)
+	assert.Equal(t, "other", methodLabel(""))
+	assert.Equal(t, "other", methodLabel("get"))
+	assert.Equal(t, "other", methodLabel("FOOBAR"))
+	assert.Equal(t, "other", methodLabel("PROPFIND"))
+}
+
+func TestMethodLabelBoundsRequestCardinality(t *testing.T) {
+	// A client can send unbounded distinct (but syntactically valid) HTTP method
+	// tokens to a host the router serves. Without methodLabel, each one mints a
+	// new handle-cache entry and a permanent Prometheus series. methodLabel must
+	// collapse them all to one "other" series per (host, status).
+	const host = "method-card-test.example.com"
+	s := state.State{
+		"namespace":   "ns",
+		"ingress":     "ing",
+		"serviceName": "svc",
+		"serviceType": "ClusterIP",
+	}
+
+	countEntries := func() int {
+		n := 0
+		_promRequests.cache.mu.RLock()
+		for k := range _promRequests.cache.m {
+			if k.host == host {
+				n++
+			}
+		}
+		_promRequests.cache.mu.RUnlock()
+		return n
+	}
+
+	start := time.Now()
+	for i := 0; i < 500; i++ {
+		// httptest.NewRequest parses the request line through http.ReadRequest, so
+		// these go through the same method-validation path a real client hits.
+		method := "M" + strconv.Itoa(i)
+		r := httptest.NewRequest(method, "http://"+host+"/x", nil)
+		r = r.WithContext(state.NewContext(r.Context(), s))
+		_promRequests.Inc(r, 200, start)
+	}
+
+	assert.Equal(t, 1, countEntries(),
+		"500 distinct method tokens must collapse to a single 'other' series per (host,status)")
 }
 
 func TestPromRequestsIncCachesAndCounts(t *testing.T) {

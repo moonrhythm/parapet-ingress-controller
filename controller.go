@@ -38,17 +38,23 @@ const (
 	secretSizeHint   = 50
 )
 
+// routeState is the immutable routing snapshot swapped in on each ingress
+// reload: the live mux plus the set of hosts it serves. Bundling both behind one
+// atomic.Pointer lets the request path read them with a single lock-free load
+// instead of taking a per-request RWMutex. knownHosts bounds host-labeled metric
+// cardinality — a Host the router doesn't serve collapses to a sentinel label
+// instead of minting unbounded series under a random-Host flood.
+type routeState struct {
+	mux        *http.ServeMux
+	knownHosts map[string]struct{}
+}
+
 // Controller is the parapet ingress controller
 type Controller struct {
-	// mu is the mutex for mux
-	mu  sync.RWMutex
-	mux *http.ServeMux
-	// knownHosts is the set of hosts the current mux serves (the host part of
-	// each registered route). Guarded by mu and swapped atomically with mux on
-	// reload. Used to bound host-labeled metric cardinality: a Host the router
-	// doesn't serve collapses to a sentinel label instead of creating an
-	// unbounded number of series under a random-Host flood.
-	knownHosts map[string]struct{}
+	// routes is the current routing snapshot, swapped atomically on reload so the
+	// request path (ServeHandler, IsKnownHost) reads it lock-free. Never nil after
+	// New(); reloadIngressDebounced builds a fresh *routeState and Stores it.
+	routes atomic.Pointer[routeState]
 
 	// namespace to watch, or empty to watch all
 	watchNamespace string
@@ -110,6 +116,9 @@ type Controller struct {
 // New creates new ingress controller
 func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl := &Controller{}
+	// Seed an empty routing snapshot so the request path never observes a nil
+	// pointer if a request lands before the first reload completes.
+	ctrl.routes.Store(&routeState{mux: http.NewServeMux(), knownHosts: map[string]struct{}{}})
 	ctrl.health = healthz.New()
 	ctrl.health.SetReady(false)
 	ctrl.watchNamespace = watchNamespace
@@ -130,11 +139,7 @@ func (ctrl *Controller) Use(m plugin.Plugin) {
 // ServeHandler implements parapet.Middleware
 func (ctrl *Controller) ServeHandler(_ http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctrl.mu.RLock()
-		mux := ctrl.mux
-		ctrl.mu.RUnlock()
-
-		mux.ServeHTTP(w, r)
+		ctrl.routes.Load().mux.ServeHTTP(w, r)
 	})
 }
 
@@ -474,11 +479,14 @@ func (ctrl *Controller) reloadIngressDebounced() {
 
 	mux := buildRoutes(routes)
 	knownHosts := buildKnownHosts(routes)
-	ctrl.mu.Lock()
-	ctrl.mux = mux
-	ctrl.knownHosts = knownHosts
-	ctrl.mu.Unlock()
+	ctrl.routes.Store(&routeState{mux: mux, knownHosts: knownHosts})
 	ctrl.reloadSecret()
+}
+
+// currentMux returns the live routing mux. Internal/test accessor for the
+// atomically-swapped route state.
+func (ctrl *Controller) currentMux() *http.ServeMux {
+	return ctrl.routes.Load().mux
 }
 
 // buildKnownHosts extracts the distinct host part (everything before the first
@@ -497,9 +505,7 @@ func buildKnownHosts(routes map[string]http.Handler) map[string]struct{} {
 // IsKnownHost reports whether the current routes serve host (already lowercased
 // and port-stripped by the upstream middleware, matching the registered keys).
 func (ctrl *Controller) IsKnownHost(host string) bool {
-	ctrl.mu.RLock()
-	_, ok := ctrl.knownHosts[host]
-	ctrl.mu.RUnlock()
+	_, ok := ctrl.routes.Load().knownHosts[host]
 	return ok
 }
 
