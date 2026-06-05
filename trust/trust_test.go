@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
@@ -159,25 +160,22 @@ func TestTrustBundleOverTLSEndToEnd(t *testing.T) {
 
 func TestClassifyEndpoint(t *testing.T) {
 	cases := []struct {
-		name      string
-		endpoint  string
-		allowHTTP bool
-		want      EndpointMode
-		wantErr   bool
+		name     string
+		endpoint string
+		want     EndpointMode
+		wantErr  bool
 	}{
-		{"https without flag", "https://cp:8443", false, ModeHTTPS, false},
-		{"https ignores the flag (never downgraded)", "https://cp:8443", true, ModeHTTPS, false},
-		{"http without flag is rejected", "http://cp:8080", false, 0, true},
-		{"http with flag is plaintext", "http://cp:8080", true, ModeInsecureHTTP, false},
-		{"no scheme is rejected", "cp:8443", true, 0, true},
-		{"other scheme is rejected", "ftp://cp", true, 0, true},
+		{"https is verified TLS", "https://cp:8443", ModeHTTPS, false},
+		{"http is plaintext (no flag needed)", "http://cp:8080", ModeInsecureHTTP, false},
+		{"no scheme is rejected", "cp:8443", 0, true},
+		{"other scheme is rejected", "ftp://cp", 0, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := ClassifyEndpoint(c.endpoint, c.allowHTTP)
+			got, err := ClassifyEndpoint(c.endpoint)
 			if c.wantErr {
 				if err == nil {
-					t.Fatalf("expected error for %q (allowHTTP=%v)", c.endpoint, c.allowHTTP)
+					t.Fatalf("expected error for %q", c.endpoint)
 				}
 				return
 			}
@@ -191,9 +189,22 @@ func TestClassifyEndpoint(t *testing.T) {
 	}
 }
 
-// The opt-in plaintext client (EDGE_TRUST_CP_INSECURE_HTTP) pulls the bundle over
-// http:// with no server-TLS and no CA. Integrity is assumed to come from the
-// transport (mesh/tunnel); the plaintext test server stands in for it.
+// EDGE_TRUST_CP_CA unset falls back to the system trust store, but verification stays
+// ON (no InsecureSkipVerify): a CP cert not anchored in the system store is rejected,
+// unlike a pinned NewClient handed that cert as its CA.
+func TestSystemRootsClientVerifiesAndRejectsUntrusted(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler()) // self-signed, not in system roots
+	defer srv.Close()
+
+	c := NewSystemRootsClient(srv.URL)
+	if _, _, err := c.Fetch(0, false); err == nil {
+		t.Fatal("system-roots client must reject a CP cert not anchored in the system trust store")
+	}
+}
+
+// The plaintext client pulls the bundle over an http:// endpoint with no server-TLS
+// and no CA — the http:// use-case. Integrity is assumed to come from the transport
+// (mesh/tunnel); the plaintext test server stands in for it.
 func TestInsecureHTTPClientFetchesOverPlaintext(t *testing.T) {
 	caCertPEM, caKeyPEM := caPEMFor(t)
 	signer, _, err := edgecp.NewProvidedSigner(caCertPEM, caKeyPEM, time.Hour, time.Minute)

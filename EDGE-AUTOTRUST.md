@@ -171,19 +171,23 @@ too** — a truncated/garbled NEW block in the `OLD ++ NEW` overlap bundle must 
 rejected (keep last-good), never half-applied, so a bad NEW block blocks the rotation
 loudly rather than silently dropping NEW (which would 502 just-re-minted edges).
 
-**Deliberate inversion of `edge/cp.go`:** in the default (https) mode a
-missing/empty/unparseable `EDGE_TRUST_CP_CA`, or an `AppendCertsFromPEM` that adds
-**zero** certs, is a **FATAL startup error**, and `InsecureSkipVerify` is never set. A
-non-`https://` endpoint is rejected fatally **unless** `EDGE_TRUST_CP_INSECURE_HTTP=true`
-is explicitly set — a guarded opt-in (`trust.ClassifyEndpoint`) into a **PLAINTEXT
-`http://`** channel for transports that already provide mutual auth + encryption
-(mesh / tunnel / VPC). In that mode the integrity guarantee lives in the transport,
-not in-process, `EDGE_TRUST_CP_CA` is unused, and the choice is logged loudly; it is
-**off by default**. The forward-only / strict-parse / fail-static guards still apply,
-but they do **not** defend against a live MITM on a plaintext channel, so `https://`
-(terminate TLS at the mesh if needed) remains the recommendation. `EDGE_TRUST_CP_CA`
-SHOULD be a dedicated single-purpose CA signing only the CP server cert; the client
-verifies the CP cert hostname against the endpoint host.
+**`EDGE_TRUST_CP_ENDPOINT` scheme + CA (`trust.ClassifyEndpoint`):**
+
+- **`https://` (recommended):** verified server-TLS, `InsecureSkipVerify` never set. If
+  `EDGE_TRUST_CP_CA` is set it **pins** to that CA (an `AppendCertsFromPEM` that adds
+  **zero** certs is a **FATAL** error; a set-but-unreadable file is **FATAL** — no silent
+  downgrade). If `EDGE_TRUST_CP_CA` is **unset**, the CP cert is verified against the host's
+  **system trust store** (`NewSystemRootsClient`; the image ships `ca-certificates`) — real
+  verified TLS with hostname checks, but weaker than pinning (any system-trusted CA could
+  impersonate the CP), so a pinned, dedicated single-purpose CA remains the tightest option.
+- **`http://`:** a **PLAINTEXT** channel — the tokenless integrity guarantee then lives in
+  the transport, not in-process, `EDGE_TRUST_CP_CA` is unused, and the choice is **logged
+  loudly**. The forward-only / strict-parse / fail-static guards still apply, but they do
+  **not** defend against a live MITM on plaintext, so use `http://` **only** on a transport
+  that already provides mutual auth + encryption (mesh / tunnel / VPC) — otherwise keep
+  `https://` (terminate TLS at the mesh if needed). Any other scheme is a fatal error.
+
+In every mode the client verifies the CP cert hostname against the endpoint host.
 
 ### Freshness: long-poll, not bare poll
 
@@ -695,9 +699,8 @@ not Prometheus counters (a Pushgateway would be a new failure domain).
 |---|---|---|---|
 | `TRUST_PROXY` | core | `cloudflare` | **Unchanged** — the `cidrTrust` OR-branch. Never add edge egress CIDRs here. |
 | `CP_METRICS_LISTEN` | CP | `:9187` | Separate unauthenticated `/metrics` listener (serving process only); `""` disables. Restrict via NetworkPolicy. |
-| `EDGE_TRUST_CP_ENDPOINT` | core | `""` (off) | Base URL of the CP. Set ⇒ the core pulls `GET /v1/trust-bundle`. **`https://` by default** (non-https is fatal); `http://` is permitted only with `EDGE_TRUST_CP_INSECURE_HTTP=true`. |
-| `EDGE_TRUST_CP_INSECURE_HTTP` | core | `false` | Opt into a **PLAINTEXT `http://`** trust channel. Safe **only** on a transport that already provides mutual auth + encryption (mesh/tunnel/VPC) — the in-process server-TLS integrity guarantee is gone (a MITM could inject a forged CA and forge the whole fleet), so it is off by default, logged loudly, and `EDGE_TRUST_CP_CA` is unused. Prefer terminating TLS at the mesh and keeping `https://`. |
-| `EDGE_TRUST_CP_CA` | core | `""` | PEM of the CA that signs the **CP server** cert → `RootCAs`. **Mandatory + fatal** in https mode if missing/empty/unparseable; no system-roots fallback, no skip-verify. Unused when `EDGE_TRUST_CP_INSECURE_HTTP=true`. Dedicated single-purpose CA; distinct from the edge CA in `ca_pem`. |
+| `EDGE_TRUST_CP_ENDPOINT` | core | `""` (off) | Base URL of the CP. Set ⇒ the core pulls `GET /v1/trust-bundle`. `https://` = verified TLS (recommended); `http://` = **PLAINTEXT** (logged loudly; only safe on a mesh/tunnel/VPC transport that already provides mutual auth + encryption). Any other scheme is fatal. |
+| `EDGE_TRUST_CP_CA` | core | `""` | **Optional.** PEM of the CA that signs the **CP server** cert → pinned `RootCAs` (the tightest trust; a dedicated single-purpose CA, distinct from the edge CA in `ca_pem`). If **unset** (https mode), the CP cert is verified against the **system trust store** instead — weaker (any system-trusted CA could impersonate the CP), but still verified TLS with hostname checks. A set-but-unreadable file, or one yielding zero certs, is fatal (no silent downgrade); unused for `http://`. `InsecureSkipVerify` is never set. |
 | `EDGE_TRUST_CP_WATCH_TIMEOUT` / `_POLL_INTERVAL` | core/CP | `30s` / `5m` | Long-poll ceiling; safety-net poll. The poll now bounds **CA-rotation** propagation only (not per-request revocation), so it may lengthen; keep the long-poll for fast rotation convergence. |
 | `EDGE_TRUST_CP_CACHE_FILE` / `_MAX_STALE` | core | `""` (off) / `3600` (s, =1h) | Warm-start cache. After every successful poll the core persists `{generation, ca_id, ca_pem, written_at}` (public; atomic temp+rename) and on startup loads its generation as an anti-rollback **floor** (a bundle below it ⇒ `trust_apply_total{result="floor_rejected"}`), so a restart-during-outage can't resurrect a rotated-out CA via a stale CP replica. It confers **NO trust** until a live fetch revalidates — the cached CA is **not** loaded into `ClientCAs`, so trust stays CIDR-only meanwhile (`trust_warmstart_active=1`) and flips to mTLS on the first live apply. `written_at` tracks last CP **contact** (refreshed on 304s too), so `_MAX_STALE` (seconds) bounds time-since-contact: a longer outage discards the floor and cold-starts (larger = safer vs. resurrection; smaller = recovers faster from a CP-side generation reset). |
 | `EDGE_TRUST_REQUIRE_SAN` | core | **forced false, deprecated** | CA-only is the only model; the per-request SAN check is removed. Setting `true` with CP-issuance is a **fatal config error**. Slated for removal. |
