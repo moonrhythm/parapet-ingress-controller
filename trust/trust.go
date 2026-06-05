@@ -343,6 +343,7 @@ const (
 	resultEmptyRejected
 	resultRollbackRejected
 	resultFloorRejected
+	resultUnchanged
 )
 
 func (r applyResult) label() string {
@@ -357,6 +358,8 @@ func (r applyResult) label() string {
 		return "rollback_rejected"
 	case resultFloorRejected:
 		return "floor_rejected"
+	case resultUnchanged:
+		return "unchanged"
 	default:
 		return "unknown"
 	}
@@ -383,8 +386,15 @@ func (m *Manager) apply(b Bundle) (applyResult, error) {
 		return resultFloorRejected, fmt.Errorf("warm-start floor: bundle generation %d < persisted floor %d (stale/rolled-back CA across restart)", b.Generation, m.floor)
 	}
 	cur := m.gen.Load()
-	if cur != 0 && b.Generation <= cur {
-		return resultRollbackRejected, fmt.Errorf("rollback: bundle generation %d <= current %d", b.Generation, cur)
+	if cur != 0 && b.Generation == cur {
+		// Same generation as the live bundle: a benign replay, not a rollback. The
+		// safety-net plain-GET poll re-fetches the current bundle in steady state (and
+		// some CP long-poll implementations return the current bundle instead of a
+		// 304), so this happens routinely and must NOT warn.
+		return resultUnchanged, fmt.Errorf("unchanged: bundle generation %d == current %d", b.Generation, cur)
+	}
+	if cur != 0 && b.Generation < cur {
+		return resultRollbackRejected, fmt.Errorf("rollback: bundle generation %d < current %d", b.Generation, cur)
 	}
 	m.clientCAs.Store(pool)
 	m.gen.Store(b.Generation)
@@ -458,7 +468,15 @@ func (m *Manager) Run(ctx context.Context, c *Client, pollInterval time.Duration
 		default:
 			res, err := m.apply(b)
 			metric.TrustApply(res.label())
-			if err != nil {
+			if res == resultUnchanged {
+				// Same generation re-fetched: successful CP contact, nothing changed.
+				// Refresh the liveness timestamp (like a 304) and stay quiet — this is
+				// not a rollback.
+				slog.Debug("core: trust-bundle unchanged (same generation)", "generation", b.Generation)
+				if m.lastGood != nil {
+					m.writeCache(*m.lastGood)
+				}
+			} else if err != nil {
 				slog.Warn("core: trust-bundle rejected; keeping last-good", "error", err)
 			} else {
 				metric.TrustBundleApplied(b.CAID, b.Generation)
