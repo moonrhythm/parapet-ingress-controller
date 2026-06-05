@@ -256,10 +256,23 @@ func AllowRemote(ctx Context) {
 	xs := strings.Split(allowRemote, ",")
 	for _, x := range xs {
 		x = strings.TrimSpace(x)
-		_, allow, _ := net.ParseCIDR(x)
-		if allow != nil {
-			allowList = append(allowList, allow)
+		if x == "" {
+			continue
 		}
+		_, allow, err := net.ParseCIDR(x)
+		if err != nil {
+			slog.Error("plugin/AllowRemote: invalid CIDR, ignoring entry",
+				"ingress", ctx.ingressID(), "value", x, "error", err)
+			continue
+		}
+		allowList = append(allowList, allow)
+	}
+	if len(allowList) == 0 {
+		// Every entry was malformed: the block predicate below would 403 ALL
+		// traffic (except acme-challenge). Surface it so the outage is diagnosable
+		// instead of silently blackholing the ingress.
+		slog.Error("plugin/AllowRemote: no valid CIDRs parsed; this ingress will block all traffic",
+			"ingress", ctx.ingressID(), "annotation", allowRemote)
 	}
 
 	m := block.New(func(r *http.Request) bool {

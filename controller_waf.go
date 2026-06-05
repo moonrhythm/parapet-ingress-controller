@@ -154,7 +154,7 @@ func (ctrl *Controller) reloadWAFDebounced() {
 		}
 	}()
 
-	var globalDocs []string
+	var globalCMs []*v1.ConfigMap
 	zoneDocs := map[string][]string{}
 
 	ctrl.watchedConfigMaps.Range(func(_, value any) bool {
@@ -168,13 +168,30 @@ func (ctrl *Controller) reloadWAFDebounced() {
 					"configmap", cm.Namespace+"/"+cm.Name, "pod_namespace", ctrl.PodNamespace)
 				return true
 			}
-			globalDocs = append(globalDocs, sortedDataValues(cm.Data)...)
+			globalCMs = append(globalCMs, cm)
 		case wafRoleZone:
 			key := cm.Namespace + "/" + cm.Name
 			zoneDocs[key] = append(zoneDocs[key], sortedDataValues(cm.Data)...)
 		}
 		return true
 	})
+
+	// Concatenate global ConfigMaps in a deterministic namespace/name order. The
+	// sync.Map.Range above visits them in random order, so without this the
+	// concatenation order of multiple global ConfigMaps — and thus equal-priority
+	// rule precedence and the fingerprint below — would flip between reloads.
+	// (Zones don't need this: a zone key is one ConfigMap's namespace/name, so its
+	// docs come from a single ConfigMap.)
+	sort.Slice(globalCMs, func(i, j int) bool {
+		if globalCMs[i].Namespace != globalCMs[j].Namespace {
+			return globalCMs[i].Namespace < globalCMs[j].Namespace
+		}
+		return globalCMs[i].Name < globalCMs[j].Name
+	})
+	var globalDocs []string
+	for _, cm := range globalCMs {
+		globalDocs = append(globalDocs, sortedDataValues(cm.Data)...)
+	}
 
 	// global: recompile only when the rule input changed. The fingerprint is over
 	// the exact (sorted, deterministic) docs that feed SetRules, so an identical

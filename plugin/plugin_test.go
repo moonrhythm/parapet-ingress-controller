@@ -1,6 +1,8 @@
 package plugin_test
 
 import (
+	"bytes"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -402,6 +404,44 @@ func TestAllowRemote(t *testing.T) {
 		assert.True(t, called)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
+}
+
+func TestAllowRemoteAllInvalidCIDRsLogsAndBlocks(t *testing.T) {
+	// Not parallel: temporarily swaps the slog default to capture output. (Go runs
+	// non-parallel tests sequentially, so no concurrent slog user races the swap.)
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})))
+	defer slog.SetDefault(prev)
+
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "ns",
+				Name:      "ing",
+				Annotations: map[string]string{
+					// a bare IP (no /mask) is rejected by net.ParseCIDR, so the whole
+					// allow-list ends up empty → the ingress would 403 all traffic.
+					"parapet.moonrhythm.io/allow-remote": "203.0.113.5",
+				},
+			},
+		},
+	}
+	AllowRemote(ctx)
+
+	logs := buf.String()
+	assert.Contains(t, logs, "invalid CIDR", "the malformed entry must be logged")
+	assert.Contains(t, logs, "block all traffic", "the total-block outcome must be surfaced")
+
+	// behavior is fail-closed: every non-acme request is forbidden
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.RemoteAddr = "203.0.113.5:1234"
+	w := httptest.NewRecorder()
+	var called bool
+	ctx.ServeHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })).ServeHTTP(w, r)
+	assert.False(t, called)
+	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
 func TestStripPrefix(t *testing.T) {

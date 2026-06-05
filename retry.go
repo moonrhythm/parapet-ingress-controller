@@ -51,6 +51,7 @@ func retryMiddleware(h http.Handler) http.Handler {
 			r.Body = &trackBodyRead{ReadCloser: r.Body}
 		}
 
+	retryLoop:
 		for i := 0; i < maxRetry; i++ {
 			if tryServe(w, r) {
 				return
@@ -59,7 +60,10 @@ func retryMiddleware(h http.Handler) http.Handler {
 			select {
 			case <-time.After(backoffDuration(i)):
 			case <-ctx.Done():
-				break
+				// client gone / request canceled: stop retrying. A bare `break`
+				// here would only exit the select, not the loop, so the label is
+				// required to actually abort.
+				break retryLoop
 			}
 		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)

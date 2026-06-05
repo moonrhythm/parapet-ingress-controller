@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -44,6 +45,28 @@ func TestRetryMiddleware(t *testing.T) {
 		})))
 		assert.Equal(t, int32(1), calls.Load(), "a responded 503 is served once, not retried")
 		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	})
+
+	t.Run("a canceled context aborts the retry loop immediately", func(t *testing.T) {
+		// Once the request context is canceled (client disconnected), the loop must
+		// stop retrying — the ctx.Done() case must break the *loop*, not just the
+		// select. The handler keeps emitting a retryable dial error, so a bare
+		// `break` would burn through all maxRetry attempts; the labeled break stops
+		// after the first.
+		var calls atomic.Int32
+		ctx, cancel := context.WithCancel(context.Background())
+		h := retryMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			calls.Add(1)
+			cancel() // disconnect mid-attempt
+			panic(error(dialErr))
+		}))
+		r := httptest.NewRequest(http.MethodGet, "http://svc/", nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+
+		assert.Equal(t, int32(1), calls.Load(),
+			"canceled context must abort the loop after one attempt, not retry")
+		assert.Equal(t, http.StatusBadGateway, w.Code)
 	})
 
 	t.Run("does NOT retry a non-connection panic", func(t *testing.T) {
