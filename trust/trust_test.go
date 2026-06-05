@@ -157,6 +157,63 @@ func TestTrustBundleOverTLSEndToEnd(t *testing.T) {
 	}
 }
 
+func TestClassifyEndpoint(t *testing.T) {
+	cases := []struct {
+		name      string
+		endpoint  string
+		allowHTTP bool
+		want      EndpointMode
+		wantErr   bool
+	}{
+		{"https without flag", "https://cp:8443", false, ModeHTTPS, false},
+		{"https ignores the flag (never downgraded)", "https://cp:8443", true, ModeHTTPS, false},
+		{"http without flag is rejected", "http://cp:8080", false, 0, true},
+		{"http with flag is plaintext", "http://cp:8080", true, ModeInsecureHTTP, false},
+		{"no scheme is rejected", "cp:8443", true, 0, true},
+		{"other scheme is rejected", "ftp://cp", true, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ClassifyEndpoint(c.endpoint, c.allowHTTP)
+			if c.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q (allowHTTP=%v)", c.endpoint, c.allowHTTP)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != c.want {
+				t.Fatalf("mode = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// The opt-in plaintext client (EDGE_TRUST_CP_INSECURE_HTTP) pulls the bundle over
+// http:// with no server-TLS and no CA. Integrity is assumed to come from the
+// transport (mesh/tunnel); the plaintext test server stands in for it.
+func TestInsecureHTTPClientFetchesOverPlaintext(t *testing.T) {
+	caCertPEM, caKeyPEM := caPEMFor(t)
+	signer, _, err := edgecp.NewProvidedSigner(caCertPEM, caKeyPEM, time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := edgecp.NewServer(edgecp.NewCertStore(), edgecp.NewAuthz(nil)).WithSigner(signer, 1).Handler()
+	srv := httptest.NewServer(h) // PLAINTEXT http://, unlike NewTLSServer above
+	defer srv.Close()
+
+	c := NewInsecureHTTPClient(srv.URL)
+	b, unchanged, err := c.Fetch(0, false)
+	if err != nil || unchanged {
+		t.Fatalf("plaintext fetch: err=%v unchanged=%v", err, unchanged)
+	}
+	if b.CAID != signer.CAID() {
+		t.Errorf("ca_id mismatch: %q vs %q", b.CAID, signer.CAID())
+	}
+}
+
 // ---- warm-start cache ----
 
 // The full warm-start cycle: apply -> persist -> a fresh manager loads the floor ->
