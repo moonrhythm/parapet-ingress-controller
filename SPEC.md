@@ -210,7 +210,7 @@ the metric exists in both.
 | `parapet_requests{host,status,method,ingress_name,ingress_namespace,service_type,service_name}` | both |
 | `parapet_service_duration_seconds{service_type,service_namespace,service_name}` | both |
 | `parapet_reload{success}` | both |
-| `parapet_host_active_requests{host,upgrade}` | both |
+| `parapet_host_active_requests{host,kind}` | both |
 | `parapet_host_ratelimit_requests{host}` | both |
 | `parapet_backend_connections{addr}` | both (Rust = in-flight-per-addr approximation) |
 | `parapet_backend_network_read_bytes{addr}` / `_write_bytes{addr}` | both |
@@ -222,6 +222,14 @@ the metric exists in both.
 
 Host and HTTP-method labels are collapsed to `other` for values the router
 doesn't serve, to bound cardinality under a flood.
+
+On `parapet_host_active_requests`, the `kind` label classifies each in-flight
+request into one mutually-exclusive connection bucket: `websocket` / `h2c` from
+the `Upgrade` header (checked first, takes precedence), `other` for any other
+`Upgrade` token, `sse` when there's no upgrade and the `Accept` header contains
+`text/event-stream` (what the browser EventSource API sends), else `http` for
+plain HTTP. The set is bounded to `{http, websocket, h2c, sse, other}` so a
+client can't mint unbounded series with arbitrary `Upgrade` values.
 
 The byte counters (`parapet_backend_network_*_bytes`, `parapet_network_*_bytes`)
 share names but **not magnitudes**: Go wraps the `net.Conn` so it counts wire

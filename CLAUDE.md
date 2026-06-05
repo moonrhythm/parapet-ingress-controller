@@ -2,14 +2,25 @@
 
 The Go implementation of parapet-ingress-controller, built on the [parapet](https://github.com/moonrhythm/parapet) middleware framework. It watches Kubernetes Ingress, Service, Secret, ConfigMap, and Endpoints resources and hot-reloads an `http.ServeMux` router without restarting the process.
 
-> **One of two co-maintained implementations.** The shared behavior contract —
+> **Go is the sole maintained implementation.** The behavior contract —
 > annotations, env vars, metrics, WAF model, per-request order — is
-> [`SPEC.md`](SPEC.md) (change it there first). The Rust implementation lives in
-> [`rust/`](rust/) ([`rust/README.md`](rust/README.md)). This file is the
-> **Go-specific** architecture guide; the Go module now lives at the repo root,
-> so the paths below are relative to it. Cloud Profiler/Trace are Go-only. The
-> shared assets (`deploy/`, `WAF.md`, `SPEC.md`, `EDGE.md`, `conformance/`) and
-> the Rust tree (`rust/`) sit alongside the Go code at the repo root.
+> [`SPEC.md`](SPEC.md). This file is the **Go-specific** architecture guide; the
+> Go module lives at the repo root, so the paths below are relative to it. The
+> shared assets (`deploy/`, `WAF.md`, `SPEC.md`, `EDGE.md`, `conformance/`) sit
+> alongside the Go code at the repo root.
+>
+> ⚠️ **The Rust implementation (`rust/`) is DEPRECATED and FROZEN. Do not edit
+> any file under `rust/`** — not for new features, not for SPEC parity, not for
+> cleanup. It is kept only for historical reference. SPEC.md is no longer a
+> two-way contract: change behavior in the Go code, and update SPEC.md to match,
+> without porting anything to Rust. The Rust CI workflows have been removed.
+
+## Before starting a task
+
+**Always check the current git branch first** (`git branch --show-current`) and
+confirm it's the right place for the work. If you're on `main` or on an unrelated
+feature branch, create a new branch off `main` before making changes — don't pile
+unrelated work onto an existing feature branch or commit straight to `main`.
 
 ## Repository layout
 
@@ -49,7 +60,7 @@ cmd/edge-proxy/                   # out-of-cluster edge proxy binary (parapet fr
 Dockerfile                        # controller image (multi-stage Go build, CGO + cbrotli)
 Dockerfile.edge-controlplane      # control-plane image (pure Go, distroless/static)
 Dockerfile.edge                   # edge proxy image (pure Go, distroless/static + baked GeoIP)
-# also at repo root: deploy/  WAF.md  SPEC.md  EDGE.md  conformance/  rust/ (the Rust implementation)
+# also at repo root: deploy/  WAF.md  SPEC.md  EDGE.md  conformance/  rust/ (DEPRECATED + FROZEN — do not edit)
 # .github/workflows/: go-test / go-build / go-release .yaml (path-filtered to **/*.go + go.mod/go.sum);
 #   edge-build / edge-e2e .yaml build + smoke-test the edge + control-plane images
 ```
@@ -139,7 +150,7 @@ go build -o parapet-ingress-controller \
 
 Before committing, run `gofmt -l .` (must print nothing) and `go vet ./...` — CI
 fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
-combined `make test` (Go + Rust) target.
+`make test` target (Go only; Rust is frozen and no longer built or tested).
 
 ### Docker image
 - Builder: `golang:1.26.4-trixie` with `libbrotli-dev` (CGO enabled, `-tags=cbrotli`)
@@ -148,7 +159,7 @@ combined `make test` (Go + Rust) target.
 
 ## CI / Release
 
-All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`) so they never fire on Rust-only changes:
+All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`):
 - **Push & PR touching Go files** → `go-test.yaml`: `go vet` + `go test -race`
 - **Push to `main`** → `go-build.yaml`: pushes two images tagged with `$GITHUB_SHA` (`:$sha` GOAMD64=v3, `:$sha-amd64v1` GOAMD64=v1). Docker build context is the repo root.
 - **Push a tag** → `go-release.yaml`: same plus `:latest` and `:{tag}`
@@ -161,7 +172,7 @@ module github.com/moonrhythm/parapet-ingress-controller
 go 1.26.4
 ```
 
-The module lives at the repo root, so `go install` targets are `…/parapet-ingress-controller/cmd/parapet-ingress-controller`. (The Rust implementation lives in `rust/`; the repo hosts two implementations of one behavior contract.) Key dependencies: `github.com/moonrhythm/parapet`, `k8s.io/client-go`, `go.opentelemetry.io`, `github.com/prometheus/client_golang`, `cloud.google.com/go/profiler`.
+The module lives at the repo root, so `go install` targets are `…/parapet-ingress-controller/cmd/parapet-ingress-controller`. (A deprecated, frozen Rust implementation lives in `rust/` — kept for reference only; do not edit it.) Key dependencies: `github.com/moonrhythm/parapet`, `k8s.io/client-go`, `go.opentelemetry.io`, `github.com/prometheus/client_golang`, `cloud.google.com/go/profiler`.
 
 ## Adding a new plugin
 
