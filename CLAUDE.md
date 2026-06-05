@@ -13,7 +13,14 @@ The Go implementation of parapet-ingress-controller, built on the [parapet](http
 > any file under `rust/`** — not for new features, not for SPEC parity, not for
 > cleanup. It is kept only for historical reference. SPEC.md is no longer a
 > two-way contract: change behavior in the Go code, and update SPEC.md to match,
-> without porting anything to Rust. The Rust CI test workflow has been removed.
+> without porting anything to Rust. The Rust CI workflows have been removed.
+
+## Before starting a task
+
+**Always check the current git branch first** (`git branch --show-current`) and
+confirm it's the right place for the work. If you're on `main` or on an unrelated
+feature branch, create a new branch off `main` before making changes — don't pile
+unrelated work onto an existing feature branch or commit straight to `main`.
 
 ## Repository layout
 
@@ -147,7 +154,7 @@ fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
 
 ## CI / Release
 
-All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`) so they never fire on Rust-only changes:
+All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`):
 - **Push & PR touching Go files** → `go-test.yaml`: `go vet` + `go test -race`
 - **Push to `main`** → `go-build.yaml`: pushes two images tagged with `$GITHUB_SHA` (`:$sha` GOAMD64=v3, `:$sha-amd64v1` GOAMD64=v1). Docker build context is the repo root.
 - **Push a tag** → `go-release.yaml`: same plus `:latest` and `:{tag}`
