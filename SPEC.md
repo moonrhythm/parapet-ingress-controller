@@ -196,7 +196,8 @@ invariants:
 | `TR_MAX_CONNS_PER_HOST` | stdlib | **Go-only** | Max conns per host (no Pingora 0.8 equivalent) |
 | `PROFILER` / `PROFILER_NAME` | `false` | **Go-only** | Cloud Profiler (no Rust SDK) |
 | `WAF_COST_LIMIT` / `WAF_INSPECT_BODY` / `WAF_DISABLE_MACROS` | — | **Go-only** | cel-rust has no cost limit; body inspection is phase-2 |
-| `UPSTREAM_AUTO_H2C` | `false` | **Go-only** | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The HTTP/1.1-only verdict is cached per-Service and cleared on route reload. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
+| `UPSTREAM_AUTO_H2C` | `false` | **Go-only** | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The verdict (h2c or HTTP/1.1-only) is cached per-Service with a TTL and re-probed on expiry; concurrent probes for a cold/expired upstream are single-flighted so they can't stampede failed connections. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
+| `UPSTREAM_AUTO_H2C_TTL` | `10m` | **Go-only** | How long a cached auto-h2c verdict is trusted before the upstream is re-probed (only when `UPSTREAM_AUTO_H2C` is on) |
 | `UPSTREAM_CONNECT_TIMEOUT` | `2s` | **Rust-only** | TCP connect timeout to a pod (connect phase) |
 | `UPSTREAM_TOTAL_CONNECT_TIMEOUT` | `3s` | **Rust-only** | Connect + TLS-handshake timeout |
 | `DEBUG_ENDPOINTS` | `false` | **Rust-only** | Serve `GET /debug/routes` |
