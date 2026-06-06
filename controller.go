@@ -490,9 +490,6 @@ func (ctrl *Controller) reloadIngressDebounced() {
 	mux := buildRoutes(routes)
 	knownHosts := buildKnownHosts(routes)
 	ctrl.routes.Store(&routeState{mux: mux, knownHosts: knownHosts})
-	// routes reloaded — forget remembered h2c-unsupported upstreams so a Service
-	// that gained h2c support is re-probed (no-op unless auto-h2c is enabled).
-	ctrl.proxy.ResetH2C()
 	slog.Info("reloaded ingresses", "loaded", loaded, "skipped", skipped, "routes", len(routes))
 	ctrl.reloadSecret()
 }

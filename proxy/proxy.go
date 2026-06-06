@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"time"
 )
 
 type Proxy struct {
@@ -72,23 +73,13 @@ func (p *Proxy) ConfigTransport(f func(tr *http.Transport)) {
 }
 
 // EnableAutoH2C turns on speculative h2c detection for plain-http upstreams.
-// Upstreams that don't speak HTTP/2 are probed once, remembered, and served over
-// HTTP/1.1 thereafter (see autoH2CTransport). Call before serving traffic.
-func (p *Proxy) EnableAutoH2C() {
-	p.autoH2C = &autoH2CTransport{
-		h2c:      p.h2cTransport,
-		fallback: p.httpTransport,
-	}
+// Probe outcomes are cached per-Service for ttl (re-probed after expiry, so a
+// Service that gains/loses h2c support is re-detected without a restart) and
+// concurrent probes are single-flighted. ttl <= 0 uses a sensible default. Call
+// before serving traffic.
+func (p *Proxy) EnableAutoH2C(ttl time.Duration) {
+	p.autoH2C = newAutoH2CTransport(p.h2cTransport, p.httpTransport, ttl)
 	p.gw.AutoH2C = p.autoH2C
-}
-
-// ResetH2C forgets every remembered h2c-unsupported upstream so they are
-// re-probed. It's a no-op when auto-h2c is disabled. Called on route reload so a
-// Service that gains h2c support is re-detected without a restart.
-func (p *Proxy) ResetH2C() {
-	if p.autoH2C != nil {
-		p.autoH2C.reset()
-	}
 }
 
 // AutoH2CEnabled reports whether auto-h2c detection is on. Callers use it to skip
