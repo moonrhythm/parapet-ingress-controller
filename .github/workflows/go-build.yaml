@@ -9,15 +9,9 @@ on:
     - 'go.sum'
     - 'Dockerfile'
     - '.github/workflows/go-build.yaml'
-  # Also build + push on PRs (tagged with the PR's commit SHA) so a PR image can
-  # be deployed/tested before merge. Same-repo PRs only (needs registry creds).
-  pull_request:
-    paths:
-    - '**/*.go'
-    - 'go.mod'
-    - 'go.sum'
-    - 'Dockerfile'
-    - '.github/workflows/go-build.yaml'
+  # PRs do NOT build automatically. To build a PR image (tagged with the head
+  # commit SHA) before merge, manually run this workflow from the Actions tab
+  # and pick the PR's branch. Same-repo branches only (needs registry creds).
   workflow_dispatch: {}
 jobs:
   build:
