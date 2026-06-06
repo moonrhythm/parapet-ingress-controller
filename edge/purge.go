@@ -123,9 +123,23 @@ func (t *PurgeTable) now() int64 {
 // is <= this value as stale. Host normalization mirrors cache.primaryHash
 // (lowercase + strip port) so the keys line up exactly. The stored Meta is unused.
 func (t *PurgeTable) InvalidatedAfter(r *http.Request, _ cache.Meta) int64 {
-	host := normHost(r.Host)
-	uk := urlKey(host, r.URL.RequestURI())
+	return t.epochFor(normHost(r.Host), r.URL.RequestURI())
+}
 
+// InvalidatedAfterMeta is the reaper's variant of InvalidatedAfter: it reads the
+// (already-normalized) host + uri from a stored entry's Meta instead of a live
+// request, so a sweep can match entries off the serving path. normHost is
+// idempotent on Meta.Host (the cache stamps it normalized); an old entry with an
+// empty Host matches only the global scope.
+func (t *PurgeTable) InvalidatedAfterMeta(m cache.Meta) int64 {
+	return t.epochFor(normHost(m.Host), m.URI)
+}
+
+// epochFor returns the invalidation epoch (unix nanos) applying to a normalized
+// host + uri: the max of the global, per-host, and per-url epochs. Shared by the
+// lookup hook and the reaper.
+func (t *PurgeTable) epochFor(host, uri string) int64 {
+	uk := urlKey(host, uri)
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	e := t.global
@@ -240,34 +254,6 @@ func (t *PurgeTable) enforceCapLocked() {
 	if folded {
 		t.global = t.highWater // highWater >= every epoch stamped, so it covers the dropped records
 		t.folds++
-	}
-}
-
-// Sweep drops host/url records older than retain, reclaiming memory for purges
-// whose effect is already covered by ordinary TTL expiry.
-//
-// SAFETY: this is sound only when retain >= the maximum freshness lifetime the
-// edge will cache (the EDGE_CACHE_MAX_TTL cap). A record at epoch T only stops
-// mattering once every entry created <= T is unservable; with the lazy gate (no
-// background reaper) the guarantee that "nothing created <= T is still fresh"
-// comes from TTL alone, i.e. after retain >= maxFreshness has elapsed. Calling it
-// with a shorter retain can drop a record while a long-max-age entry created
-// before it is still fresh, re-serving stale content. The count-cap fold
-// (enforceCapLocked) is the unconditional memory bound; Sweep is an optional
-// optimization gated on that TTL cap.
-func (t *PurgeTable) Sweep(retain time.Duration) {
-	cutoff := t.now() - retain.Nanoseconds()
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	for k, v := range t.url {
-		if v < cutoff {
-			delete(t.url, k)
-		}
-	}
-	for k, v := range t.host {
-		if v < cutoff {
-			delete(t.host, k)
-		}
 	}
 }
 

@@ -165,12 +165,14 @@ invariants:
   `parapet/pkg/cache` `InvalidatedAfter` hook (parapet ≥ v0.17.0). Epochs use the
   **edge's own clock** at apply time (no trusted CP timestamp; the cursor makes
   apply idempotent, monotonic-clamped against an NTP step-back). Scopes: exact-URL
-  (all variants), whole-host, flush-all. The in-memory table is bounded by a
-  count-cap fold into the global epoch (over-invalidates, never under-); there is
-  no background reaper (the `Storage` interface has no enumeration), so disk reclaim
-  is left to the LRU byte cap. Issuing a purge needs `CP_PURGE_ADMIN_TOKEN` (a
-  stronger credential than the per-edge read tokens). Edge-only — no controller
-  mirror, no conformance obligation, **pure-Go (no Rust counterpart)**. See
+  (all variants), whole-host, flush-all. A background reaper
+  (`EDGE_CACHE_PURGE_SWEEP_INTERVAL`) physically reclaims invalidated entries off
+  the serving path, using `Storage.Range` + the raw host/uri in `Meta` (parapet ≥
+  v0.17.1); the in-memory record table is bounded by a count-cap fold into the
+  global epoch (over-invalidates, never under-), and disk by the cache's LRU byte
+  cap. Issuing a purge needs `CP_PURGE_ADMIN_TOKEN` (a stronger
+  credential than the per-edge read tokens). Edge-only — no controller mirror, no
+  conformance obligation, **pure-Go (no Rust counterpart)**. See
   [EDGE.md](EDGE.md#purge--invalidation).
 
 ## Configuration (environment variables)

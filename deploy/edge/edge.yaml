@@ -114,15 +114,18 @@ spec:
             #   value: "8388608"
             # Cache purge / invalidation (on by default with the cache). The edge
             # polls the control plane's GET /v1/purges and reaps invalidated entries
-            # lazily at lookup. Needs CP_PURGE_ENABLED on the control plane; if the
-            # CP isn't distributing purges the edge fail-statics (a 404 is a quiet
-            # no-op). Disk backend persists the purge cursor under EDGE_CACHE_DIR.
+            # lazily at lookup, plus a background reaper (EDGE_CACHE_PURGE_SWEEP_INTERVAL)
+            # that reclaims them proactively. Needs CP_PURGE_ENABLED on the control
+            # plane; if the CP isn't distributing purges the edge fail-statics (a 404
+            # is a quiet no-op). Disk backend persists the purge cursor under EDGE_CACHE_DIR.
             # - name: EDGE_CACHE_PURGE_ENABLED       # "true" (default) | "false"
             #   value: "true"
             # - name: EDGE_CACHE_PURGE_POLL_INTERVAL # seconds between polls (default 10)
             #   value: "10"
             # - name: EDGE_CACHE_PURGE_MAX_RECORDS   # per-map cap before a conservative fold (default 65536)
             #   value: "65536"
+            # - name: EDGE_CACHE_PURGE_SWEEP_INTERVAL # reaper cadence: reclaim invalidated entries off the serving path (default 300s)
+            #   value: "300"
             # Prometheus metrics endpoint (connections / bytes / Go runtime). Set
             # "" to disable.
             - name: EDGE_METRICS_LISTEN
