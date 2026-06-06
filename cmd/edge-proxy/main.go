@@ -198,6 +198,7 @@ func main() {
 	// memory (EDGE_CACHE_BACKEND=memory; bodies in RAM, lost on restart).
 	var respCache *cache.Cache
 	var purgeTable *edge.PurgeTable
+	var purgeStorage cache.Storage // the live backend, for the reaper's Range sweep
 	if envOr("EDGE_CACHE_ENABLED", "false") == "true" {
 		maxSize := envInt64("EDGE_CACHE_MAX_SIZE", 1<<30)
 		maxFile := envInt64("EDGE_CACHE_MAX_FILE_SIZE", 8<<20)
@@ -230,17 +231,23 @@ func main() {
 					slog.Warn("edge cache: purge state load failed; starting from a clean table", "error", err)
 				}
 				purgeTable = pt
+				purgeStorage = storage
 				opts.InvalidatedAfter = purgeTable.InvalidatedAfter
 			}
 			respCache = cache.New(storage, opts)
 		}
 	}
-	// Start the purge poll loop once (initial poll + ticker) when the table is live.
+	// Start the purge poll loop + reaper once when the table is live.
 	if purgeTable != nil {
 		purgeInterval := time.Duration(envInt64("EDGE_CACHE_PURGE_POLL_INTERVAL", 10)) * time.Second
 		edge.RefreshPurgeOnce(cp, purgeTable) // best-effort initial sync; fail-static
 		go edge.RunPurgeRefresh(ctx, cp, purgeTable, purgeInterval)
-		slog.Info("edge cache: purge polling enabled", "poll_interval", purgeInterval)
+		// The reaper physically reclaims invalidated entries off the serving path (the
+		// lazy lookup gate already guarantees correctness; this is just reclamation).
+		// Housekeeping cadence, jittered.
+		sweepInterval := time.Duration(envInt64("EDGE_CACHE_PURGE_SWEEP_INTERVAL", 300)) * time.Second
+		go edge.RunReaper(ctx, purgeStorage, purgeTable, sweepInterval)
+		slog.Info("edge cache: purge polling enabled", "poll_interval", purgeInterval, "sweep_interval", sweepInterval)
 	}
 
 	var getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error)

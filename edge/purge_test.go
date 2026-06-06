@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/moonrhythm/parapet/pkg/cache"
 	"github.com/stretchr/testify/assert"
@@ -148,21 +147,27 @@ func TestPurge_CapFoldBoundsMemory(t *testing.T) {
 	assert.EqualValues(t, 1000, epochFor(tbl, "GET", "http://a.com/2"))
 }
 
+func TestPurge_InvalidatedAfterMetaMatchesRequest(t *testing.T) {
+	tbl, _ := NewPurgeTable("", 0)
+	fixedClock(tbl, 4000)
+	require.NoError(t, tbl.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeURL, Host: "acme.com", URI: "/p?x=1"}}, 1))
+
+	// The reaper's Meta-based lookup must agree with the request-based hook for the
+	// same host+uri (Meta.Host is already normalized; normHost is idempotent).
+	m := cache.Meta{Host: "acme.com", URI: "/p?x=1"}
+	assert.EqualValues(t, 4000, tbl.InvalidatedAfterMeta(m))
+	assert.Equal(t, epochFor(tbl, "GET", "http://acme.com/p?x=1"), tbl.InvalidatedAfterMeta(m))
+	// A different uri doesn't match.
+	assert.EqualValues(t, 0, tbl.InvalidatedAfterMeta(cache.Meta{Host: "acme.com", URI: "/p?x=2"}))
+	// An empty-Host (old) entry matches only the global scope.
+	assert.EqualValues(t, 0, tbl.InvalidatedAfterMeta(cache.Meta{Host: "", URI: "/p?x=1"}))
+}
+
 func TestPurge_FlushAllRealignsCursorDown(t *testing.T) {
 	tbl, _ := NewPurgeTable("", 0)
 	require.NoError(t, tbl.Apply(nil, 500)) // cursor 500 (persisted against an old journal)
 	require.NoError(t, tbl.FlushAll(3))     // journal reset: realign the cursor DOWN to maxSeq
 	assert.EqualValues(t, 3, tbl.Cursor(), "a reset flush realigns the cursor down so it can't re-flush forever")
-}
-
-func TestPurge_SweepDropsOldRecords(t *testing.T) {
-	tbl, _ := NewPurgeTable("", 0)
-	fixedClock(tbl, 1_000_000)
-	require.NoError(t, tbl.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeURL, Host: "a.com", URI: "/old"}}, 1))
-	// Advance the clock well past the record, then sweep with a short retention.
-	fixedClock(tbl, 1_000_000+int64(time.Hour))
-	tbl.Sweep(time.Minute)
-	assert.Zero(t, tbl.Stats().URLRecs, "record older than retention swept")
 }
 
 func TestPurge_PersistenceRoundTrip(t *testing.T) {

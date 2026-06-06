@@ -132,11 +132,34 @@ var (
 		Name:      "edge_cache_purge_folds_total",
 		Help:      "Cumulative conservative cap-folds of the cache-purge table into the global epoch.",
 	}, []string{"edge_id"})
+
+	// edgePurgeReapSweeps counts completed reaper sweeps (each physically reclaims
+	// invalidated entries off the serving path).
+	edgePurgeReapSweeps = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_reap_sweeps_total",
+		Help:      "Completed cache-purge reaper sweeps.",
+	}, []string{"edge_id"})
+
+	// edgePurgeReapEntries counts entries the reaper physically deleted (cumulative).
+	edgePurgeReapEntries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_reap_entries_total",
+		Help:      "Cache entries physically reclaimed by the reaper (cumulative).",
+	}, []string{"edge_id"})
 )
 
 func init() {
 	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID, edgeRefresh, edgeClientCertSignerFP, edgeCPActiveSignerFP, edgeOnDemand,
-		edgePurgePoll, edgePurgeEntries, edgePurgeCursor, edgePurgeRecords, edgePurgeFolds)
+		edgePurgePoll, edgePurgeEntries, edgePurgeCursor, edgePurgeRecords, edgePurgeFolds, edgePurgeReapSweeps, edgePurgeReapEntries)
+}
+
+// purgeReap records one completed reaper sweep and the entries it reclaimed.
+func purgeReap(reaped int) {
+	edgePurgeReapSweeps.WithLabelValues(edgeID).Inc()
+	if reaped > 0 {
+		edgePurgeReapEntries.WithLabelValues(edgeID).Add(float64(reaped))
+	}
 }
 
 // purgePoll counts one purge poll by result.

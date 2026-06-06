@@ -403,11 +403,14 @@ EDGE_CACHE_PURGE_POLL_INTERVAL   poll GET /v1/purges (default 10s; lower than th
                                  cert/WAF refresh — invalidation latency matters more)
 EDGE_CACHE_PURGE_MAX_RECORDS     per-map cap before a conservative fold-to-global
                                  (default 65536)
+EDGE_CACHE_PURGE_SWEEP_INTERVAL  reaper cadence: physically reclaim invalidated
+                                 entries off the serving path (default 300s)
 ```
 
-The purge feature is **implemented** (see "Purge / invalidation" below). There is
-no background reaper — the in-memory table is bounded by the count-cap fold above,
-and disk by the cache's LRU byte cap.
+The purge feature is **implemented** (see "Purge / invalidation" below). A
+background reaper (`EDGE_CACHE_PURGE_SWEEP_INTERVAL`) physically reclaims
+invalidated entries off the serving path; the in-memory record table is bounded by
+the count-cap fold, and disk by the cache's LRU byte cap.
 
 A fetch/IO error on the read path **fails static** (degrades to a cache miss →
 serve from origin), never erroring the client request. **Not yet:**
@@ -418,14 +421,12 @@ connection/byte/runtime metrics).
 
 ### Purge / invalidation
 
-> **Status: implemented** (edge `edge/purge.go` + `edge/purgerefresh.go`; control
-> plane `edgecp/purgestore.go` + `GET`/`POST /v1/purges`). The lookup gate is the
-> `parapet/pkg/cache` `Options.InvalidatedAfter` hook (added in **parapet
-> v0.17.0**), so this is a pure-Go feature with no Rust counterpart. One
-> deliberate deviation from the original sketch below: there is **no background
-> reaper** (the `Storage` interface exposes no enumeration), so eager disk reclaim
-> is left to the LRU byte cap and the in-memory table is bounded by a count-cap
-> fold instead — see "Bounding the table" below.
+> **Status: implemented** (edge `edge/purge.go` + `edge/purgerefresh.go` +
+> `edge/purgereaper.go`; control plane `edgecp/purgestore.go` + `GET`/`POST
+> /v1/purges`). The lookup gate is the `parapet/pkg/cache`
+> `Options.InvalidatedAfter` hook (parapet **v0.17.0**); the reaper uses
+> `Storage.Range` + the raw host/uri in `Meta` (parapet **v0.17.1**). Pure-Go
+> feature, no Rust counterpart.
 
 Invalidation is **pulled from the control plane**, exactly like cert and WAF
 distribution: an operator publishes a purge once at the control plane and every
@@ -485,17 +486,33 @@ Epochs are clamped **monotonic non-decreasing** (a new stamp is `>= highWater`, 
 largest epoch ever stamped, reloaded from disk on restart) so an NTP step back
 can't un-purge.
 
-**Bounding the table (no reaper).** The parapet `Storage` interface has no scan
-method, so there is no background reaper to physically delete invalidated files or
-retire records; correctness comes from the lazy gate and disk is bounded by the
-cache's LRU byte cap. The in-memory `host`/`url` maps are bounded by a **count-cap
-fold**: when a map exceeds `EDGE_CACHE_PURGE_MAX_RECORDS` it is folded into the
-`global` epoch (which `≥` every record it held) and cleared — this
-**over-invalidates (a coarser flush) but never under-invalidates**, and keeps
-memory finite. Because purges are operator-issued (not per request), the fold is
-essentially never hit in practice. (`PurgeTable.Sweep` can additionally retire
-records older than a retention window, but only when paired with a freshness cap —
-it is not auto-wired today.)
+**Reaping (entries).** The lazy gate alone reaps an entry only when it is next
+looked up, so after a broad purge with little traffic the dead bytes would linger
+until LRU pressure evicts them. A **background reaper** (`ReapOnce` / `RunReaper`,
+`EDGE_CACHE_PURGE_SWEEP_INTERVAL`, default 300s, jittered) closes that: it
+`Storage.Range`s over the cache and `Delete`s every entry whose `Meta.Created <=
+epochFor(Meta.Host, Meta.URI)` — using the raw host/uri parapet v0.17.1 stamps into
+`Meta` so all three scopes match off the serving path (an old entry with an empty
+`Host` matches the global scope only). Correctness never depends on the reaper —
+the gate already guarantees a purged entry is never served — so it deletes only in
+the **safe direction**: over-deleting a still-valid entry (e.g. a `Created` stamped
+low by a wall-clock step) merely costs a re-fetch, never a stale serve.
+
+**The reaper deliberately does NOT retire records.** Dropping a record is the one
+*under-invalidating* direction, and it can't be made safe against a backward
+wall-clock step: both `Meta.Created` (stamped by parapet at fill-commit) and any
+sweep marker are unclamped wall clocks, so a fill that commits with a regressed
+`Created` after the sweep walk could match a record the sweep then retired —
+leaving a purged entry servable. Since retirement is only an optimization over an
+already-safe bound, the table is bounded purely by the **count-cap fold** instead.
+
+The **count-cap fold** bounds the `host`/`url` maps unconditionally and safely: if
+a map exceeds `EDGE_CACHE_PURGE_MAX_RECORDS` it is folded into the `global` epoch
+(which `≥` every record it held, via the `highWater` monotonic clamp) and cleared —
+**over-invalidates (a coarser flush) but never under-invalidates**. Because purges
+are operator-issued (not per request), the maps stay small and the fold is
+essentially never hit in practice. Disk is additionally bounded by the cache's LRU
+byte cap regardless.
 
 **Distribution loop.** The control plane keeps a bounded append-only journal
 (`{seq, scope, host?, uri?}`, monotonic `seq`, `min_seq` = oldest retained,
@@ -638,8 +655,9 @@ needed. (The Rust **controller** implementation stays in `rust/`; only the Rust
 5. **Cache purge / invalidation** — CP purge journal + `GET`/`POST /v1/purges`,
    edge poll loop with a persisted cursor, lazy epoch invalidation (global / host /
    url) checked at lookup via the `parapet/pkg/cache` `InvalidatedAfter` hook.
-   In-memory table bounded by a count-cap fold; no background reaper (disk reclaim
-   left to the LRU byte cap). Scopes: exact-URL (all variants), whole-host,
+   A background reaper (`Storage.Range`) physically reclaims invalidated entries
+   off the serving path; the count-cap fold + LRU byte cap bound the rest. Scopes:
+   exact-URL (all variants), whole-host,
    flush-all. **(done)** See [Purge / invalidation](#purge--invalidation).
    Edge-only. Path-prefix and Cache-Tag purge are deferred (prefix needs a scan;
    tags must be recorded at admit time) — the epoch table extends to both later.
