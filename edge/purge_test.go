@@ -148,6 +148,13 @@ func TestPurge_CapFoldBoundsMemory(t *testing.T) {
 	assert.EqualValues(t, 1000, epochFor(tbl, "GET", "http://a.com/2"))
 }
 
+func TestPurge_FlushAllRealignsCursorDown(t *testing.T) {
+	tbl, _ := NewPurgeTable("", 0)
+	require.NoError(t, tbl.Apply(nil, 500)) // cursor 500 (persisted against an old journal)
+	require.NoError(t, tbl.FlushAll(3))     // journal reset: realign the cursor DOWN to maxSeq
+	assert.EqualValues(t, 3, tbl.Cursor(), "a reset flush realigns the cursor down so it can't re-flush forever")
+}
+
 func TestPurge_SweepDropsOldRecords(t *testing.T) {
 	tbl, _ := NewPurgeTable("", 0)
 	fixedClock(tbl, 1_000_000)

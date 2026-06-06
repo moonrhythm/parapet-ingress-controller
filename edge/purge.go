@@ -150,31 +150,42 @@ func (t *PurgeTable) Apply(entries []PurgeEntry, maxSeq uint64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	base := t.cursor
+	changed := false
 	for _, e := range entries {
 		if e.Seq <= base {
 			continue // already applied in an earlier poll
 		}
 		t.applyLocked(e)
+		changed = true
 	}
 	if maxSeq > t.cursor {
 		t.cursor = maxSeq
+		changed = true
+	}
+	// Persist only on a real change, so an idle poll (no new entries, cursor
+	// unchanged) doesn't fsync — and the fsync-under-lock cost is paid only when an
+	// actual purge advances the state, not on every poll tick.
+	if !changed {
+		return nil
 	}
 	return t.saveLocked()
 }
 
 // FlushAll bumps the global epoch (lazy flush-all), clears the host/url maps (now
-// redundant — global supersedes any record <= it), advances the cursor to maxSeq,
-// and persists. Used on the control plane's flush_required signal (a cursor gap)
-// and for an explicit flush-all purge.
+// redundant — global supersedes any record <= it), sets the cursor to maxSeq, and
+// persists. Used on the control plane's flush_required signal — both a cursor gap
+// (maxSeq >= cursor: advance) and a journal reset where the CP's seq fell below the
+// edge's cursor (maxSeq < cursor: realign DOWN). The cursor is set unconditionally
+// (the one place a regression is safe: the flush just invalidated everything, so
+// re-fetching from the new, lower maxSeq is idempotent) — otherwise a reset would
+// leave the cursor stuck above the CP's journal and re-flush on every poll forever.
 func (t *PurgeTable) FlushAll(maxSeq uint64) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.global = t.stamp()
 	t.host = map[string]int64{}
 	t.url = map[string]int64{}
-	if maxSeq > t.cursor {
-		t.cursor = maxSeq
-	}
+	t.cursor = maxSeq
 	return t.saveLocked()
 }
 

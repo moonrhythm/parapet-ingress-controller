@@ -158,15 +158,20 @@ invariants:
   cached only with a `Content-Length` within the per-object cap (chunked GETs pass
   through uncached, to never store a truncated body). See
   [EDGE.md](EDGE.md#response-cache-at-the-edge).
-- **Cache purge (edge-only, design)** — invalidation is **pulled** from the
-  control plane (`GET`/`POST /v1/purges`, a per-edge-scoped journal + cursor),
-  mirroring cert/WAF distribution; no inbound port on the edge. Lazy **epoch**
-  invalidation (global / host / url-keyed-on-`host⊕uri`) is checked at lookup.
-  Epochs use the **edge's own clock** at apply time (no trusted CP timestamp; the
-  cursor makes apply idempotent); a background reaper reclaims disk. Scopes:
-  exact-URL (all variants), whole-host/zone, flush-all. Edge-only — no controller
-  mirror, no conformance obligation. **Design only — not implemented** in either
-  the edge or the control plane. See [EDGE.md](EDGE.md#purge--invalidation).
+- **Cache purge (edge-only)** — invalidation is **pulled** from the control plane
+  (`GET`/`POST /v1/purges`, a per-edge-scoped journal + cursor), mirroring
+  cert/WAF distribution; no inbound port on the edge. Lazy **epoch** invalidation
+  (global / host / url-keyed-on-`host⊕uri`) is checked at lookup via the
+  `parapet/pkg/cache` `InvalidatedAfter` hook (parapet ≥ v0.17.0). Epochs use the
+  **edge's own clock** at apply time (no trusted CP timestamp; the cursor makes
+  apply idempotent, monotonic-clamped against an NTP step-back). Scopes: exact-URL
+  (all variants), whole-host, flush-all. The in-memory table is bounded by a
+  count-cap fold into the global epoch (over-invalidates, never under-); there is
+  no background reaper (the `Storage` interface has no enumeration), so disk reclaim
+  is left to the LRU byte cap. Issuing a purge needs `CP_PURGE_ADMIN_TOKEN` (a
+  stronger credential than the per-edge read tokens). Edge-only — no controller
+  mirror, no conformance obligation, **pure-Go (no Rust counterpart)**. See
+  [EDGE.md](EDGE.md#purge--invalidation).
 
 ## Configuration (environment variables)
 

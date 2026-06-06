@@ -5,8 +5,8 @@ runs the WAF, fronting the in-cluster parapet ingress controller. A small
 in-cluster **control plane** distributes, per edge, only the certificates (and
 private keys) and WAF rules for the domains that edge serves.
 
-> Status: **Phases 1–4 implemented** (cert distribution, WAF distribution + edge
-> global eval, zones at edge, disk response cache); Phase 5 (purge) is design only.
+> Status: **Phases 1–5 implemented** (cert distribution, WAF distribution + edge
+> global eval, zones at edge, disk response cache, cache purge / invalidation).
 > Both the control plane (`cmd/edge-controlplane`, reusing `cert`, `k8s`,
 > `wafrule`) and the **edge** (`cmd/edge-proxy` + `edge`, on the parapet
 > framework) are **Go**. They share **only a language-neutral HTTP/JSON contract**
@@ -161,17 +161,23 @@ GET /v1/waf           Authorization: Bearer <token>   [If-None-Match: "<etag>"]
        (ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct)
 
 GET /v1/purges?since=<seq>   Authorization: Bearer <token>
-  200 {"entries":[{"seq":N,"scope":"url|host|all","host":"…","uri":"…"}],
-       "max_seq": N, "min_seq": M, "flush_required": false}
+  200 {"entries":[{"seq":N,"scope":"url|host|flush-all","host":"…","uri":"…"}],
+       "max_seq": N, "flush_required": false}
        entries        : journal entries with seq > since, SCOPED to the token's hosts
-       flush_required : true when since < min_seq (the edge fell behind / the journal
-                        was trimmed) → the edge does a lazy flush-all and jumps its
-                        cursor to max_seq. Conservative: never under-invalidates.
-  401 (no/invalid token)
+                        (flush-all reaches every edge; host/url only its allowed hosts)
+       flush_required : true when the edge's next-needed seq (since+1) was trimmed
+                        (it fell behind the retained window), OR when since > max_seq
+                        (its cursor is ahead of the CP's journal — a CP restart / fresh
+                        replica reset the in-memory journal). The edge does a lazy
+                        flush-all and realigns its cursor to max_seq. Conservative:
+                        never under-invalidates.
+  401 (no/invalid token)   404 (purge distribution disabled)
 
 POST /v1/purges       Authorization: Bearer <ADMIN token>   ← stronger cred than the read token
-  {"scope":"url|host|all", "host":"…", "uri":"…"}  → appends to the journal, returns {"seq":N}
-  401 (no/invalid admin token)  403 (host ∉ allowed(token))
+  {"scope":"url|host|flush-all", "host":"…", "uri":"…"}  → appends to the journal, returns {"seq":N}
+       (the admin token is NOT host-scoped — it may purge any host; per-host scoping is
+        applied on the read side, not at issue time)
+  401 (no/invalid admin token)  400 (invalid scope/host/uri)  404 (purge distribution disabled)
 
 GET /healthz          (no auth)
   200 always (liveness)
@@ -391,13 +397,17 @@ EDGE_CACHE_BACKEND       disk | memory (default disk)
 EDGE_CACHE_DIR           cache root, disk backend only (default /var/cache/parapet-edge)
 EDGE_CACHE_MAX_SIZE      total bytes cap, LRU-evicted (default 1073741824 = 1 GiB)
 EDGE_CACHE_MAX_FILE_SIZE per-object bytes cap (default 8388608 = 8 MiB)
+EDGE_CACHE_PURGE_ENABLED         poll for + apply cache purges (default true; needs
+                                 CP_PURGE_ENABLED on the control plane)
 EDGE_CACHE_PURGE_POLL_INTERVAL   poll GET /v1/purges (default 10s; lower than the
                                  cert/WAF refresh — invalidation latency matters more)
-EDGE_CACHE_PURGE_SWEEP_INTERVAL  background reaper cadence (default 300s)
+EDGE_CACHE_PURGE_MAX_RECORDS     per-map cap before a conservative fold-to-global
+                                 (default 65536)
 ```
 
-`EDGE_CACHE_PURGE_POLL_INTERVAL` / `EDGE_CACHE_PURGE_SWEEP_INTERVAL` belong to the
-**design-only** purge feature below and are **not read by any code yet**.
+The purge feature is **implemented** (see "Purge / invalidation" below). There is
+no background reaper — the in-memory table is bounded by the count-cap fold above,
+and disk by the cache's LRU byte cap.
 
 A fetch/IO error on the read path **fails static** (degrades to a cache miss →
 serve from origin), never erroring the client request. **Not yet:**
@@ -408,11 +418,14 @@ connection/byte/runtime metrics).
 
 ### Purge / invalidation
 
-> **Status: design only — not implemented** (in neither the edge nor the control
-> plane). The mechanism below was sketched against the former Rust/pingora cache;
-> the equivalent will be built in `parapet/pkg/cache` (lazy epochs checked in the
-> lookup gate + a background reaper) when Phase 5 lands. The CP `/v1/purges`
-> endpoints do not exist yet either.
+> **Status: implemented** (edge `edge/purge.go` + `edge/purgerefresh.go`; control
+> plane `edgecp/purgestore.go` + `GET`/`POST /v1/purges`). The lookup gate is the
+> `parapet/pkg/cache` `Options.InvalidatedAfter` hook (added in **parapet
+> v0.17.0**), so this is a pure-Go feature with no Rust counterpart. One
+> deliberate deviation from the original sketch below: there is **no background
+> reaper** (the `Storage` interface exposes no enumeration), so eager disk reclaim
+> is left to the LRU byte cap and the in-memory table is bounded by a count-cap
+> fold instead — see "Bounding the table" below.
 
 Invalidation is **pulled from the control plane**, exactly like cert and WAF
 distribution: an operator publishes a purge once at the control plane and every
@@ -420,69 +433,86 @@ sharded edge converges on its own timer. There is **no inbound purge port on the
 edge** (edges are out-of-cluster, often NAT'd), and the per-token host scoping is
 the same boundary that gates `/v1/certs` and `/v1/waf`. Three scopes are
 supported: **exact URL** (all `Vary` variants, both schemes, GET+HEAD),
-**whole host/zone**, and **flush-all**.
+**whole host**, and **flush-all**.
 
-**Why lazy epochs, not eager file deletion.** The on-disk filename is
-`combined()` = `hash(primary ⊕ variance)`, where `primary = hash("METHOD scheme
-uri")` and `variance` comes from `Vary`. So from a URL alone you **cannot
-enumerate its variants' filenames** — there's no index, and the hash mixes the
-two. `Storage::purge(CompactCacheKey)` needs the *exact* key (primary+variance),
-which an operator purging a URL doesn't have. But `lookup` receives the full
-`CacheKey` (namespace = host, primary *string* = `"GET https /a?x=1"`), so the
-edge can match a request against a coarse predicate at lookup time regardless of
-variance. That asymmetry is why purge is **lazy epoch invalidation** plus a
-background reaper, not synchronous deletes.
+**Why lazy epochs, not eager file deletion.** The cache stores each entry under
+`variantHash = hash(primaryHash ⊕ Vary-values)`, where `primaryHash =
+hash(host+method+scheme+uri)`. So from a URL alone you **cannot enumerate its
+variants' storage keys** — there's no index, and the hash mixes everything. But
+the cache's `InvalidatedAfter(r, Meta)` hook runs *at lookup* with the live
+request (host, uri) **and** the stored `Meta` (which carries `Created`, unix
+nanos). So the edge can match a request against a coarse predicate at lookup time
+regardless of variance, without ever naming the key. That asymmetry is why purge
+is **lazy epoch invalidation**, not synchronous deletes: a hit whose
+`Meta.Created <= invalidAfter` is reaped and served as a miss, exactly like a
+passed `FreshUntil`.
 
-**The invalidation table** (small, in-memory, persisted to
-`<EDGE_CACHE_DIR>/purge-state` with the same temp+fsync+rename as the cache):
-
-```
-global:  Option<SystemTime>
-host:    host                       → SystemTime    (lowercased host)
-url:     hash(host ⊕ uri)           → SystemTime    (uri = path+query; method/scheme-agnostic)
-cursor:  u64   (last journal seq applied — persisted in the SAME atomic write as the maps)
-```
-
-**Lookup gate**, added to `DiskCache::lookup` after decoding the sidecar:
+**The invalidation table** (`edge.PurgeTable`, in-memory, persisted to
+`<EDGE_CACHE_DIR>/purge-state` with the same temp+fsync+rename as the disk cache;
+the in-memory backend keeps no state):
 
 ```
-invalid_after = max(global, host[namespace], url[hash(namespace ⊕ uri_of(primary))])  // absent ⇒ epoch 0
-if meta.created() <= invalid_after { reap(.meta,.body) best-effort + notify eviction; return miss }
+global:  int64                       // flush-all epoch (unix nanos); 0 = never
+host:    host                → int64 // normalized host (lowercase, port-stripped)
+url:     hash(host ⊕ uri)    → int64 // uri = path+query; method/scheme-agnostic
+cursor:  uint64                      // last journal seq applied — persisted in the SAME atomic write as the maps
 ```
 
-Keying the `url` map on `host ⊕ uri` (not the full primary) is deliberate: one
-URL purge then covers **all methods, both schemes, and every `Vary` variant** —
-the operator's mental model of "purge `/a`". Issue cost is **O(1)** (no scan, no
-variance enumeration); the hot-path cost is one lock read + ≤3 map lookups + a
-timestamp compare, and only on cache lookups (so zero when caching is disabled).
+**Lookup gate** — `PurgeTable.InvalidatedAfter`, wired into `cache.Options`:
+
+```
+invalidAfter = max(global, host[normHost(r.Host)], url[hash(normHost ⊕ r.URL.RequestURI())])  // absent ⇒ 0
+// the cache then reaps + misses any hit with Meta.Created <= invalidAfter
+```
+
+Host normalization mirrors `cache.primaryHash` exactly (lowercase + strip port)
+so a purge key matches the stored key. Keying the `url` map on `host ⊕ uri` (not
+the full primary) is deliberate: one URL purge covers **all methods, both
+schemes, and every `Vary` variant** — the operator's mental model of "purge
+`/a`". Issue cost is **O(1)**; the hot-path cost is one `RLock` + ≤3 map lookups +
+a timestamp compare, and only on cache hits (so zero when caching is disabled, and
+nil-checked away entirely when purge is off).
 
 **Edge-clock epochs — no trusted CP timestamp.** An epoch is *"invalidate
 everything cached before this edge learned of the purge"* = the edge's own wall
-clock at first-apply. This removes any CP↔edge clock-skew dependency; the control
-plane only has to **deliver** the directive. Idempotency comes from the cursor,
-not the timestamp: the edge applies a journal `seq` only if `seq > cursor`, so an
-entry is applied exactly once and "now-at-apply" is never replayed. The one
-inherent gap — an in-flight miss whose origin fetch began before apply but commits
-just after — is the same race every CDN purge has; the next TTL expiry or purge
-covers it. (Clamp epochs to be monotonic non-decreasing so an NTP step back can't
-un-purge.)
+clock at apply. This removes any CP↔edge clock-skew dependency; the control plane
+only has to **deliver** the directive. Idempotency comes from the cursor, not the
+timestamp: the edge applies a journal `seq` only if `seq > cursor`, so an entry is
+applied exactly once and "now-at-apply" is never replayed. The one inherent gap —
+an in-flight miss whose origin fetch began before apply but commits just after —
+is the same race every CDN purge has; the next TTL expiry or purge covers it.
+Epochs are clamped **monotonic non-decreasing** (a new stamp is `>= highWater`, the
+largest epoch ever stamped, reloaded from disk on restart) so an NTP step back
+can't un-purge.
 
-**Background reaper** (reuses the startup-scan background-thread pattern, off the
-serving path) periodically applies the table to physically delete invalidated
-files, update the LRU accounting, and **retire** table records: once a full sweep
-completes *after* a record's timestamp, nothing older can remain, so the record is
-dropped. This is what bounds the `url` map (it holds only URLs purged within
-roughly one sweep interval) and reclaims disk; the lazy gate already guarantees
-correctness immediately, and the LRU byte cap holds regardless.
+**Bounding the table (no reaper).** The parapet `Storage` interface has no scan
+method, so there is no background reaper to physically delete invalidated files or
+retire records; correctness comes from the lazy gate and disk is bounded by the
+cache's LRU byte cap. The in-memory `host`/`url` maps are bounded by a **count-cap
+fold**: when a map exceeds `EDGE_CACHE_PURGE_MAX_RECORDS` it is folded into the
+`global` epoch (which `≥` every record it held) and cleared — this
+**over-invalidates (a coarser flush) but never under-invalidates**, and keeps
+memory finite. Because purges are operator-issued (not per request), the fold is
+essentially never hit in practice. (`PurgeTable.Sweep` can additionally retire
+records older than a retention window, but only when paired with a freshness cap —
+it is not auto-wired today.)
 
 **Distribution loop.** The control plane keeps a bounded append-only journal
-(`{seq, scope, host?, uri?}`, monotonic `seq`, `min_seq` = oldest retained). The
-edge polls `GET /v1/purges?since=<cursor>` on `EDGE_CACHE_PURGE_POLL_INTERVAL`; on
-`flush_required` it bumps the `global` epoch and sets `cursor = max_seq`, else it
-applies each new entry once and atomically persists `{maps, cursor}`. Purges are
-issued by an admin `POST /v1/purges` (a **stronger** credential than the per-edge
-read token); auto-sourcing a `host` purge on cert rotation or Ingress change is a
-natural later addition.
+(`{seq, scope, host?, uri?}`, monotonic `seq`, `min_seq` = oldest retained,
+`CP_PURGE_MAX_ENTRIES`). The edge polls `GET /v1/purges?since=<cursor>` on
+`EDGE_CACHE_PURGE_POLL_INTERVAL`; on `flush_required` it bumps the `global` epoch
+and realigns `cursor = max_seq`, else it applies each new entry once and (only on a
+real change) atomically persists `{maps, cursor}`. The CP returns `flush_required`
+both when the cursor fell behind the retained window (`since+1 < min_seq`) **and**
+when the cursor is *ahead* of the journal (`since > max_seq` — a CP restart or fresh
+replica reset the in-memory journal); the latter is the case where `cursor =
+max_seq` is a deliberate realign **down**, so a reset can't wedge the edge into
+flushing every poll. The CP scopes each edge's response by its token (flush-all
+reaches every edge; host/url entries only edges that may serve that host). Purges
+are issued by an admin
+`POST /v1/purges` gated by `CP_PURGE_ADMIN_TOKEN` (a **stronger** credential than
+the per-edge read token); auto-sourcing a `host` purge on cert rotation or Ingress
+change is a natural later addition.
 
 ## Ports & exposure
 
@@ -540,8 +570,9 @@ edge *can* be co-located, prefer keyless (recoverable in git history).
 | Cache read IO error | Degrades to a cache miss (**fail static**) → served from parapet. Never errors the client request. |
 | Cache dir unwritable | Cache init fails → caching disabled for the process (logged); the edge still proxies normally. |
 | `GET /v1/purges` unreachable | Edge keeps its applied epochs + cursor (**fail static**); retries with backoff. Pending purges are *delayed, not lost* — the journal+cursor catch up. Stale-serving window bounded by object TTL. |
-| Purge cursor gap (`since < min_seq`) | CP returns `flush_required` → edge bumps the global epoch (lazy flush-all) and jumps to `max_seq`. Conservative; never under-invalidates. |
-| `purge-state` lost/corrupt | Cursor resets to 0 → next poll is a gap → flush-all. Cursor + maps share **one atomic write** so they can't desync. |
+| Purge cursor gap (`since+1 < min_seq`, journal trimmed) | CP returns `flush_required` → edge bumps the global epoch (lazy flush-all) and realigns to `max_seq`. Conservative; never under-invalidates. |
+| CP restart / fresh replica (in-memory journal seq resets below the edge cursor, `since > max_seq`) | CP returns `flush_required` (the cursor-ahead-of-journal check) → edge flushes and realigns its cursor **down** to `max_seq`. The edge also independently flushes on `max_seq < cursor` as defense-in-depth against an older CP. Never silently under-invalidates. |
+| `purge-state` lost/corrupt | Cursor resets to 0 → next poll re-syncs (a trim gap or cursor-ahead → flush-all). Cursor + maps share **one atomic write** so they can't desync. |
 
 ## Conformance
 
@@ -606,8 +637,9 @@ needed. (The Rust **controller** implementation stays in `rust/`; only the Rust
    parapet-core equivalent).
 5. **Cache purge / invalidation** — CP purge journal + `GET`/`POST /v1/purges`,
    edge poll loop with a persisted cursor, lazy epoch invalidation (global / host /
-   url) checked at lookup, and a background reaper for disk reclaim. Scopes:
-   exact-URL (all variants), whole-host/zone, flush-all. **(design)** See
-   [Purge / invalidation](#purge--invalidation). Edge-only. Path-prefix and
-   Cache-Tag purge are deferred (prefix needs a scan; tags must be recorded at
-   admit time) — the epoch table extends to both later.
+   url) checked at lookup via the `parapet/pkg/cache` `InvalidatedAfter` hook.
+   In-memory table bounded by a count-cap fold; no background reaper (disk reclaim
+   left to the LRU byte cap). Scopes: exact-URL (all variants), whole-host,
+   flush-all. **(done)** See [Purge / invalidation](#purge--invalidation).
+   Edge-only. Path-prefix and Cache-Tag purge are deferred (prefix needs a scan;
+   tags must be recorded at admit time) — the epoch table extends to both later.

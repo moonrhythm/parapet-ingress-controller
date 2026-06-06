@@ -1,8 +1,11 @@
 package edgecp
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +20,12 @@ type Server struct {
 	certs *CertStore
 	authz *Authz
 	waf   *WafStore // optional (nil = WAF distribution disabled, /v1/waf → 404)
+
+	// purge is the optional cache-purge journal (nil = purge distribution disabled,
+	// /v1/purges → 404). purgeAdminToken gates POST /v1/purges — a STRONGER credential
+	// than the per-edge read tokens (an edge can read its purges but not issue them).
+	purge           *PurgeStore
+	purgeAdminToken string
 
 	// signerState is the (signer, generation) snapshot, replaced WHOLESALE by
 	// SetSigner so a reader Loads both halves coherently (never a torn signer-from-A
@@ -97,6 +106,16 @@ func (s *Server) WithWAF(waf *WafStore) *Server {
 	return s
 }
 
+// WithPurge enables cache-purge distribution: GET /v1/purges (per-edge bearer,
+// scoped) and POST /v1/purges (gated by adminToken). An empty adminToken leaves
+// POST locked out (every issue attempt 401s) — read distribution still works.
+// Returns the server for chaining.
+func (s *Server) WithPurge(store *PurgeStore, adminToken string) *Server {
+	s.purge = store
+	s.purgeAdminToken = adminToken
+	return s
+}
+
 // WithSigner enables data-plane client-cert issuance and trust distribution at the
 // given trust-bundle generation. Returns the server for chaining.
 func (s *Server) WithSigner(sg *Signer, generation uint64) *Server {
@@ -161,6 +180,8 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/certs", s.handleCert)
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
+	mux.HandleFunc("GET /v1/purges", s.handlePurges)
+	mux.HandleFunc("POST /v1/purges", s.handlePurgeAdmin)
 	mux.HandleFunc("POST /v1/edge-cert", s.handleEdgeCert)
 	mux.HandleFunc("GET /v1/trust-bundle", s.handleTrustBundle)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -299,6 +320,67 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(body)
+}
+
+// handlePurges serves the cache-purge entries an edge hasn't applied yet
+// (GET /v1/purges?since=<cursor>), scoped to the edge's allowed hosts and
+// authorized by the per-edge bearer token. flush-all entries reach every edge;
+// host/url entries only the edges that may serve that host.
+func (s *Server) handlePurges(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.purge == nil {
+		http.Error(w, "purge distribution disabled", http.StatusNotFound)
+		return
+	}
+	var since uint64
+	if v := r.URL.Query().Get("since"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid since parameter", http.StatusBadRequest)
+			return
+		}
+		since = n
+	}
+	res := s.purge.Since(since, func(host string) bool { return s.authz.Allowed(token, host) })
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
+}
+
+// handlePurgeAdmin issues a cache purge (POST /v1/purges), gated by the purge admin
+// token — a STRONGER credential than the per-edge read tokens. The body is
+// {scope, host?, uri?}; scope is flush-all / host / url.
+func (s *Server) handlePurgeAdmin(w http.ResponseWriter, r *http.Request) {
+	if s.purge == nil {
+		http.Error(w, "purge distribution disabled", http.StatusNotFound)
+		return
+	}
+	// Constant-time compare against the admin token; an empty configured token locks
+	// POST out entirely (no token can ever match).
+	tok, ok := bearer(r)
+	if !ok || s.purgeAdminToken == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(s.purgeAdminToken)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	var body struct {
+		Scope string `json:"scope"`
+		Host  string `json:"host"`
+		URI   string `json:"uri"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	seq, ok := s.purge.Add(body.Scope, body.Host, body.URI)
+	if !ok {
+		http.Error(w, "invalid scope/host/uri (scope must be flush-all|host|url; host required for host/url; uri required for url)", http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]uint64{"seq": seq})
 }
 
 // bearer extracts the token from an "Authorization: Bearer <token>" header.

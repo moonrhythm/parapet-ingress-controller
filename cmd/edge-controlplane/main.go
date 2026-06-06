@@ -331,6 +331,21 @@ func main() {
 		slog.Info("edge control plane: WAF distribution enabled", "pod_namespace", podNamespace)
 	}
 
+	// Optional cache-purge distribution (GET/POST /v1/purges). The read side rides
+	// the per-edge bearer token (scoped to the edge's hosts); issuing a purge needs
+	// CP_PURGE_ADMIN_TOKEN — a stronger credential than the edges hold. Without that
+	// token, issuance is locked out, so refuse to enable an issue-less purge plane.
+	if os.Getenv("CP_PURGE_ENABLED") == "true" {
+		adminToken := os.Getenv("CP_PURGE_ADMIN_TOKEN")
+		if adminToken == "" {
+			slog.Error("CP_PURGE_ENABLED=true requires CP_PURGE_ADMIN_TOKEN (the credential that gates POST /v1/purges)")
+			os.Exit(1)
+		}
+		purgeStore := edgecp.NewPurgeStore(envInt("CP_PURGE_MAX_ENTRIES", 0))
+		server = server.WithPurge(purgeStore, adminToken)
+		slog.Info("edge control plane: cache-purge distribution enabled")
+	}
+
 	// Convergence /metrics on a SEPARATE, unauthenticated listener (never the
 	// token-gated API mux, so a scraper reaches it without the bearer token). Only the
 	// serving process reaches here — the run-once bootstrap/rotate Jobs os.Exit above.

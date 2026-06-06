@@ -91,10 +91,71 @@ var (
 		Name:      "edge_ondemand_cert_total",
 		Help:      "Serve-all on-demand cert resolutions by result (hit|miss|shed|suppressed).",
 	}, []string{"result", "edge_id"})
+
+	// --- cache-purge (edge-only) ---
+
+	// edgePurgePoll counts purge polls by result: ok (entries applied/none),
+	// flush (cursor-gap flush-all), disabled (CP not distributing), error (fetch failed).
+	edgePurgePoll = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_poll_total",
+		Help:      "Cache-purge polls by result (ok|flush|disabled|error).",
+	}, []string{"result", "edge_id"})
+
+	// edgePurgeEntries counts purge entries applied (cumulative).
+	edgePurgeEntries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_entries_total",
+		Help:      "Cache-purge journal entries applied by the edge (cumulative).",
+	}, []string{"edge_id"})
+
+	// edgePurgeCursor is the last journal seq the edge has applied.
+	edgePurgeCursor = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_cursor",
+		Help:      "Last cache-purge journal seq applied by the edge.",
+	}, []string{"edge_id"})
+
+	// edgePurgeRecords is the current in-memory record count per scope map (host|url),
+	// so an operator can watch the table stay bounded.
+	edgePurgeRecords = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_records",
+		Help:      "Current cache-purge invalidation-table records, by scope map (host|url).",
+	}, []string{"scope", "edge_id"})
+
+	// edgePurgeFolds is the cumulative count of conservative cap-folds (a map
+	// exceeded its cap and was folded into the global epoch). A climbing value flags
+	// an undersized cap or an unusually large purge volume.
+	edgePurgeFolds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_folds_total",
+		Help:      "Cumulative conservative cap-folds of the cache-purge table into the global epoch.",
+	}, []string{"edge_id"})
 )
 
 func init() {
-	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID, edgeRefresh, edgeClientCertSignerFP, edgeCPActiveSignerFP, edgeOnDemand)
+	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID, edgeRefresh, edgeClientCertSignerFP, edgeCPActiveSignerFP, edgeOnDemand,
+		edgePurgePoll, edgePurgeEntries, edgePurgeCursor, edgePurgeRecords, edgePurgeFolds)
+}
+
+// purgePoll counts one purge poll by result.
+func purgePoll(result string) { edgePurgePoll.WithLabelValues(result, edgeID).Inc() }
+
+// purgePollApplied adds n to the applied-entries counter (no-op for n<=0).
+func purgePollApplied(n int) {
+	if n > 0 {
+		edgePurgeEntries.WithLabelValues(edgeID).Add(float64(n))
+	}
+}
+
+// setPurgeMetrics reflects the table's current state into the gauges (cursor, per-map
+// record counts, cap-folds).
+func setPurgeMetrics(st PurgeStats) {
+	edgePurgeCursor.WithLabelValues(edgeID).Set(float64(st.Cursor))
+	edgePurgeRecords.WithLabelValues("host", edgeID).Set(float64(st.HostRecs))
+	edgePurgeRecords.WithLabelValues("url", edgeID).Set(float64(st.URLRecs))
+	edgePurgeFolds.WithLabelValues(edgeID).Set(float64(st.Folds))
 }
 
 // ondemand counts one on-demand cert resolution outcome.
