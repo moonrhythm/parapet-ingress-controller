@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -196,10 +197,12 @@ func main() {
 	// backend is disk (default; survives restarts, bounded by on-disk bytes) or
 	// memory (EDGE_CACHE_BACKEND=memory; bodies in RAM, lost on restart).
 	var respCache *cache.Cache
+	var purgeTable *edge.PurgeTable
 	if envOr("EDGE_CACHE_ENABLED", "false") == "true" {
 		maxSize := envInt64("EDGE_CACHE_MAX_SIZE", 1<<30)
 		maxFile := envInt64("EDGE_CACHE_MAX_FILE_SIZE", 8<<20)
 		var storage cache.Storage
+		var purgeStatePath string // disk backend persists purge state alongside the cache
 		switch envOr("EDGE_CACHE_BACKEND", "disk") {
 		case "memory":
 			storage = cache.NewMemory(maxSize)
@@ -211,12 +214,33 @@ func main() {
 				slog.Error("edge cache: cannot init cache dir; caching disabled", "dir", dir, "error", err)
 			} else {
 				storage = d
+				purgeStatePath = filepath.Join(dir, "purge-state")
 				slog.Info("edge cache enabled (disk-backed)", "dir", dir, "max_size", maxSize, "max_file", maxFile)
 			}
 		}
 		if storage != nil {
-			respCache = cache.New(storage, cache.Options{MaxFileSize: maxFile})
+			opts := cache.Options{MaxFileSize: maxFile}
+			// Cache-purge: an invalidation table fed from the control plane gates each
+			// hit (parapet's Options.InvalidatedAfter). On by default with the cache; the
+			// poll loop fail-statics if the CP isn't distributing purges. The table
+			// persists alongside the disk cache (in-memory backend keeps no state).
+			if envOr("EDGE_CACHE_PURGE_ENABLED", "true") == "true" {
+				pt, err := edge.NewPurgeTable(purgeStatePath, int(envInt64("EDGE_CACHE_PURGE_MAX_RECORDS", 0)))
+				if err != nil {
+					slog.Warn("edge cache: purge state load failed; starting from a clean table", "error", err)
+				}
+				purgeTable = pt
+				opts.InvalidatedAfter = purgeTable.InvalidatedAfter
+			}
+			respCache = cache.New(storage, opts)
 		}
+	}
+	// Start the purge poll loop once (initial poll + ticker) when the table is live.
+	if purgeTable != nil {
+		purgeInterval := time.Duration(envInt64("EDGE_CACHE_PURGE_POLL_INTERVAL", 10)) * time.Second
+		edge.RefreshPurgeOnce(cp, purgeTable) // best-effort initial sync; fail-static
+		go edge.RunPurgeRefresh(ctx, cp, purgeTable, purgeInterval)
+		slog.Info("edge cache: purge polling enabled", "poll_interval", purgeInterval)
 	}
 
 	var getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error)

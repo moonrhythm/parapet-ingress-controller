@@ -49,6 +49,22 @@ spec:
             #   {"<token>": ["acme.com", "*.acme.com"], ...}
             - name: CP_TOKENS_FILE
               value: /tokens/tokens.json
+            # --- Cache purge / invalidation distribution ---
+            # Serve GET /v1/purges (per-edge bearer, scoped to the edge's hosts) and
+            # POST /v1/purges (issue a purge). Issuing REQUIRES CP_PURGE_ADMIN_TOKEN —
+            # a stronger credential than the per-edge read tokens — so keep it in its
+            # own Secret. Issue with:
+            #   curl -H "Authorization: Bearer $ADMIN" -d '{"scope":"url","host":"acme.com","uri":"/a"}' \
+            #     https://controlplane:8443/v1/purges
+            # - name: CP_PURGE_ENABLED
+            #   value: "true"
+            # - name: CP_PURGE_ADMIN_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: edge-controlplane-purge
+            #       key: admin-token
+            # - name: CP_PURGE_MAX_ENTRIES   # retained journal length (default 4096)
+            #   value: "4096"
             # --- Edge auto-trust: data-plane client-cert issuance ---
             # The CP signs short-lived edge client certs (POST /v1/edge-cert) and
             # serves the PUBLIC edge CA in the tokenless trust bundle

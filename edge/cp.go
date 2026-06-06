@@ -18,8 +18,9 @@ import (
 // OOM the edge during decode. Generous but finite (a cert+key is a few KiB; a
 // WAF ruleset bundle for many zones can be larger).
 const (
-	maxCertBody = 4 << 20  // 4 MiB
-	maxWafBody  = 64 << 20 // 64 MiB
+	maxCertBody  = 4 << 20  // 4 MiB
+	maxWafBody   = 64 << 20 // 64 MiB
+	maxPurgeBody = 16 << 20 // 16 MiB (a journal page of {seq,scope,host,uri} records)
 )
 
 // CpClient is the HTTPS client to the in-cluster control plane. It presents the
@@ -175,6 +176,58 @@ func (c *CpClient) FetchWaf(currentEtag string) (WafFetch, error) {
 		}, nil
 	default:
 		return WafFetch{}, fmt.Errorf("control plane returned %d for /v1/waf", resp.StatusCode)
+	}
+}
+
+// PurgeFetch is the outcome of a cache-purge poll.
+type PurgeFetch struct {
+	// Disabled is true on a 404 ("purge distribution disabled" at the CP): a clean,
+	// expected off-state the caller skips quietly (distinct from an unreachable CP).
+	Disabled bool
+	// FlushRequired is true when the edge's cursor fell behind the CP's retained
+	// journal — the edge bumps its global epoch (lazy flush-all) and jumps to MaxSeq.
+	FlushRequired bool
+	// Entries are the new purges (seq > the requested cursor), already scoped to this
+	// edge's allowed hosts by the CP.
+	Entries []PurgeEntry
+	// MaxSeq is the highest journal seq; the edge advances its cursor to it.
+	MaxSeq uint64
+}
+
+type purgeBody struct {
+	Entries       []PurgeEntry `json:"entries"`
+	MaxSeq        uint64       `json:"max_seq"`
+	FlushRequired bool         `json:"flush_required"`
+}
+
+// FetchPurges polls GET /v1/purges?since=<cursor> for cache-purge directives the
+// edge hasn't applied. A 404 returns Disabled=true (err nil) so the caller can skip
+// quietly when the CP isn't distributing purges; any other non-200 is an error the
+// caller handles fail-static (keeps its applied epochs + cursor). No ETag: the
+// since-cursor already makes the poll incremental and idempotent.
+func (c *CpClient) FetchPurges(since uint64) (PurgeFetch, error) {
+	u := c.base + "/v1/purges?since=" + strconv.FormatUint(since, 10)
+	resp, err := c.do(u, "")
+	if err != nil {
+		return PurgeFetch{}, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotFound:
+		return PurgeFetch{Disabled: true}, nil
+	case http.StatusOK:
+		var body purgeBody
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxPurgeBody)).Decode(&body); err != nil {
+			return PurgeFetch{}, fmt.Errorf("decode: %w", err)
+		}
+		return PurgeFetch{
+			FlushRequired: body.FlushRequired,
+			Entries:       body.Entries,
+			MaxSeq:        body.MaxSeq,
+		}, nil
+	default:
+		return PurgeFetch{}, fmt.Errorf("control plane returned %d for /v1/purges", resp.StatusCode)
 	}
 }
 

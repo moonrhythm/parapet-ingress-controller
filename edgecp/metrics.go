@@ -165,10 +165,27 @@ var (
 
 	rotationOverlapSince  atomic.Int64 // unix nanos the CP first observed phase=overlap; 0 = not in overlap
 	rotationStuckDeadline atomic.Int64 // nanos; 0 disables the stuck gauge (always 0)
+
+	// purgeIssued counts cache purges accepted on POST /v1/purges by scope. scope is
+	// bounded to {flush-all, host, url} (invalid scopes are 400'd before this).
+	purgeIssued = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_issued_total",
+		Help:      "Cache purges accepted on POST /v1/purges, by scope (flush-all|host|url).",
+	}, []string{"scope"})
+
+	// purgeJournalSize is the current retained purge-journal length (bounded by
+	// CP_PURGE_MAX_ENTRIES). It tracks how much poll lag the journal can absorb
+	// before an edge gets flush_required.
+	purgeJournalSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_cache_purge_journal_entries",
+		Help:      "Current number of retained entries in the cache-purge journal.",
+	})
 )
 
 func init() {
-	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration, activeSignerFP, signerActiveFlipFailed, issuedUnderSigner, tokenDisabledNoRotation, rotationStuck)
+	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration, activeSignerFP, signerActiveFlipFailed, issuedUnderSigner, tokenDisabledNoRotation, rotationStuck, purgeIssued, purgeJournalSize)
 }
 
 // SetRotationStuckDeadline configures the overlap-stuck threshold (call once at startup).

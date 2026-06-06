@@ -1,0 +1,158 @@
+package edgecp
+
+import (
+	"net"
+	"strings"
+	"sync"
+)
+
+// Purge scope values on the wire. These MUST match the edge's edge.Scope strings
+// (the two packages share only this JSON contract, never code).
+const (
+	purgeScopeFlushAll = "flush-all"
+	purgeScopeHost     = "host"
+	purgeScopeURL      = "url"
+)
+
+// defaultPurgeJournalMax bounds the in-memory journal. Purges are operator-issued
+// (not per request), so a few thousand retained entries covers any realistic poll
+// lag; older entries are trimmed and an edge that fell behind the retained window
+// gets a flush_required (lazy flush-all) on its next poll — conservative, never an
+// under-invalidation.
+const defaultPurgeJournalMax = 4096
+
+// purgeRecord is one journal entry. host is normalized (lowercased, port-stripped);
+// uri is the request-uri (path+query) verbatim from the operator.
+type purgeRecord struct {
+	seq   uint64
+	scope string
+	host  string
+	uri   string
+}
+
+// PurgeEntryDTO is the JSON wire shape of one purge entry (matches edge.PurgeEntry).
+type PurgeEntryDTO struct {
+	Seq   uint64 `json:"seq"`
+	Scope string `json:"scope"`
+	Host  string `json:"host,omitempty"`
+	URI   string `json:"uri,omitempty"`
+}
+
+// PurgeSince is the GET /v1/purges response: the entries an edge hasn't applied yet
+// (scoped to its allowed hosts), the highest journal seq, and a flush_required flag
+// set when the edge's cursor fell behind the retained window (a gap).
+type PurgeSince struct {
+	Entries       []PurgeEntryDTO `json:"entries"`
+	MaxSeq        uint64          `json:"max_seq"`
+	FlushRequired bool            `json:"flush_required"`
+}
+
+// PurgeStore is the control plane's bounded append-only purge journal. An admin
+// appends purges via Add (monotonic seq); each edge polls Since(cursor) to converge
+// on its own timer, exactly like cert/WAF distribution. There is no per-edge state
+// here — the cursor lives on the edge — so it is replica-friendly only in the sense
+// that a single CP instance owns the journal; multiple CP replicas would each keep
+// an independent journal (acceptable: an edge polling a different replica that lacks
+// a recent entry simply gets flush_required on the gap, which over-invalidates
+// safely). It is safe for concurrent use.
+type PurgeStore struct {
+	mu      sync.Mutex
+	entries []purgeRecord
+	lastSeq uint64 // highest seq issued (0 = none yet)
+	minSeq  uint64 // smallest retained seq (1 when empty)
+	maxKeep int
+}
+
+// NewPurgeStore builds the journal. maxEntries <= 0 uses defaultPurgeJournalMax.
+func NewPurgeStore(maxEntries int) *PurgeStore {
+	if maxEntries <= 0 {
+		maxEntries = defaultPurgeJournalMax
+	}
+	return &PurgeStore{minSeq: 1, maxKeep: maxEntries}
+}
+
+// Add appends a purge and returns its seq. scope must be one of flush-all / host /
+// url; host is required for host+url (normalized here), uri for url. A bad
+// scope/host/uri returns (0, false) so the handler can 400.
+func (s *PurgeStore) Add(scope, host, uri string) (uint64, bool) {
+	scope = strings.TrimSpace(scope)
+	switch scope {
+	case purgeScopeFlushAll:
+		host, uri = "", ""
+	case purgeScopeHost:
+		host = normHostCP(host)
+		if host == "" {
+			return 0, false
+		}
+		uri = ""
+	case purgeScopeURL:
+		host = normHostCP(host)
+		if host == "" || uri == "" {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSeq++
+	s.entries = append(s.entries, purgeRecord{seq: s.lastSeq, scope: scope, host: host, uri: uri})
+	if len(s.entries) > s.maxKeep {
+		// Trim oldest; re-slice into a fresh backing array so the dropped records
+		// are reclaimed rather than pinned by the slice header.
+		s.entries = append([]purgeRecord(nil), s.entries[len(s.entries)-s.maxKeep:]...)
+	}
+	s.minSeq = s.entries[0].seq
+	purgeIssued.WithLabelValues(scope).Inc()
+	purgeJournalSize.Set(float64(len(s.entries)))
+	return s.lastSeq, true
+}
+
+// Since returns the purges an edge with cursor `since` hasn't applied: entries with
+// seq > since, filtered to flush-all (affects every edge) plus host/url entries
+// whose host the edge may serve (per allow). FlushRequired is set when the edge's
+// next-needed seq was already trimmed (since+1 < minSeq) — the edge then bumps its
+// global epoch and jumps to MaxSeq.
+func (s *PurgeStore) Since(since uint64, allow func(host string) bool) PurgeSince {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res := PurgeSince{MaxSeq: s.lastSeq}
+	// Cursor ahead of the journal (since > lastSeq): the edge has applied a seq this
+	// CP never issued, which means the journal was reset under it — a CP restart or a
+	// fresh/lagging replica (the store is in-memory, so seq restarts at 0). Without
+	// this, the post-reset seqs (1,2,3…) would all be <= the edge's stale cursor and
+	// silently skipped — an indefinite UNDER-invalidation. flush-all so the edge
+	// re-syncs and realigns its cursor down to MaxSeq. (Also subsumes the since=MaxUint64
+	// overflow case, since MaxUint64 > lastSeq.)
+	if since > s.lastSeq {
+		res.FlushRequired = true
+		return res
+	}
+	// Gap below the retained window: the edge's next-needed seq (since+1) was trimmed.
+	if since+1 < s.minSeq {
+		res.FlushRequired = true
+		return res
+	}
+	for _, e := range s.entries {
+		if e.seq <= since {
+			continue
+		}
+		if e.scope != purgeScopeFlushAll && !allow(e.host) {
+			continue
+		}
+		res.Entries = append(res.Entries, PurgeEntryDTO{Seq: e.seq, Scope: e.scope, Host: e.host, URI: e.uri})
+	}
+	return res
+}
+
+// normHostCP lowercases and strips the port from a host, mirroring the edge's
+// normHost (and cache.primaryHash) so a purge key matches the edge's stored key. It
+// also trims surrounding whitespace from operator input.
+func normHostCP(host string) string {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if hh, _, err := net.SplitHostPort(h); err == nil {
+		h = hh
+	}
+	return h
+}
