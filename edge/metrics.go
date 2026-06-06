@@ -79,10 +79,27 @@ var (
 		Name:      "edge_cp_active_signer_fp",
 		Help:      "CP active signing fp the edge last observed (value 1).",
 	}, []string{"sigfp", "edge_id"})
+
+	// edgeOnDemand counts serve-all on-demand cert resolutions by result. "hit"/"miss"/"shed"
+	// are per-CP-fetch (single-flight leader): hit landed a cert, miss got a 404/error and
+	// negative-cached it, shed bailed over the in-flight cap without touching the CP.
+	// "suppressed" is per-handshake — a negative-cache short-circuit — so it measures how
+	// much repeat-miss load the cache absorbs. A climbing shed/suppressed rate flags an
+	// SNI flood or a too-tight cap/TTL.
+	edgeOnDemand = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_ondemand_cert_total",
+		Help:      "Serve-all on-demand cert resolutions by result (hit|miss|shed|suppressed).",
+	}, []string{"result", "edge_id"})
 )
 
 func init() {
-	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID, edgeRefresh, edgeClientCertSignerFP, edgeCPActiveSignerFP)
+	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID, edgeRefresh, edgeClientCertSignerFP, edgeCPActiveSignerFP, edgeOnDemand)
+}
+
+// ondemand counts one on-demand cert resolution outcome.
+func ondemand(result string) {
+	edgeOnDemand.WithLabelValues(result, edgeID).Inc()
 }
 
 // edgeID is the process's logical identity, stamped on every metric. Defaults to

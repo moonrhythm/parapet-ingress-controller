@@ -157,6 +157,10 @@ func main() {
 		// On a handshake for an SNI not held, fetch it from the control plane (the
 		// handshake blocks on it); the CP's per-token authz still gates which SNIs
 		// resolve. The periodic refresh keeps on-demand domains rotated.
+		store.ConfigureOnDemand(
+			time.Duration(envInt64("EDGE_ONDEMAND_NEG_TTL", 30))*time.Second,
+			int(envInt64("EDGE_ONDEMAND_MAX_INFLIGHT", 32)),
+		)
 		store.SetOnDemand(func(sni string) { edge.RefreshCertOnce(cp, store, sni, remintCoord) })
 		slog.Info("edge: EDGE_DOMAINS empty — serving ALL domains (certs fetched on demand)")
 	} else {
