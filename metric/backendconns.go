@@ -9,7 +9,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const addrSizeHint = 300
+const backendSizeHint = 100
 
 type backendMetrics struct {
 	connections prometheus.Gauge
@@ -17,40 +17,55 @@ type backendMetrics struct {
 	writes      prometheus.Counter
 }
 
+// backendKey identifies the backend Service a connection belongs to. Keying on
+// the Service (not the dialed pod IP:port) keeps the series count bounded by the
+// number of Services — pods churn on every deploy/scale, and an addr-keyed
+// handle cache never evicts, so stale per-pod series would accumulate at 0/
+// constant for the life of the process. A pod address belongs to exactly one
+// Service, so attributing the connection to it at dial time is stable.
+type backendKey struct {
+	serviceType      string
+	serviceNamespace string
+	serviceName      string
+}
+
 type backendConnections struct {
 	connections *prometheus.GaugeVec
 	reads       *prometheus.CounterVec
 	writes      *prometheus.CounterVec
 
-	cache *cache[string, *backendMetrics] // keyed by addr
+	cache *cache[backendKey, *backendMetrics]
 }
 
 var _backendConnections backendConnections
 
 func init() {
+	labels := []string{"service_type", "service_namespace", "service_name"}
 	_backendConnections.connections = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: prom.Namespace,
 		Name:      "backend_connections",
-	}, []string{"addr"})
+	}, labels)
 	_backendConnections.reads = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "backend_network_read_bytes",
-	}, []string{"addr"})
+	}, labels)
 	_backendConnections.writes = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: prom.Namespace,
 		Name:      "backend_network_write_bytes",
-	}, []string{"addr"})
-	_backendConnections.cache = newCache[string, *backendMetrics](addrSizeHint)
+	}, labels)
+	_backendConnections.cache = newCache[backendKey, *backendMetrics](backendSizeHint)
 
 	prom.Registry().MustRegister(_backendConnections.connections)
 	prom.Registry().MustRegister(_backendConnections.reads)
 	prom.Registry().MustRegister(_backendConnections.writes)
 }
 
-func (p *backendConnections) getM(addr string) *backendMetrics {
-	return p.cache.getOrCreate(addr, func() *backendMetrics {
+func (p *backendConnections) getM(key backendKey) *backendMetrics {
+	return p.cache.getOrCreate(key, func() *backendMetrics {
 		l := prometheus.Labels{
-			"addr": addr,
+			"service_type":      key.serviceType,
+			"service_namespace": key.serviceNamespace,
+			"service_name":      key.serviceName,
 		}
 		return &backendMetrics{
 			connections: p.connections.With(l),
@@ -60,9 +75,15 @@ func (p *backendConnections) getM(addr string) *backendMetrics {
 	})
 }
 
-// BackendConnections collects backend connection metrics
-func BackendConnections(conn net.Conn, addr string) net.Conn {
-	m := _backendConnections.getM(addr)
+// BackendConnections collects backend connection metrics, attributed to the
+// destination Service (serviceType/namespace/name) rather than the dialed pod
+// address — see backendKey for why.
+func BackendConnections(conn net.Conn, serviceType, serviceNamespace, serviceName string) net.Conn {
+	m := _backendConnections.getM(backendKey{
+		serviceType:      serviceType,
+		serviceNamespace: serviceNamespace,
+		serviceName:      serviceName,
+	})
 	trackConn := &trackBackendConn{
 		Conn: conn,
 		m:    m,
