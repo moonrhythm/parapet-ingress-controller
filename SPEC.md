@@ -196,6 +196,7 @@ invariants:
 | `TR_MAX_CONNS_PER_HOST` | stdlib | **Go-only** | Max conns per host (no Pingora 0.8 equivalent) |
 | `PROFILER` / `PROFILER_NAME` | `false` | **Go-only** | Cloud Profiler (no Rust SDK) |
 | `WAF_COST_LIMIT` / `WAF_INSPECT_BODY` / `WAF_DISABLE_MACROS` | — | **Go-only** | cel-rust has no cost limit; body inspection is phase-2 |
+| `UPSTREAM_AUTO_H2C` | `false` | **Go-only** | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The HTTP/1.1-only verdict is cached per-Service and cleared on route reload. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
 | `UPSTREAM_CONNECT_TIMEOUT` | `2s` | **Rust-only** | TCP connect timeout to a pod (connect phase) |
 | `UPSTREAM_TOTAL_CONNECT_TIMEOUT` | `3s` | **Rust-only** | Connect + TLS-handshake timeout |
 | `DEBUG_ENDPOINTS` | `false` | **Rust-only** | Serve `GET /debug/routes` |

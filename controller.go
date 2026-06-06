@@ -490,6 +490,9 @@ func (ctrl *Controller) reloadIngressDebounced() {
 	mux := buildRoutes(routes)
 	knownHosts := buildKnownHosts(routes)
 	ctrl.routes.Store(&routeState{mux: mux, knownHosts: knownHosts})
+	// routes reloaded — forget remembered h2c-unsupported upstreams so a Service
+	// that gained h2c support is re-probed (no-op unless auto-h2c is enabled).
+	ctrl.proxy.ResetH2C()
 	slog.Info("reloaded ingresses", "loaded", loaded, "skipped", skipped, "routes", len(routes))
 	ctrl.reloadSecret()
 }
@@ -786,10 +789,20 @@ func getBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (conf
 }
 
 func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, config backendConfig, target string) http.Handler {
+	// Precompute the per-Service auto-h2c cache key once at route-build time — it's
+	// constant for this route. Only built when auto-h2c is enabled, so disabled
+	// deployments pay nothing per request (no concat/alloc on the hot path).
+	var upstreamKey string
+	if ctrl.proxy.AutoH2CEnabled() {
+		upstreamKey = svc.Namespace + "/" + svc.Name + ":" + strconv.Itoa(config.PortNumber)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := state.Get(r.Context())
 		s["serviceType"] = string(svc.Spec.Type)
 		s["serviceName"] = svc.Name
+		if upstreamKey != "" { // auto-h2c negative-cache key (proxy reads it)
+			s["upstreamKey"] = upstreamKey
+		}
 
 		target := ctrl.routeTable.Lookup(target)
 		if target == "" { // fail fast

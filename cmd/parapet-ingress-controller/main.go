@@ -48,6 +48,7 @@ func main() {
 	waitBeforeShutdown := config.DurationDefault("WAIT_BEFORE_SHUTDOWN", 30*time.Second)
 	httpServerMaxHeaderBytes := config.IntDefault("HTTP_SERVER_MAX_HEADER_BYTES", 1<<14) // 16K
 	loadAllCerts := config.Bool("LOAD_ALL_CERTS")
+	autoH2C := config.Bool("UPSTREAM_AUTO_H2C")
 
 	wafConfig := controller.WAFConfig{
 		Enabled:       config.Bool("WAF_ENABLED"),
@@ -159,6 +160,9 @@ func main() {
 
 	proxy := proxy.New()
 	proxy.ConfigTransport(configTransport)
+	if autoH2C {
+		proxy.EnableAutoH2C()
+	}
 
 	ctrl := controller.New(watchNamespace, proxy)
 	ctrl.LoadAllCerts = loadAllCerts

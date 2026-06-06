@@ -8,15 +8,20 @@ import (
 type gateway struct {
 	Default http.RoundTripper
 	H2C     http.RoundTripper
+	AutoH2C http.RoundTripper // non-nil when UPSTREAM_AUTO_H2C is enabled
 }
 
-func (g gateway) RoundTrip(r *http.Request) (*http.Response, error) {
-	var tr http.RoundTripper
+func (g *gateway) RoundTrip(r *http.Request) (*http.Response, error) {
 	switch r.URL.Scheme {
-	default:
-		tr = g.Default
 	case "h2c":
-		tr = g.H2C
+		// explicit h2c (appProtocol) — no auto-detection / fallback
+		return g.H2C.RoundTrip(r)
+	case "https":
+		return g.Default.RoundTrip(r)
+	default: // http or empty
+		if g.AutoH2C != nil {
+			return g.AutoH2C.RoundTrip(r)
+		}
+		return g.Default.RoundTrip(r)
 	}
-	return tr.RoundTrip(r)
 }
