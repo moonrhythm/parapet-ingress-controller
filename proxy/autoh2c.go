@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -66,10 +65,17 @@ func (t *autoH2CTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		return t.fallback.RoundTrip(r)
 	}
 
-	// WebSocket / Upgrade can only be tunneled over HTTP/1.1 (httputil.ReverseProxy
-	// has no RFC 8441 HTTP/2 path), so route them straight to the fallback. Their
-	// outcome says nothing about the Service's plain-h2c support — never cached.
-	if header.Exists(r.Header, header.Upgrade) {
+	// Only bodyless requests probe. A failed h2c probe needs to replay over HTTP/1.1,
+	// but the h2c client streams any request body as DATA frames (consuming it) before
+	// its read loop detects the HTTP/1.1 peer and fails — leaving nothing to replay and
+	// surfacing "http2: frame too large ... looked like an HTTP/1.1 header". Restricting
+	// probes to bodyless requests (GET/HEAD/...) sidesteps that with no buffering. A
+	// body-carrying request to an as-yet-unknown upstream uses HTTP/1.1 without probing
+	// or caching; a later bodyless request establishes the verdict for the whole Service.
+	// (Trade-off: a plain-http upstream that is h2c-only AND only ever receives bodied
+	// requests never auto-upgrades — those should set appProtocol: h2c explicitly.)
+	// WebSocket/Upgrade likewise only run over HTTP/1.1 and are never probed.
+	if hasBody(r) || header.Exists(r.Header, header.Upgrade) {
 		return t.fallback.RoundTrip(r)
 	}
 
@@ -81,16 +87,6 @@ func (t *autoH2CTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		return t.fallback.RoundTrip(r)
 	}
 	defer t.probing.Delete(key)
-
-	// Falling back means replaying on a second connection, which is only safe if
-	// the body hasn't been read. A non-HTTP/2 peer fails during the connection
-	// preface — before the body is read — so this guard normally holds; we track
-	// it explicitly to stay safe.
-	var bt *bodyTracker
-	if r.Body != nil && r.Body != http.NoBody {
-		bt = &bodyTracker{ReadCloser: r.Body}
-		r.Body = bt
-	}
 
 	resp, err := t.h2c.RoundTrip(r)
 	if err == nil {
@@ -105,21 +101,20 @@ func (t *autoH2CTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
-	// Any other error with the body still intact is treated as "no HTTP/2": cache
-	// the verdict and replay over HTTP/1.1.
-	if bt == nil || !bt.read {
-		t.store(key, false)
-		slog.Info("proxy: upstream does not support h2c, falling back to http/1.1",
-			"upstream", key, "error", err)
-		if bt != nil {
-			r.Body = bt.ReadCloser
-		}
-		r.URL.Scheme = "http"
-		return t.fallback.RoundTrip(r)
-	}
+	// Any other error means "no HTTP/2": cache the verdict and replay over HTTP/1.1.
+	// The request is bodyless, so the replay is always safe.
+	t.store(key, false)
+	slog.Info("proxy: upstream does not support h2c, falling back to http/1.1",
+		"upstream", key, "error", err)
+	r.URL.Scheme = "http"
+	return t.fallback.RoundTrip(r)
+}
 
-	// Body already (partially) sent — replay isn't safe, surface the error.
-	return nil, err
+// hasBody reports whether the request carries a request body. It keys off
+// ContentLength (0 = no body; >0 or -1/unknown-chunked = has a body) rather than
+// r.Body, which is non-nil even for bodyless server requests.
+func hasBody(r *http.Request) bool {
+	return r.ContentLength != 0
 }
 
 // lookup returns the cached entry if present and not yet expired.
@@ -148,16 +143,4 @@ func upstreamKey(r *http.Request) string {
 		return k
 	}
 	return r.URL.Host
-}
-
-// bodyTracker records whether anything has read the request body, so the
-// auto-h2c fallback knows when a replay is still safe.
-type bodyTracker struct {
-	io.ReadCloser
-	read bool
-}
-
-func (b *bodyTracker) Read(p []byte) (int, error) {
-	b.read = true
-	return b.ReadCloser.Read(p)
 }

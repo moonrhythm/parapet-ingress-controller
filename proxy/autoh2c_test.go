@@ -103,6 +103,50 @@ func TestAutoH2C_FallbackAndCache(t *testing.T) {
 	assert.False(t, e.h2c, "negative verdict cached")
 }
 
+// End-to-end against a REAL HTTP/1.1 server with a POST body. Because the request
+// carries a body it is never probed over h2c — it goes straight to HTTP/1.1 with its
+// payload intact. This is the regression guard for the
+// "http2: frame too large ... looked like an HTTP/1.1 header" error, which only arose
+// when the h2c client streamed a body to a non-HTTP/2 peer.
+func TestAutoH2C_RealServerPostBodyFallsBack(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu       sync.Mutex
+		gotProto string
+		gotBody  string
+	)
+	ts := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotProto = r.Proto
+		gotBody = string(b)
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	ts.Config.Protocols = &protocols
+	ts.Start()
+	defer ts.Close()
+
+	dialer := newDialer()
+	httpTr := newHTTPTransport(dialer.DialContext)
+	tr := newAutoH2C(newH2CTransport(dialer.DialContext, httpTr), httpTr)
+
+	r := httptest.NewRequest(http.MethodPost, ts.URL, strings.NewReader("hello-body"))
+	resp, err := tr.RoundTrip(r)
+	require.NoError(t, err, "POST must reach HTTP/1.1, not surface the h2c frame error")
+	require.NotNil(t, resp)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 0, tr.cachedLen(), "a bodied request neither probes nor caches")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, "HTTP/1.1", gotProto)
+	assert.Equal(t, "hello-body", gotBody, "the upstream received the full body")
+}
+
 // h2c upstream: the request succeeds over HTTP/2 and the positive verdict is cached.
 func TestAutoH2C_H2CSuccessCachedPositive(t *testing.T) {
 	t.Parallel()
@@ -198,27 +242,110 @@ func TestAutoH2C_ProtocolErrorFallsBack(t *testing.T) {
 	assert.False(t, e.h2c)
 }
 
-// If the body was already read during the h2c attempt, a replay is unsafe: the
-// error is surfaced and the upstream is not cached.
-func TestAutoH2C_BodyReadNoReplay(t *testing.T) {
+// A body-carrying request to an as-yet-unknown upstream is NOT probed: it goes
+// straight to HTTP/1.1 with its body untouched, and nothing is cached (a later
+// bodyless request establishes the verdict). This is what avoids the
+// "http2: frame too large ... looked like an HTTP/1.1 header" error — the h2c client
+// never sees the body because the probe is skipped.
+func TestAutoH2C_BodyRequestSkipsProbe(t *testing.T) {
 	t.Parallel()
 
-	h2cRT := rtFunc(func(r *http.Request) (*http.Response, error) {
-		io.ReadAll(r.Body) // consume the body, then fail
+	var h2cCalled bool
+	h2cRT := rtFunc(func(*http.Request) (*http.Response, error) {
+		h2cCalled = true
 		return nil, io.ErrUnexpectedEOF
 	})
-	var fallbackCalled bool
-	fallback := rtFunc(func(*http.Request) (*http.Response, error) {
-		fallbackCalled = true
+	var gotBody string
+	fallback := rtFunc(func(r *http.Request) (*http.Response, error) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
 		return &http.Response{StatusCode: http.StatusOK}, nil
 	})
 	tr := newAutoH2C(h2cRT, fallback)
 
 	r := httptest.NewRequest(http.MethodPost, "http://10.0.0.1:8080", strings.NewReader("payload"))
+	resp, err := tr.RoundTrip(r)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.False(t, h2cCalled, "a bodied request must not be probed over h2c")
+	assert.Equal(t, "payload", gotBody, "fallback receives the untouched body")
+	assert.Equal(t, 0, tr.cachedLen(), "skipped probe caches nothing")
+}
+
+// A chunked request (ContentLength -1) is treated as having a body and skips the probe.
+func TestAutoH2C_ChunkedRequestSkipsProbe(t *testing.T) {
+	t.Parallel()
+
+	var h2cCalled bool
+	h2cRT := rtFunc(func(*http.Request) (*http.Response, error) {
+		h2cCalled = true
+		return nil, io.ErrUnexpectedEOF
+	})
+	fallback := rtFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	})
+	tr := newAutoH2C(h2cRT, fallback)
+
+	r := httptest.NewRequest(http.MethodPost, "http://10.0.0.1:8080", strings.NewReader("x"))
+	r.ContentLength = -1 // unknown length (chunked)
 	_, err := tr.RoundTrip(r)
-	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
-	assert.False(t, fallbackCalled, "must not replay a consumed body")
+	require.NoError(t, err)
+	assert.False(t, h2cCalled, "unknown-length body must not be probed")
 	assert.Equal(t, 0, tr.cachedLen())
+}
+
+// Once an upstream is cached h2c-positive (by a bodyless probe), a later bodied
+// request DOES ride h2c via the fast path — the body restriction only gates probing.
+func TestAutoH2C_BodyRequestUsesCachedH2C(t *testing.T) {
+	t.Parallel()
+
+	var h2cBodied bool
+	h2cRT := rtFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPost {
+			h2cBodied = true
+		}
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	})
+	fallback := rtFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	})
+	tr := newAutoH2C(h2cRT, fallback)
+
+	// bodyless GET probes and caches h2c=true
+	_, err := tr.RoundTrip(httptest.NewRequest(http.MethodGet, "http://10.0.0.1:8080", nil))
+	require.NoError(t, err)
+	e, ok := tr.rawEntry("10.0.0.1:8080")
+	require.True(t, ok)
+	require.True(t, e.h2c)
+
+	// a subsequent POST takes the cached fast path over h2c
+	_, err = tr.RoundTrip(httptest.NewRequest(http.MethodPost, "http://10.0.0.1:8080", strings.NewReader("payload")))
+	require.NoError(t, err)
+	assert.True(t, h2cBodied, "bodied request rides cached h2c")
+}
+
+// A bodyless request whose probe fails before any body work falls back cleanly and
+// caches the verdict (the common GET case).
+func TestAutoH2C_NoBodyFallsBack(t *testing.T) {
+	t.Parallel()
+
+	h2cRT := rtFunc(func(*http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	})
+	var fallbackCalled bool
+	fallback := rtFunc(func(r *http.Request) (*http.Response, error) {
+		fallbackCalled = true
+		assert.Equal(t, "http", r.URL.Scheme)
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	})
+	tr := newAutoH2C(h2cRT, fallback)
+
+	r := httptest.NewRequest(http.MethodGet, "http://10.0.0.1:8080", nil)
+	resp, err := tr.RoundTrip(r)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.True(t, fallbackCalled)
+	assert.Equal(t, 1, tr.cachedLen())
 }
 
 // A cached verdict is re-probed once its TTL expires, picking up a Service that
