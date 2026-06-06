@@ -129,13 +129,44 @@ func TestPurgeStore_MaxUint64SinceFlushesNotPanics(t *testing.T) {
 	assert.True(t, res.FlushRequired)
 }
 
+func TestPurgeStore_PrefixTrimsWhitespaceAndStores(t *testing.T) {
+	s := NewPurgeStore(0)
+	// Surrounding whitespace is trimmed; a rooted path is accepted and stored clean
+	// (else the edge's normalizePrefix, which only trims a trailing slash, would keep
+	// the spaces and the prefix would silently match nothing).
+	_, ok := s.Add(purgeScopePrefix, "a.com", "  /blog  ")
+	require.True(t, ok)
+	res := s.Since(0, allowAll)
+	require.Len(t, res.Entries, 1)
+	assert.Equal(t, "/blog", res.Entries[0].URI, "prefix trimmed to a clean rooted path")
+}
+
+func TestPurgeStore_PrefixScopedByHost(t *testing.T) {
+	s := NewPurgeStore(0)
+	_, ok := s.Add(purgeScopePrefix, "a.com", "/blog")
+	require.True(t, ok)
+	_, ok = s.Add(purgeScopePrefix, "other.com", "/x")
+	require.True(t, ok)
+
+	// An edge allowed only a.com gets a.com's prefix purge, never other.com's.
+	res := s.Since(0, func(h string) bool { return h == "a.com" })
+	require.Len(t, res.Entries, 1)
+	assert.Equal(t, purgeScopePrefix, res.Entries[0].Scope)
+	assert.Equal(t, "a.com", res.Entries[0].Host)
+	assert.Equal(t, "/blog", res.Entries[0].URI)
+}
+
 func TestPurgeStore_InvalidInputsRejected(t *testing.T) {
 	s := NewPurgeStore(0)
 	cases := []struct{ scope, host, uri string }{
 		{"bogus", "a.com", "/x"},
-		{purgeScopeHost, "", ""},     // host scope needs a host
-		{purgeScopeURL, "a.com", ""}, // url scope needs a uri
-		{purgeScopeURL, "", "/x"},    // url scope needs a host
+		{purgeScopeHost, "", ""},            // host scope needs a host
+		{purgeScopeURL, "a.com", ""},        // url scope needs a uri
+		{purgeScopeURL, "", "/x"},           // url scope needs a host
+		{purgeScopeURL, "a.com", "blog"},    // url uri must be a rooted "/..." path
+		{purgeScopePrefix, "a.com", ""},     // prefix scope needs a prefix path
+		{purgeScopePrefix, "", "/x"},        // prefix scope needs a host
+		{purgeScopePrefix, "a.com", "blog"}, // prefix must be a rooted "/..." path (typo guard)
 	}
 	for _, c := range cases {
 		_, ok := s.Add(c.scope, c.host, c.uri)

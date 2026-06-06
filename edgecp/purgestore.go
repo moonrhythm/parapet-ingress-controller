@@ -12,6 +12,7 @@ const (
 	purgeScopeFlushAll = "flush-all"
 	purgeScopeHost     = "host"
 	purgeScopeURL      = "url"
+	purgeScopePrefix   = "prefix"
 )
 
 // defaultPurgeJournalMax bounds the in-memory journal. Purges are operator-issued
@@ -72,8 +73,12 @@ func NewPurgeStore(maxEntries int) *PurgeStore {
 }
 
 // Add appends a purge and returns its seq. scope must be one of flush-all / host /
-// url; host is required for host+url (normalized here), uri for url. A bad
-// scope/host/uri returns (0, false) so the handler can 400.
+// url / prefix. host is required (and normalized) for host/url/prefix; uri is
+// required for url (the exact on-the-wire path+query) and prefix (the path prefix),
+// and MUST start with "/" so it can match a request path (a request-uri always
+// does) — a no-leading-slash value would silently match nothing. uri must be in
+// the same percent-encoded form the request carries (the cache keys on the raw
+// RequestURI). A bad scope/host/uri returns (0, false) so the handler can 400.
 func (s *PurgeStore) Add(scope, host, uri string) (uint64, bool) {
 	scope = strings.TrimSpace(scope)
 	switch scope {
@@ -85,9 +90,13 @@ func (s *PurgeStore) Add(scope, host, uri string) (uint64, bool) {
 			return 0, false
 		}
 		uri = ""
-	case purgeScopeURL:
+	case purgeScopeURL, purgeScopePrefix:
+		// url: uri is the exact path+query; prefix: uri is the path prefix. Both must
+		// be a rooted path ("/..."), else they'd never match a real request path —
+		// reject so a typo surfaces as a 400 instead of a silent no-op purge.
 		host = normHostCP(host)
-		if host == "" || uri == "" {
+		uri = strings.TrimSpace(uri)
+		if host == "" || !strings.HasPrefix(uri, "/") {
 			return 0, false
 		}
 	default:
@@ -110,8 +119,8 @@ func (s *PurgeStore) Add(scope, host, uri string) (uint64, bool) {
 }
 
 // Since returns the purges an edge with cursor `since` hasn't applied: entries with
-// seq > since, filtered to flush-all (affects every edge) plus host/url entries
-// whose host the edge may serve (per allow). FlushRequired is set when the edge's
+// seq > since, filtered to flush-all (affects every edge) plus host/url/prefix
+// entries whose host the edge may serve (per allow). FlushRequired is set when the edge's
 // next-needed seq was already trimmed (since+1 < minSeq) — the edge then bumps its
 // global epoch and jumps to MaxSeq.
 func (s *PurgeStore) Since(since uint64, allow func(host string) bool) PurgeSince {

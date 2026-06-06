@@ -99,6 +99,22 @@ func TestPurgeAPI_GetScopedToAllowedHosts(t *testing.T) {
 	}
 }
 
+func TestPurgeAPI_PrefixPostThenGet(t *testing.T) {
+	srv, _ := purgeTestServer(t)
+	h := srv.Handler()
+
+	rec := do(t, h, "POST", "/v1/purges", "admin-secret", `{"scope":"prefix","host":"acme.com","uri":"/blog"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = do(t, h, "GET", "/v1/purges?since=0", "edge-tok", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got PurgeSince
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Entries, 1)
+	assert.Equal(t, "prefix", got.Entries[0].Scope)
+	assert.Equal(t, "/blog", got.Entries[0].URI)
+}
+
 func TestPurgeAPI_PostInvalidScopeIs400(t *testing.T) {
 	srv, _ := purgeTestServer(t)
 	h := srv.Handler()

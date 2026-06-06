@@ -376,7 +376,7 @@ func (s *Server) handlePurgeAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	seq, ok := s.purge.Add(body.Scope, body.Host, body.URI)
 	if !ok {
-		http.Error(w, "invalid scope/host/uri (scope must be flush-all|host|url; host required for host/url; uri required for url)", http.StatusBadRequest)
+		http.Error(w, "invalid scope/host/uri (scope must be flush-all|host|url|prefix; host required for host/url/prefix; uri required for url, and the path prefix for prefix)", http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -165,7 +165,8 @@ invariants:
   `parapet/pkg/cache` `InvalidatedAfter` hook (parapet ≥ v0.17.0). Epochs use the
   **edge's own clock** at apply time (no trusted CP timestamp; the cursor makes
   apply idempotent, monotonic-clamped against an NTP step-back). Scopes: exact-URL
-  (all variants), whole-host, flush-all. A background reaper
+  (all variants), path-prefix (boundary-aware, path-only), whole-host, flush-all. A
+  background reaper
   (`EDGE_CACHE_PURGE_SWEEP_INTERVAL`) physically reclaims invalidated entries off
   the serving path, using `Storage.Range` + the raw host/uri in `Meta` (parapet ≥
   v0.17.1); the in-memory record table is bounded by a count-cap fold into the
