@@ -91,6 +91,12 @@ func (p *Proxy) ResetH2C() {
 	}
 }
 
+// AutoH2CEnabled reports whether auto-h2c detection is on. Callers use it to skip
+// building the per-Service cache key when the feature is disabled.
+func (p *Proxy) AutoH2CEnabled() bool {
+	return p.autoH2C != nil
+}
+
 // IsRetryable reports whether err is a connection failure that's safe to retry.
 // Only dial/connection errors qualify — an upstream that *responded* (even with
 // 502/503) has already received and processed the request, so retrying could

@@ -789,12 +789,20 @@ func getBackendConfig(backend *networking.IngressBackend, svc *v1.Service) (conf
 }
 
 func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, config backendConfig, target string) http.Handler {
+	// Precompute the per-Service auto-h2c cache key once at route-build time — it's
+	// constant for this route. Only built when auto-h2c is enabled, so disabled
+	// deployments pay nothing per request (no concat/alloc on the hot path).
+	var upstreamKey string
+	if ctrl.proxy.AutoH2CEnabled() {
+		upstreamKey = svc.Namespace + "/" + svc.Name + ":" + strconv.Itoa(config.PortNumber)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := state.Get(r.Context())
 		s["serviceType"] = string(svc.Spec.Type)
 		s["serviceName"] = svc.Name
-		// stable per-Service+port key for the auto-h2c negative cache (proxy reads it)
-		s["upstreamKey"] = svc.Namespace + "/" + svc.Name + ":" + strconv.Itoa(config.PortNumber)
+		if upstreamKey != "" { // auto-h2c negative-cache key (proxy reads it)
+			s["upstreamKey"] = upstreamKey
+		}
 
 		target := ctrl.routeTable.Lookup(target)
 		if target == "" { // fail fast
