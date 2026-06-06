@@ -208,6 +208,17 @@ handshake per new SNI. The CP's per-token authz is still the boundary — an SNI
 the token isn't allowed for `403`s and falls back to self-signed — so serve-all
 only truly serves "all" when the edge's token is authorized for all domains.
 
+The on-demand fetch blocks the handshake on a synchronous CP round trip, so three
+guards bound its blast radius (all serve-all only): concurrent handshakes for the
+**same** SNI collapse into one fetch via single-flight; a missing/denied SNI is
+**negative-cached** for `EDGE_ONDEMAND_NEG_TTL` (default 30s) so it isn't re-fetched
+on every handshake; and a **global cap** `EDGE_ONDEMAND_MAX_INFLIGHT` (default 32)
+limits concurrent fetches across distinct SNIs — over the cap a handshake self-signs
+immediately instead of queueing, so a flood of unknown SNIs can't exhaust handshake
+goroutines or hammer the CP. `parapet_edge_ondemand_cert_total{result}` counts the
+outcomes (`hit|miss|shed|suppressed`); a rising `shed`/`suppressed` rate signals a
+flood or a too-tight cap/TTL.
+
 ### Rotation ordering (the gotcha)
 
 The edge serves a cached cert. On rotation the new cert must reach the edge
