@@ -490,6 +490,9 @@ func (ctrl *Controller) reloadIngressDebounced() {
 	mux := buildRoutes(routes)
 	knownHosts := buildKnownHosts(routes)
 	ctrl.routes.Store(&routeState{mux: mux, knownHosts: knownHosts})
+	// routes reloaded — forget remembered h2c-unsupported upstreams so a Service
+	// that gained h2c support is re-probed (no-op unless auto-h2c is enabled).
+	ctrl.proxy.ResetH2C()
 	slog.Info("reloaded ingresses", "loaded", loaded, "skipped", skipped, "routes", len(routes))
 	ctrl.reloadSecret()
 }
@@ -790,6 +793,8 @@ func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, co
 		s := state.Get(r.Context())
 		s["serviceType"] = string(svc.Spec.Type)
 		s["serviceName"] = svc.Name
+		// stable per-Service+port key for the auto-h2c negative cache (proxy reads it)
+		s["upstreamKey"] = svc.Namespace + "/" + svc.Name + ":" + strconv.Itoa(config.PortNumber)
 
 		target := ctrl.routeTable.Lookup(target)
 		if target == "" { // fail fast
