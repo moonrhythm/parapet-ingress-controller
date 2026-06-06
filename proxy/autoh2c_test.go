@@ -195,6 +195,33 @@ func TestAutoH2C_UpgradeSkipsProbe(t *testing.T) {
 	assert.Equal(t, 0, tr.cachedLen())
 }
 
+// An Upgrade request must take HTTP/1.1 even when the upstream is already cached
+// h2c-positive — the Upgrade check precedes the cache lookup, so it never enters the
+// h2c transport and doesn't lean on h2cTransport's own guard.
+func TestAutoH2C_UpgradeBypassesCachedH2C(t *testing.T) {
+	t.Parallel()
+
+	var h2cCalled, fallbackCalled bool
+	h2cRT := rtFunc(func(*http.Request) (*http.Response, error) {
+		h2cCalled = true
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	})
+	fallback := rtFunc(func(*http.Request) (*http.Response, error) {
+		fallbackCalled = true
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	})
+	tr := newAutoH2C(h2cRT, fallback)
+	tr.store("10.0.0.1:8080", true) // upstream known h2c-capable
+
+	r := httptest.NewRequest(http.MethodGet, "http://10.0.0.1:8080", nil)
+	r.Header.Set("Upgrade", "websocket")
+	resp, err := tr.RoundTrip(r)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.False(t, h2cCalled, "upgrade must not enter the h2c transport even when cached h2c")
+	assert.True(t, fallbackCalled)
+}
+
 // A dial error means the pod is down, not that it lacks h2c: propagate it and
 // don't poison the cache.
 func TestAutoH2C_DialErrorNotCached(t *testing.T) {

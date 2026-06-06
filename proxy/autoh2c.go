@@ -56,8 +56,19 @@ func newAutoH2CTransport(h2c, fallback http.RoundTripper, ttl time.Duration) *au
 func (t *autoH2CTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	key := upstreamKey(r)
 
+	// WebSocket/Upgrade can only be tunneled over HTTP/1.1 (httputil.ReverseProxy has
+	// no RFC 8441 HTTP/2 path), so it ALWAYS takes the fallback and is never probed or
+	// cached. Checked before the cache lookup so an upstream cached h2c-positive still
+	// routes its upgrades over HTTP/1.1 — this layer owns the invariant rather than
+	// leaning on h2cTransport's own guard.
+	if header.Exists(r.Header, header.Upgrade) {
+		return t.fallback.RoundTrip(r)
+	}
+
 	// Fast path: a fresh cached outcome routes directly — no probing, no
-	// single-flight, so steady h2c traffic is fully multiplexed.
+	// single-flight, so steady h2c traffic is fully multiplexed. A cached-h2c upstream
+	// serves bodied requests (POST/gRPC) over h2c here; the body restriction below only
+	// gates probing, not steady-state routing.
 	if e, ok := t.lookup(key); ok {
 		if e.h2c {
 			return t.h2c.RoundTrip(r)
@@ -74,8 +85,7 @@ func (t *autoH2CTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// or caching; a later bodyless request establishes the verdict for the whole Service.
 	// (Trade-off: a plain-http upstream that is h2c-only AND only ever receives bodied
 	// requests never auto-upgrades — those should set appProtocol: h2c explicitly.)
-	// WebSocket/Upgrade likewise only run over HTTP/1.1 and are never probed.
-	if hasBody(r) || header.Exists(r.Header, header.Upgrade) {
+	if hasBody(r) {
 		return t.fallback.RoundTrip(r)
 	}
 
