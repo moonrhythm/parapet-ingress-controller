@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
+	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
 type dialer struct {
@@ -36,7 +37,12 @@ func (d *dialer) DialContext(ctx context.Context, network, addr string) (conn ne
 		return
 	}
 
-	conn = metric.BackendConnections(conn, addr)
+	// Attribute the connection to its destination Service, not the dialed pod
+	// address. The transport calls DialContext with the request context, so the
+	// route state stamped by makeHandler is available here; a pod addr maps to a
+	// single Service, so the attribution is stable across connection reuse.
+	s := state.Get(ctx)
+	conn = metric.BackendConnections(conn, s["serviceType"], s["namespace"], s["serviceName"])
 	return
 }
 

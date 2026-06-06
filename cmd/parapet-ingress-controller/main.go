@@ -194,8 +194,8 @@ func main() {
 	m.Use(host.StripPort())
 	m.Use(host.ToLower())
 	m.Use(metric.HostActiveTracker(ctrl.IsKnownHost))
-	m.Use(hostCountryRateLimit(ctrl.IsKnownHost))
-	m.Use(hostRateLimit(ctrl.IsKnownHost))
+	m.Use(hostCountryRateLimit())
+	m.Use(hostRateLimit())
 
 	if !disableLog {
 		m.Use(logger.Stdout())
@@ -424,7 +424,7 @@ func forwardGeoHeaders(country func(*http.Request) string, asn func(*http.Reques
 }
 
 // hostRateLimit protects from unresponsive upstreams by limit concurrent requests to the same host.
-func hostRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
+func hostRateLimit() parapet.Middleware {
 	concurrentCapacity := config.Int("HOST_CONCURRENT_CAPACITY") // concurrent requests
 	concurrentSize := config.Int("HOST_CONCURRENT_SIZE")         // queue size
 
@@ -438,7 +438,6 @@ func hostRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
 
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		metric.HostRatelimitRequest(metric.HostLabel(r.Host, isKnownHost))
 		metric.RejectedRequest("host_limit")
 	}
 
@@ -469,7 +468,7 @@ func hostRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
 }
 
 // hostCountryRateLimit protects from unresponsive upstreams by limit concurrent requests to the same host and country.
-func hostCountryRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
+func hostCountryRateLimit() parapet.Middleware {
 	concurrentCapacity := config.Int("HOST_COUNTRY_CONCURRENT_CAPACITY") // concurrent requests
 	concurrentSize := config.Int("HOST_COUNTRY_CONCURRENT_SIZE")         // queue size
 	countryHeaderRaw := strings.TrimSpace(config.String("HOST_COUNTRY_HEADER"))
@@ -507,7 +506,6 @@ func hostCountryRateLimit(isKnownHost func(host string) bool) parapet.Middleware
 
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		metric.HostRatelimitRequest(metric.HostLabel(r.Host, isKnownHost))
 		metric.RejectedRequest("host_limit")
 	}
 

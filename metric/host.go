@@ -13,13 +13,6 @@ import (
 const hostSizeHint = 100
 
 func init() {
-	_hostRatelimit.vec = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: prom.Namespace,
-		Name:      "host_ratelimit_requests",
-	}, []string{"host"})
-	_hostRatelimit.cache = newCache[string, prometheus.Counter](hostSizeHint)
-	prom.Registry().MustRegister(_hostRatelimit.vec)
-
 	_host.vec = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: prom.Namespace,
 		Name:      "host_active_requests",
@@ -101,24 +94,4 @@ func kindLabel(h http.Header) string {
 // hosts the router doesn't serve.
 func HostActiveTracker(isKnownHost func(host string) bool) parapet.Middleware {
 	return promHostTracker{isKnownHost: isKnownHost}
-}
-
-var _hostRatelimit promHostRatelimit
-
-type promHostRatelimit struct {
-	vec   *prometheus.CounterVec
-	cache *cache[string, prometheus.Counter]
-}
-
-func (p *promHostRatelimit) Inc(host string) {
-	p.cache.getOrCreate(host, func() prometheus.Counter {
-		return p.vec.With(prometheus.Labels{
-			"host": host,
-		})
-	}).Inc()
-}
-
-// HostRatelimitRequest increments the host ratelimit counter
-func HostRatelimitRequest(host string) {
-	_hostRatelimit.Inc(host)
 }
