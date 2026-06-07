@@ -47,7 +47,7 @@ func TestMiddleware(t *testing.T) {
 
 	var called bool
 	var m parapet.Middlewares
-	m.Use(Middleware())
+	m.Use(Middleware(true))
 	m.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			s := Get(r.Context())
@@ -76,7 +76,7 @@ func TestMiddleware(t *testing.T) {
 // asserts the second request sees a clean slate.
 func TestMiddlewareDoesNotLeakStateBetweenRequests(t *testing.T) {
 	var m parapet.Middlewares
-	m.Use(Middleware())
+	m.Use(Middleware(false)) // exercise the disabled-log path (pooling must still recycle)
 
 	first := true
 	h := m.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

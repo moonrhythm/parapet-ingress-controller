@@ -49,16 +49,21 @@ func NewContext(parent context.Context, s State) context.Context {
 	return context.WithValue(parent, ctxKey{}, s)
 }
 
-// Middleware injects empty state context to request and set all state values to logger
-func Middleware() parapet.Middleware {
+// Middleware injects a pooled per-request State into the context. When logEnabled is
+// true it also copies every state field into the request's access-log record on the
+// way out. With logging disabled the copy loop is skipped entirely — it would
+// otherwise iterate the map and walk the context chain via logger.Set on every
+// request for a log line that is never emitted, so a disabled access log pays nothing.
+func Middleware(logEnabled bool) parapet.Middleware {
 	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			ctx := r.Context()
 			s := pool.Get().(State)
 			defer func() {
-				// inject state to log
-				for k, v := range s {
-					logger.Set(ctx, k, v) // TODO: implement log to reduce memory usage
+				if logEnabled {
+					for k, v := range s {
+						logger.Set(ctx, k, v)
+					}
 				}
 				putState(s)
 			}()
