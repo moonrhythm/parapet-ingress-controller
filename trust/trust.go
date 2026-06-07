@@ -390,17 +390,32 @@ func (m *Manager) VerifyClientCert(cs *tls.ConnectionState) bool {
 	})
 	ok := err == nil
 
+	// Cache only verified-OK results. An attacker can't mint a cert that chains to the
+	// edge CA, so a flood of distinct UNtrusted certs would otherwise fill the cache and
+	// evict the legit fleet's entries (cache-bust, forcing a re-verify of every real
+	// edge). Not caching false defeats that: an untrusted cert just re-verifies (a cheap
+	// fail) without touching the cache or the write lock. A stale-generation cached entry
+	// is still rejected by the read-path gen check above; the reset below drops stale
+	// entries on the first OK after a CA rotation.
+	if !ok {
+		return false
+	}
 	m.verifyMu.Lock()
 	if m.verifyGen != gen || m.verifyCache == nil {
 		m.verifyCache = make(map[string]bool, 64)
 		m.verifyGen = gen
 	}
 	if len(m.verifyCache) >= verifyCacheCap {
-		clear(m.verifyCache)
+		// Bounded: drop ONE arbitrary entry rather than wiping the whole cache, so a
+		// fleet larger than the cap can't cost every other edge a re-verify at once.
+		for k := range m.verifyCache {
+			delete(m.verifyCache, k)
+			break
+		}
 	}
-	m.verifyCache[key] = ok
+	m.verifyCache[key] = true
 	m.verifyMu.Unlock()
-	return ok
+	return true
 }
 
 // applyResult classifies an apply attempt so the caller can emit the right metric

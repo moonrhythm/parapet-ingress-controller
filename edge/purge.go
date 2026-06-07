@@ -520,8 +520,9 @@ func clonePrefixMap(m map[string][]prefixRec) map[string][]prefixRec {
 }
 
 // atomicWriteFile writes data to path via a same-dir temp file with
-// write+fsync+close+rename, so a reader never sees a partial state file (matches
-// the disk cache's commit idiom).
+// write+fsync+close+rename, then fsyncs the parent directory so the rename itself
+// is durable — without the dir fsync a crash right after rename can lose the new
+// file, leaving stale/absent state (matches the disk cache's commit idiom).
 func atomicWriteFile(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".purge-state-*.tmp")
@@ -547,7 +548,20 @@ func atomicWriteFile(path string, data []byte) error {
 		os.Remove(tmp)
 		return err
 	}
-	return nil
+	return fsyncDir(dir)
+}
+
+// fsyncDir flushes a directory entry so a rename into it survives a crash. A
+// failure to open/sync the dir is best-effort (some filesystems don't support it);
+// the rename already happened, so it is logged via the returned error but not fatal
+// to the in-memory state.
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 // --- keys ---
