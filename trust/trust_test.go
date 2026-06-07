@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -448,5 +449,104 @@ func TestNewClientRequiresCA(t *testing.T) {
 	}
 	if _, err := NewClient("https://cp:8443", []byte("not a cert")); err == nil {
 		t.Error("unparseable CA must be rejected")
+	}
+}
+
+func leafSignedBy(t *testing.T, sg *edgecp.Signer, id string) *x509.Certificate {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	chainPEM, _, _, err := sg.Sign(key.Public(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, _ := pem.Decode(chainPEM)
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf
+}
+
+func csForLeaf(leaf *x509.Certificate) *tls.ConnectionState {
+	return &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}
+}
+
+// TestVerifyClientCertUntrustedDoesNotBustCache is the M5 hardening: an attacker
+// can't mint a cert that chains to the edge CA, so a flood of distinct UNtrusted
+// certs must never enter the verify cache — otherwise they'd evict the legit
+// fleet's entries and force every real edge to re-verify (cache-bust).
+func TestVerifyClientCertUntrustedDoesNotBustCache(t *testing.T) {
+	caPEM, caKey := caPEMFor(t)
+	signer, _, err := edgecp.NewProvidedSigner(caPEM, caKey, time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherPEM, otherKey := caPEMFor(t)
+	otherSigner, _, _ := edgecp.NewProvidedSigner(otherPEM, otherKey, time.Hour, time.Minute)
+
+	m := NewManager()
+	if _, err := m.apply(Bundle{Generation: 1, CAPEM: caPEM, CAID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	edge := leafSignedBy(t, signer, "edge-1")
+	if !m.VerifyClientCert(csForLeaf(edge)) {
+		t.Fatal("edge leaf must verify")
+	}
+	m.verifyMu.RLock()
+	n0 := len(m.verifyCache)
+	m.verifyMu.RUnlock()
+	if n0 != 1 {
+		t.Fatalf("trusted cert should be cached; cache len = %d", n0)
+	}
+
+	for i := 0; i < 200; i++ {
+		if m.VerifyClientCert(csForLeaf(leafSignedBy(t, otherSigner, "intruder-"+strconv.Itoa(i)))) {
+			t.Fatal("a cert not chaining to the edge CA must not be trusted")
+		}
+	}
+	m.verifyMu.RLock()
+	n1 := len(m.verifyCache)
+	m.verifyMu.RUnlock()
+	if n1 != 1 {
+		t.Fatalf("untrusted certs must never be cached; cache grew to %d (cache-bust)", n1)
+	}
+
+	if !m.VerifyClientCert(csForLeaf(edge)) {
+		t.Fatal("the trusted cert must still verify (served from cache)")
+	}
+}
+
+// TestVerifyClientCertEvictsOneAtCap: at the cap a new trusted cert drops ONE entry
+// rather than wiping the whole cache (so a fleet > cap doesn't force a fleet-wide
+// re-verify at once).
+func TestVerifyClientCertEvictsOneAtCap(t *testing.T) {
+	caPEM, caKey := caPEMFor(t)
+	signer, _, err := edgecp.NewProvidedSigner(caPEM, caKey, time.Hour, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager()
+	if _, err := m.apply(Bundle{Generation: 1, CAPEM: caPEM, CAID: "a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-fill to the cap for the live generation.
+	m.verifyMu.Lock()
+	m.verifyGen = m.gen.Load()
+	m.verifyCache = make(map[string]bool, verifyCacheCap)
+	for i := 0; i < verifyCacheCap; i++ {
+		m.verifyCache["k"+strconv.Itoa(i)] = true
+	}
+	m.verifyMu.Unlock()
+
+	if !m.VerifyClientCert(csForLeaf(leafSignedBy(t, signer, "edge-cap"))) {
+		t.Fatal("trusted cert must verify")
+	}
+	m.verifyMu.RLock()
+	n := len(m.verifyCache)
+	m.verifyMu.RUnlock()
+	if n != verifyCacheCap {
+		t.Fatalf("at cap, expected one eviction + one insert to keep len == %d, got %d", verifyCacheCap, n)
 	}
 }
