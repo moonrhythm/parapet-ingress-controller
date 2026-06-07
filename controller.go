@@ -855,10 +855,21 @@ func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, co
 	if ctrl.proxy.AutoH2CEnabled() {
 		upstreamKey = svc.Namespace + "/" + svc.Name + ":" + strconv.Itoa(config.PortNumber)
 	}
+	// Immutable per-Service attribution for backend connection metrics. These are
+	// constant for this route, so build them once. They mirror the
+	// serviceType/serviceName/namespace state fields (still stamped below for the
+	// access log and per-request metrics, both read in the request goroutine) but
+	// are carried to the dialer in a context value that is never cleared or pooled.
+	// The dialer can run on a background goroutine that outlives the request, after
+	// the state map has been recycled, so it must not read the map — see
+	// proxy.WithBackendAttr.
+	serviceType := string(svc.Spec.Type)
+	serviceName := svc.Name
+	namespace := svc.Namespace
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := state.Get(r.Context())
-		s["serviceType"] = string(svc.Spec.Type)
-		s["serviceName"] = svc.Name
+		s["serviceType"] = serviceType
+		s["serviceName"] = serviceName
 		if upstreamKey != "" { // auto-h2c negative-cache key (proxy reads it)
 			s["upstreamKey"] = upstreamKey
 		}
@@ -876,6 +887,8 @@ func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, co
 		r.URL.Host = target
 
 		s["serviceTarget"] = target
+
+		r = r.WithContext(proxy.WithBackendAttr(r.Context(), serviceType, namespace, serviceName))
 
 		ctrl.proxy.ServeHTTP(w, r)
 	})
