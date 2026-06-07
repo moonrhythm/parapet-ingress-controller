@@ -160,31 +160,93 @@ func (ctrl *Controller) Watch() {
 	}
 }
 
+// preloadResources lists every watched resource into the store before the first
+// reload. Each list is RETRIED until it succeeds (or ctx is cancelled): the very
+// next step (firstReload) flips the controller to Ready, so listing an empty store
+// because the API server was momentarily unreachable would make the pod report
+// healthy while serving 404 for every route. A legitimately empty namespace lists
+// successfully (no error) and proceeds immediately.
 func (ctrl *Controller) preloadResources(ctx context.Context) {
-	ingresses, _ := k8s.GetIngresses(ctx, ctrl.watchNamespace)
-	for _, i := range ingresses {
-		ctrl.watchedIngresses.Store(i.Namespace+"/"+i.Name, &i)
-	}
-
-	services, _ := k8s.GetServices(ctx, ctrl.watchNamespace)
-	for _, s := range services {
-		ctrl.watchedServices.Store(s.Namespace+"/"+s.Name, &s)
-	}
-
-	secrets, _ := k8s.GetSecrets(ctx, ctrl.watchNamespace)
-	for _, s := range secrets {
-		ctrl.watchedSecrets.Store(s.Namespace+"/"+s.Name, &s)
-	}
-
-	endpoints, _ := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
-	for _, e := range endpoints {
-		ctrl.watchedEndpoints.Store(e.Namespace+"/"+e.Name, &e)
-	}
+	preloadList(ctx, "ingresses", func() error {
+		ingresses, err := k8s.GetIngresses(ctx, ctrl.watchNamespace)
+		if err != nil {
+			return err
+		}
+		for i := range ingresses {
+			ctrl.watchedIngresses.Store(ingresses[i].Namespace+"/"+ingresses[i].Name, &ingresses[i])
+		}
+		return nil
+	})
+	preloadList(ctx, "services", func() error {
+		services, err := k8s.GetServices(ctx, ctrl.watchNamespace)
+		if err != nil {
+			return err
+		}
+		for i := range services {
+			ctrl.watchedServices.Store(services[i].Namespace+"/"+services[i].Name, &services[i])
+		}
+		return nil
+	})
+	preloadList(ctx, "secrets", func() error {
+		secrets, err := k8s.GetSecrets(ctx, ctrl.watchNamespace)
+		if err != nil {
+			return err
+		}
+		for i := range secrets {
+			ctrl.watchedSecrets.Store(secrets[i].Namespace+"/"+secrets[i].Name, &secrets[i])
+		}
+		return nil
+	})
+	preloadList(ctx, "endpoints", func() error {
+		endpoints, err := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
+		if err != nil {
+			return err
+		}
+		for i := range endpoints {
+			ctrl.watchedEndpoints.Store(endpoints[i].Namespace+"/"+endpoints[i].Name, &endpoints[i])
+		}
+		return nil
+	})
 
 	if ctrl.WAFConfig.Enabled {
-		configmaps, _ := k8s.GetConfigMaps(ctx, ctrl.watchNamespace, wafLabelKey)
-		for _, cm := range configmaps {
-			ctrl.watchedConfigMaps.Store(cm.Namespace+"/"+cm.Name, &cm)
+		preloadList(ctx, "configmaps", func() error {
+			configmaps, err := k8s.GetConfigMaps(ctx, ctrl.watchNamespace, wafLabelKey)
+			if err != nil {
+				return err
+			}
+			for i := range configmaps {
+				ctrl.watchedConfigMaps.Store(configmaps[i].Namespace+"/"+configmaps[i].Name, &configmaps[i])
+			}
+			return nil
+		})
+	}
+}
+
+// preloadList runs fn, retrying with capped exponential backoff on error until it
+// succeeds or ctx is cancelled. The controller stays NotReady (firstReload hasn't
+// run) for the duration, so a transient API-server outage at startup never lets it
+// serve traffic with an empty route table.
+func preloadList(ctx context.Context, name string, fn func() error) {
+	const (
+		baseBackoff = 500 * time.Millisecond
+		maxBackoff  = 10 * time.Second
+	)
+	backoff := baseBackoff
+	for {
+		if err := fn(); err == nil {
+			return
+		} else {
+			slog.Error("controller: preload failed; retrying (staying NotReady)", "resource", name, "error", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		if backoff < maxBackoff {
+			if backoff *= 2; backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 		}
 	}
 }

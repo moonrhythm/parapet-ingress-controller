@@ -1,13 +1,17 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/moonrhythm/parapet"
 	"github.com/stretchr/testify/assert"
@@ -542,4 +546,41 @@ func TestServeHandlerConcurrentWithReload(t *testing.T) {
 
 	wg.Wait()
 	assert.True(t, ctrl.IsKnownHost("example.com"), "served host stays known after the reload storm")
+}
+
+func TestPreloadListRetriesUntilSuccess(t *testing.T) {
+	// A transient API error must not let preload give up (which would flip the
+	// controller Ready with an empty route table); it retries until the list succeeds.
+	var calls int32
+	preloadList(context.Background(), "test", func() error {
+		if atomic.AddInt32(&calls, 1) < 2 {
+			return errors.New("api server down")
+		}
+		return nil
+	})
+	assert.EqualValues(t, 2, atomic.LoadInt32(&calls), "retried the failed list, then succeeded")
+}
+
+func TestPreloadListStopsOnContextCancel(t *testing.T) {
+	// A cancelled context must break the retry loop promptly (shutdown), even while
+	// the list keeps failing.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var calls int32
+	done := make(chan struct{})
+	go func() {
+		preloadList(ctx, "test", func() error {
+			atomic.AddInt32(&calls, 1)
+			return errors.New("always fails")
+		})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("preloadList did not return on a cancelled context")
+	}
+	assert.EqualValues(t, 1, atomic.LoadInt32(&calls), "one attempt, then the cancelled ctx breaks the loop")
 }

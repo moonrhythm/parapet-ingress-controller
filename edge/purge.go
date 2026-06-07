@@ -97,6 +97,14 @@ type PurgeTable struct {
 	path     string       // persistence file; "" disables persistence (e.g. memory backend)
 	maxRecs  int          // per-map record cap before a conservative fold-to-global
 	nowNanos func() int64 // injectable clock (unix nanos); nil => time.Now
+
+	// dirtyVer is bumped (under mu) for each persisted snapshot. persistMu serializes
+	// the actual file write OFF the mu critical section — so the fsync never blocks a
+	// serving-path InvalidatedAfter RLock — while persistedVer (under persistMu)
+	// drops a stale snapshot whose newer successor already landed.
+	dirtyVer     uint64
+	persistMu    sync.Mutex
+	persistedVer uint64
 }
 
 // prefixRec is one path-prefix purge for a host: the normalized prefix (trailing
@@ -205,7 +213,6 @@ func (t *PurgeTable) epochFor(host, uri string, tags []string) int64 {
 // from the durable cursor and re-applies idempotently.
 func (t *PurgeTable) Apply(entries []PurgeEntry, maxSeq uint64) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	base := t.cursor
 	changed := false
 	for _, e := range entries {
@@ -220,12 +227,14 @@ func (t *PurgeTable) Apply(entries []PurgeEntry, maxSeq uint64) error {
 		changed = true
 	}
 	// Persist only on a real change, so an idle poll (no new entries, cursor
-	// unchanged) doesn't fsync — and the fsync-under-lock cost is paid only when an
-	// actual purge advances the state, not on every poll tick.
+	// unchanged) doesn't fsync.
 	if !changed {
+		t.mu.Unlock()
 		return nil
 	}
-	return t.saveLocked()
+	snap, ver := t.snapshotLocked()
+	t.mu.Unlock()
+	return t.persist(snap, ver)
 }
 
 // FlushAll bumps the global epoch (lazy flush-all), clears the host/url maps (now
@@ -238,14 +247,15 @@ func (t *PurgeTable) Apply(entries []PurgeEntry, maxSeq uint64) error {
 // leave the cursor stuck above the CP's journal and re-flush on every poll forever.
 func (t *PurgeTable) FlushAll(maxSeq uint64) error {
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	t.global = t.stamp()
 	t.host = map[string]int64{}
 	t.url = map[string]int64{}
 	t.prefix = map[string][]prefixRec{}
 	t.tag = map[string]int64{}
 	t.cursor = maxSeq
-	return t.saveLocked()
+	snap, ver := t.snapshotLocked()
+	t.mu.Unlock()
+	return t.persist(snap, ver)
 }
 
 // applyLocked applies one entry's effect. Caller holds t.mu.
@@ -450,24 +460,63 @@ func (t *PurgeTable) load() error {
 	return nil
 }
 
-// saveLocked atomically persists the current state. Caller holds t.mu. A "" path
-// is a no-op (persistence disabled).
-func (t *PurgeTable) saveLocked() error {
+// snapshotLocked captures an immutable, deep copy of the persistable state and a
+// monotonic version, so the caller can fsync it OUTSIDE t.mu (see persist) without
+// the live maps being mutated underneath the marshal. Caller holds t.mu. The copy
+// is O(records) — cheap (records are operator-issued, not per-request) and far less
+// than holding the lock across an fsync.
+func (t *PurgeTable) snapshotLocked() (persistState, uint64) {
+	t.dirtyVer++
+	return persistState{
+		Global: t.global,
+		Host:   cloneInt64Map(t.host),
+		URL:    cloneInt64Map(t.url),
+		Prefix: clonePrefixMap(t.prefix),
+		Tag:    cloneInt64Map(t.tag),
+		Cursor: t.cursor,
+	}, t.dirtyVer
+}
+
+// persist atomically writes a snapshot to disk WITHOUT holding t.mu (so the fsync
+// never blocks a serving-path InvalidatedAfter RLock). persistMu serializes writes
+// and persistedVer drops a stale snapshot whose newer successor already landed, so
+// an older Apply can never overwrite a newer one's state on disk. A "" path is a
+// no-op (in-memory backend). A write error is returned for logging; the in-memory
+// table is authoritative and the next change re-persists.
+func (t *PurgeTable) persist(snap persistState, ver uint64) error {
 	if t.path == "" {
 		return nil
 	}
-	data, err := json.Marshal(persistState{
-		Global: t.global,
-		Host:   t.host,
-		URL:    t.url,
-		Prefix: t.prefix,
-		Tag:    t.tag,
-		Cursor: t.cursor,
-	})
+	t.persistMu.Lock()
+	defer t.persistMu.Unlock()
+	if ver <= t.persistedVer {
+		return nil // a newer snapshot already won the race to disk
+	}
+	data, err := json.Marshal(snap)
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(t.path, data)
+	if err := atomicWriteFile(t.path, data); err != nil {
+		return err
+	}
+	t.persistedVer = ver
+	return nil
+}
+
+func cloneInt64Map(m map[string]int64) map[string]int64 {
+	out := make(map[string]int64, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func clonePrefixMap(m map[string][]prefixRec) map[string][]prefixRec {
+	out := make(map[string][]prefixRec, len(m))
+	for k, v := range m {
+		out[k] = append([]prefixRec(nil), v...) // prefixRec is a value type — copied by value
+	}
+	return out
 }
 
 // atomicWriteFile writes data to path via a same-dir temp file with
