@@ -27,17 +27,25 @@ const (
 	ScopeHost Scope = "host"
 	// ScopeURL invalidates one URL (all methods, schemes, and Vary variants).
 	ScopeURL Scope = "url"
+	// ScopePrefix invalidates every URL under a path prefix on a host (path-only,
+	// boundary-aware; query strings ignored). The prefix travels in the URI field.
+	ScopePrefix Scope = "prefix"
+	// ScopeTag invalidates every cached response carrying a surrogate key (from the
+	// origin's Cache-Tag header), across all hosts. The tag travels in the Tag field.
+	ScopeTag Scope = "tag"
 )
 
 // PurgeEntry is one journal record as distributed by the control plane and applied
 // by the edge. Seq is the monotonic journal sequence (idempotency cursor); Host is
-// required for host/url scopes; URI (path+query) is required for url scope. It is
-// also the JSON wire shape returned by GET /v1/purges.
+// required for host/url/prefix scopes; URI carries the exact path+query for url
+// scope and the path prefix for prefix scope; Tag carries the surrogate key for tag
+// scope (host-independent). It is also the JSON wire shape returned by GET /v1/purges.
 type PurgeEntry struct {
 	Seq   uint64 `json:"seq"`
 	Scope Scope  `json:"scope"`
 	Host  string `json:"host,omitempty"`
 	URI   string `json:"uri,omitempty"`
+	Tag   string `json:"tag,omitempty"`
 }
 
 // PurgeTable is the edge's cache-invalidation state: a small, in-memory table of
@@ -50,23 +58,32 @@ type PurgeEntry struct {
 // passed FreshUntil. Correctness is immediate (a purged entry can never be
 // served); the storage backend's LRU byte cap reclaims disk regardless.
 //
-// Three scopes, checked as a max at lookup so a URL is also covered by its host's
-// purge and by a global flush:
+// Scopes, checked as a max at lookup so a URL is also covered by its host's purge,
+// a matching path prefix, and a global flush:
 //   - global  — flush-all (one epoch)
 //   - host    — every URL under a host (keyed by normalized host)
 //   - url     — one URL across all methods, schemes, and Vary variants (keyed by
 //     hash(host ⊕ uri), so a single purge of /a covers GET+HEAD, http+https, and
 //     every cached variant)
+//   - prefix  — every URL under a path prefix on a host (path-only, boundary-aware:
+//     /blog matches /blog and /blog/x but not /blogger; query strings ignored).
+//     A linear scan of the host's prefix records, so it is O(prefixes-for-host) at
+//     lookup rather than O(1); the record count is bounded by the cap-fold.
+//   - tag     — every cached response carrying a surrogate key (the origin's
+//     Cache-Tag header, stored in Meta.Tags); host-independent, matched against the
+//     entry's own tags at lookup (O(tags-on-entry), a small bounded set).
 //
-// The table persists {global, host, url, cursor} to a single file with an atomic
-// temp+fsync+rename, so maps and cursor can never desync. It is safe for
+// The table persists {global, host, url, prefix, cursor} to a single file with an
+// atomic temp+fsync+rename, so maps and cursor can never desync. It is safe for
 // concurrent use.
 type PurgeTable struct {
 	mu     sync.RWMutex
-	global int64            // flush-all epoch (unix nanos); 0 = never flushed
-	host   map[string]int64 // normalized host    -> epoch
-	url    map[string]int64 // hash(host ⊕ uri)   -> epoch
-	cursor uint64           // last journal seq applied (idempotency)
+	global int64                  // flush-all epoch (unix nanos); 0 = never flushed
+	host   map[string]int64       // normalized host    -> epoch
+	url    map[string]int64       // hash(host ⊕ uri)   -> epoch
+	prefix map[string][]prefixRec // normalized host    -> path-prefix records
+	tag    map[string]int64       // surrogate key      -> epoch (host-independent)
+	cursor uint64                 // last journal seq applied (idempotency)
 
 	// highWater is the largest epoch ever stamped. Every new stamp is clamped to be
 	// >= highWater so a wall-clock step back (NTP correction) can never lower an
@@ -80,6 +97,14 @@ type PurgeTable struct {
 	path     string       // persistence file; "" disables persistence (e.g. memory backend)
 	maxRecs  int          // per-map record cap before a conservative fold-to-global
 	nowNanos func() int64 // injectable clock (unix nanos); nil => time.Now
+}
+
+// prefixRec is one path-prefix purge for a host: the normalized prefix (trailing
+// slash trimmed; "" means the whole host, i.e. a "/" purge) and its epoch. Exported
+// fields so it round-trips through the persisted JSON.
+type prefixRec struct {
+	Prefix string `json:"prefix"`
+	Epoch  int64  `json:"epoch"`
 }
 
 // defaultMaxPurgeRecords bounds each of the host/url maps. Purge records are
@@ -102,6 +127,8 @@ func NewPurgeTable(path string, maxRecords int) (*PurgeTable, error) {
 	t := &PurgeTable{
 		host:    map[string]int64{},
 		url:     map[string]int64{},
+		prefix:  map[string][]prefixRec{},
+		tag:     map[string]int64{},
 		path:    path,
 		maxRecs: maxRecords,
 	}
@@ -118,12 +145,13 @@ func (t *PurgeTable) now() int64 {
 }
 
 // InvalidatedAfter is the parapet/pkg/cache Options.InvalidatedAfter hook. It
-// returns the invalidation epoch (unix nanos) applying to r: the max of the
-// global, per-host, and per-url epochs. The cache treats a hit whose Meta.Created
-// is <= this value as stale. Host normalization mirrors cache.primaryHash
-// (lowercase + strip port) so the keys line up exactly. The stored Meta is unused.
-func (t *PurgeTable) InvalidatedAfter(r *http.Request, _ cache.Meta) int64 {
-	return t.epochFor(normHost(r.Host), r.URL.RequestURI())
+// returns the invalidation epoch (unix nanos) applying to r: the max of the global,
+// per-host, per-url, per-prefix, and per-tag epochs. The cache treats a hit whose
+// Meta.Created is <= this value as stale. Host normalization mirrors
+// cache.primaryHash (lowercase + strip port) so the keys line up exactly. The
+// stored entry's surrogate keys (m.Tags) are folded in for tag-scoped purges.
+func (t *PurgeTable) InvalidatedAfter(r *http.Request, m cache.Meta) int64 {
+	return t.epochFor(normHost(r.Host), r.URL.RequestURI(), m.Tags)
 }
 
 // InvalidatedAfterMeta is the reaper's variant of InvalidatedAfter: it reads the
@@ -132,14 +160,16 @@ func (t *PurgeTable) InvalidatedAfter(r *http.Request, _ cache.Meta) int64 {
 // idempotent on Meta.Host (the cache stamps it normalized); an old entry with an
 // empty Host matches only the global scope.
 func (t *PurgeTable) InvalidatedAfterMeta(m cache.Meta) int64 {
-	return t.epochFor(normHost(m.Host), m.URI)
+	return t.epochFor(normHost(m.Host), m.URI, m.Tags)
 }
 
-// epochFor returns the invalidation epoch (unix nanos) applying to a normalized
-// host + uri: the max of the global, per-host, and per-url epochs. Shared by the
-// lookup hook and the reaper.
-func (t *PurgeTable) epochFor(host, uri string) int64 {
+// epochFor returns the invalidation epoch (unix nanos) applying to an entry: the
+// max of the global, per-host, per-url, per-prefix, and per-tag epochs. host+uri
+// come from the request or the stored Meta; tags come from the stored Meta (the
+// origin's surrogate keys). Shared by the lookup hook and the reaper.
+func (t *PurgeTable) epochFor(host, uri string, tags []string) int64 {
 	uk := urlKey(host, uri)
+	path := pathOf(uri)
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	e := t.global
@@ -148,6 +178,19 @@ func (t *PurgeTable) epochFor(host, uri string) int64 {
 	}
 	if v := t.url[uk]; v > e {
 		e = v
+	}
+	// Prefix scope: linear scan of this host's prefix records (epoch check first so
+	// the string match is skipped once a higher epoch is already found).
+	for _, p := range t.prefix[host] {
+		if p.Epoch > e && matchPrefix(path, p.Prefix) {
+			e = p.Epoch
+		}
+	}
+	// Tag scope: each surrogate key the entry carries (host-independent).
+	for _, tg := range tags {
+		if v := t.tag[tg]; v > e {
+			e = v
+		}
 	}
 	return e
 }
@@ -199,6 +242,8 @@ func (t *PurgeTable) FlushAll(maxSeq uint64) error {
 	t.global = t.stamp()
 	t.host = map[string]int64{}
 	t.url = map[string]int64{}
+	t.prefix = map[string][]prefixRec{}
+	t.tag = map[string]int64{}
 	t.cursor = maxSeq
 	return t.saveLocked()
 }
@@ -208,10 +253,11 @@ func (t *PurgeTable) applyLocked(e PurgeEntry) {
 	switch e.Scope {
 	case ScopeFlushAll:
 		t.global = t.stamp()
-		// global at >= every existing host/url epoch makes them redundant; drop to
-		// reclaim memory.
+		// global at >= every existing record makes them redundant; drop to reclaim memory.
 		t.host = map[string]int64{}
 		t.url = map[string]int64{}
+		t.prefix = map[string][]prefixRec{}
+		t.tag = map[string]int64{}
 	case ScopeHost:
 		if h := normHost(e.Host); h != "" {
 			t.host[h] = t.stamp()
@@ -222,7 +268,33 @@ func (t *PurgeTable) applyLocked(e PurgeEntry) {
 			t.url[urlKey(h, e.URI)] = t.stamp()
 			t.enforceCapLocked()
 		}
+	case ScopePrefix:
+		if h := normHost(e.Host); h != "" {
+			t.applyPrefixLocked(h, normalizePrefix(e.URI), t.stamp())
+			t.enforceCapLocked()
+		}
+	case ScopeTag:
+		if e.Tag != "" {
+			t.tag[e.Tag] = t.stamp()
+			t.enforceCapLocked()
+		}
 	}
+}
+
+// applyPrefixLocked stamps (or refreshes) a host's path-prefix record. A repeat of
+// the same prefix updates its epoch in place (monotonic, so always upward); a new
+// prefix is appended. Caller holds t.mu.
+func (t *PurgeTable) applyPrefixLocked(host, prefix string, epoch int64) {
+	recs := t.prefix[host]
+	for i := range recs {
+		if recs[i].Prefix == prefix {
+			if epoch > recs[i].Epoch {
+				recs[i].Epoch = epoch
+			}
+			return
+		}
+	}
+	t.prefix[host] = append(recs, prefixRec{Prefix: prefix, Epoch: epoch})
 }
 
 // stamp returns a fresh epoch, clamped to be monotonic non-decreasing (>=
@@ -251,10 +323,27 @@ func (t *PurgeTable) enforceCapLocked() {
 		t.host = map[string]int64{}
 		folded = true
 	}
+	if t.prefixCount() > t.maxRecs {
+		t.prefix = map[string][]prefixRec{}
+		folded = true
+	}
+	if len(t.tag) > t.maxRecs {
+		t.tag = map[string]int64{}
+		folded = true
+	}
 	if folded {
 		t.global = t.highWater // highWater >= every epoch stamped, so it covers the dropped records
 		t.folds++
 	}
+}
+
+// prefixCount totals the prefix records across hosts. Caller holds t.mu.
+func (t *PurgeTable) prefixCount() int {
+	n := 0
+	for _, recs := range t.prefix {
+		n += len(recs)
+	}
+	return n
 }
 
 // Cursor returns the last journal seq applied (for building the poll request).
@@ -266,11 +355,13 @@ func (t *PurgeTable) Cursor() uint64 {
 
 // PurgeStats is a snapshot of the table for metrics/diagnostics.
 type PurgeStats struct {
-	Cursor   uint64
-	Global   int64
-	HostRecs int
-	URLRecs  int
-	Folds    uint64
+	Cursor     uint64
+	Global     int64
+	HostRecs   int
+	URLRecs    int
+	PrefixRecs int
+	TagRecs    int
+	Folds      uint64
 }
 
 // Stats returns a concurrent-safe snapshot.
@@ -278,11 +369,13 @@ func (t *PurgeTable) Stats() PurgeStats {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return PurgeStats{
-		Cursor:   t.cursor,
-		Global:   t.global,
-		HostRecs: len(t.host),
-		URLRecs:  len(t.url),
-		Folds:    t.folds,
+		Cursor:     t.cursor,
+		Global:     t.global,
+		HostRecs:   len(t.host),
+		URLRecs:    len(t.url),
+		PrefixRecs: t.prefixCount(),
+		TagRecs:    len(t.tag),
+		Folds:      t.folds,
 	}
 }
 
@@ -291,10 +384,12 @@ func (t *PurgeTable) Stats() PurgeStats {
 // persistState is the on-disk shape. Maps + cursor share one atomic write so they
 // can never desync.
 type persistState struct {
-	Global int64            `json:"global"`
-	Host   map[string]int64 `json:"host"`
-	URL    map[string]int64 `json:"url"`
-	Cursor uint64           `json:"cursor"`
+	Global int64                  `json:"global"`
+	Host   map[string]int64       `json:"host"`
+	URL    map[string]int64       `json:"url"`
+	Prefix map[string][]prefixRec `json:"prefix,omitempty"`
+	Tag    map[string]int64       `json:"tag,omitempty"`
+	Cursor uint64                 `json:"cursor"`
 }
 
 // load reads persisted state into the table. A missing file is a clean start. Any
@@ -321,6 +416,12 @@ func (t *PurgeTable) load() error {
 	if st.URL != nil {
 		t.url = st.URL
 	}
+	if st.Prefix != nil {
+		t.prefix = st.Prefix
+	}
+	if st.Tag != nil {
+		t.tag = st.Tag
+	}
 	t.global = st.Global
 	t.cursor = st.Cursor
 	t.highWater = st.Global
@@ -330,6 +431,18 @@ func (t *PurgeTable) load() error {
 		}
 	}
 	for _, v := range t.url {
+		if v > t.highWater {
+			t.highWater = v
+		}
+	}
+	for _, recs := range t.prefix {
+		for _, p := range recs {
+			if p.Epoch > t.highWater {
+				t.highWater = p.Epoch
+			}
+		}
+	}
+	for _, v := range t.tag {
 		if v > t.highWater {
 			t.highWater = v
 		}
@@ -347,6 +460,8 @@ func (t *PurgeTable) saveLocked() error {
 		Global: t.global,
 		Host:   t.host,
 		URL:    t.url,
+		Prefix: t.prefix,
+		Tag:    t.tag,
 		Cursor: t.cursor,
 	})
 	if err != nil {
@@ -405,4 +520,31 @@ func normHost(host string) string {
 func urlKey(host, uri string) string {
 	sum := sha256.Sum256([]byte(host + "\n" + uri))
 	return hex.EncodeToString(sum[:16])
+}
+
+// pathOf returns the path portion of a request-uri (everything before the first
+// '?'). Prefix purges match on the path only, so a query string never affects
+// whether an entry is covered.
+func pathOf(uri string) string {
+	if i := strings.IndexByte(uri, '?'); i >= 0 {
+		return uri[:i]
+	}
+	return uri
+}
+
+// normalizePrefix trims a single trailing slash so "/blog" and "/blog/" purge the
+// same section; "/" normalizes to "" (the whole-host prefix). The normalized form
+// is what matchPrefix compares against.
+func normalizePrefix(p string) string {
+	return strings.TrimRight(p, "/")
+}
+
+// matchPrefix reports whether path is covered by the normalized prefix pre, on a
+// path boundary: pre "/blog" matches "/blog" and "/blog/x" but NOT "/blogger". An
+// empty pre (from a "/" purge) matches every path.
+func matchPrefix(path, pre string) bool {
+	if pre == "" {
+		return true
+	}
+	return path == pre || strings.HasPrefix(path, pre+"/")
 }

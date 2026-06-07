@@ -12,11 +12,11 @@ func allowNone(string) bool { return false }
 
 func TestPurgeStore_AddAndSinceFromZero(t *testing.T) {
 	s := NewPurgeStore(0)
-	seq1, ok := s.Add(purgeScopeURL, "acme.com", "/a")
+	seq1, ok := s.Add(purgeScopeURL, "acme.com", "/a", "")
 	require.True(t, ok)
-	seq2, ok := s.Add(purgeScopeHost, "acme.com", "")
+	seq2, ok := s.Add(purgeScopeHost, "acme.com", "", "")
 	require.True(t, ok)
-	seq3, ok := s.Add(purgeScopeFlushAll, "", "")
+	seq3, ok := s.Add(purgeScopeFlushAll, "", "", "")
 	require.True(t, ok)
 	assert.EqualValues(t, 1, seq1)
 	assert.EqualValues(t, 2, seq2)
@@ -32,9 +32,9 @@ func TestPurgeStore_AddAndSinceFromZero(t *testing.T) {
 
 func TestPurgeStore_SinceIncremental(t *testing.T) {
 	s := NewPurgeStore(0)
-	_, _ = s.Add(purgeScopeURL, "a.com", "/1")
-	_, _ = s.Add(purgeScopeURL, "a.com", "/2")
-	_, _ = s.Add(purgeScopeURL, "a.com", "/3")
+	_, _ = s.Add(purgeScopeURL, "a.com", "/1", "")
+	_, _ = s.Add(purgeScopeURL, "a.com", "/2", "")
+	_, _ = s.Add(purgeScopeURL, "a.com", "/3", "")
 
 	res := s.Since(2, allowAll)
 	require.Len(t, res.Entries, 1, "only entries with seq > cursor")
@@ -52,9 +52,9 @@ func TestPurgeStore_EmptyJournalNoGap(t *testing.T) {
 
 func TestPurgeStore_ScopingByHost(t *testing.T) {
 	s := NewPurgeStore(0)
-	_, _ = s.Add(purgeScopeHost, "a.com", "")
-	_, _ = s.Add(purgeScopeHost, "b.com", "")
-	_, _ = s.Add(purgeScopeFlushAll, "", "")
+	_, _ = s.Add(purgeScopeHost, "a.com", "", "")
+	_, _ = s.Add(purgeScopeHost, "b.com", "", "")
+	_, _ = s.Add(purgeScopeFlushAll, "", "", "")
 
 	// An edge allowed only a.com sees its host entry + the flush-all, not b.com.
 	allowA := func(h string) bool { return h == "a.com" }
@@ -71,8 +71,8 @@ func TestPurgeStore_ScopingByHost(t *testing.T) {
 
 func TestPurgeStore_FlushAllAlwaysDeliveredEvenToDenyAll(t *testing.T) {
 	s := NewPurgeStore(0)
-	_, _ = s.Add(purgeScopeHost, "a.com", "")
-	_, _ = s.Add(purgeScopeFlushAll, "", "")
+	_, _ = s.Add(purgeScopeHost, "a.com", "", "")
+	_, _ = s.Add(purgeScopeFlushAll, "", "", "")
 	res := s.Since(0, allowNone)
 	require.Len(t, res.Entries, 1)
 	assert.Equal(t, purgeScopeFlushAll, res.Entries[0].Scope)
@@ -81,7 +81,7 @@ func TestPurgeStore_FlushAllAlwaysDeliveredEvenToDenyAll(t *testing.T) {
 func TestPurgeStore_GapTriggersFlushRequired(t *testing.T) {
 	s := NewPurgeStore(2) // retain only the 2 newest
 	for i := 0; i < 5; i++ {
-		_, ok := s.Add(purgeScopeURL, "a.com", "/x")
+		_, ok := s.Add(purgeScopeURL, "a.com", "/x", "")
 		require.True(t, ok)
 	}
 	// Retained seqs are {4,5}; minSeq=4. An edge at cursor 1 needs seq 2 (trimmed) → gap.
@@ -109,7 +109,7 @@ func TestPurgeStore_CursorAheadOfJournalFlushes(t *testing.T) {
 
 	// After the restart the CP issues a few purges; the edge cursor is still ahead.
 	for i := 0; i < 3; i++ {
-		_, _ = s.Add(purgeScopeURL, "a.com", "/x")
+		_, _ = s.Add(purgeScopeURL, "a.com", "/x", "")
 	}
 	res = s.Since(500, allowAll)
 	assert.True(t, res.FlushRequired, "cursor still ahead of lastSeq=3 must flush")
@@ -124,21 +124,76 @@ func TestPurgeStore_CursorAheadOfJournalFlushes(t *testing.T) {
 
 func TestPurgeStore_MaxUint64SinceFlushesNotPanics(t *testing.T) {
 	s := NewPurgeStore(0)
-	_, _ = s.Add(purgeScopeURL, "a.com", "/x")
+	_, _ = s.Add(purgeScopeURL, "a.com", "/x", "")
 	res := s.Since(^uint64(0), allowAll) // would overflow since+1; cursor-ahead catches it first
 	assert.True(t, res.FlushRequired)
+}
+
+func TestPurgeStore_PrefixTrimsWhitespaceAndStores(t *testing.T) {
+	s := NewPurgeStore(0)
+	// Surrounding whitespace is trimmed; a rooted path is accepted and stored clean
+	// (else the edge's normalizePrefix, which only trims a trailing slash, would keep
+	// the spaces and the prefix would silently match nothing).
+	_, ok := s.Add(purgeScopePrefix, "a.com", "  /blog  ", "")
+	require.True(t, ok)
+	res := s.Since(0, allowAll)
+	require.Len(t, res.Entries, 1)
+	assert.Equal(t, "/blog", res.Entries[0].URI, "prefix trimmed to a clean rooted path")
+}
+
+func TestPurgeStore_PrefixScopedByHost(t *testing.T) {
+	s := NewPurgeStore(0)
+	_, ok := s.Add(purgeScopePrefix, "a.com", "/blog", "")
+	require.True(t, ok)
+	_, ok = s.Add(purgeScopePrefix, "other.com", "/x", "")
+	require.True(t, ok)
+
+	// An edge allowed only a.com gets a.com's prefix purge, never other.com's.
+	res := s.Since(0, func(h string) bool { return h == "a.com" })
+	require.Len(t, res.Entries, 1)
+	assert.Equal(t, purgeScopePrefix, res.Entries[0].Scope)
+	assert.Equal(t, "a.com", res.Entries[0].Host)
+	assert.Equal(t, "/blog", res.Entries[0].URI)
+}
+
+func TestPurgeStore_TagDeliveredToAllEdges(t *testing.T) {
+	s := NewPurgeStore(0)
+	_, ok := s.Add(purgeScopeTag, "", "", "product-42")
+	require.True(t, ok)
+	// A tag purge is host-independent — it reaches even a deny-all edge (which then
+	// matches it against each entry's own Cache-Tag set).
+	res := s.Since(0, allowNone)
+	require.Len(t, res.Entries, 1)
+	assert.Equal(t, purgeScopeTag, res.Entries[0].Scope)
+	assert.Equal(t, "product-42", res.Entries[0].Tag)
+	assert.Empty(t, res.Entries[0].Host, "tag entry carries no host")
+}
+
+func TestPurgeStore_TagRequiresTag(t *testing.T) {
+	s := NewPurgeStore(0)
+	_, ok := s.Add(purgeScopeTag, "", "", "")
+	assert.False(t, ok, "tag scope needs a tag")
+	_, ok = s.Add(purgeScopeTag, "", "", "  ")
+	assert.False(t, ok, "blank tag rejected")
+	_, ok = s.Add(purgeScopeTag, "", "", " sku-1 ")
+	require.True(t, ok)
+	assert.Equal(t, "sku-1", s.Since(0, allowNone).Entries[0].Tag, "tag trimmed")
 }
 
 func TestPurgeStore_InvalidInputsRejected(t *testing.T) {
 	s := NewPurgeStore(0)
 	cases := []struct{ scope, host, uri string }{
 		{"bogus", "a.com", "/x"},
-		{purgeScopeHost, "", ""},     // host scope needs a host
-		{purgeScopeURL, "a.com", ""}, // url scope needs a uri
-		{purgeScopeURL, "", "/x"},    // url scope needs a host
+		{purgeScopeHost, "", ""},            // host scope needs a host
+		{purgeScopeURL, "a.com", ""},        // url scope needs a uri
+		{purgeScopeURL, "", "/x"},           // url scope needs a host
+		{purgeScopeURL, "a.com", "blog"},    // url uri must be a rooted "/..." path
+		{purgeScopePrefix, "a.com", ""},     // prefix scope needs a prefix path
+		{purgeScopePrefix, "", "/x"},        // prefix scope needs a host
+		{purgeScopePrefix, "a.com", "blog"}, // prefix must be a rooted "/..." path (typo guard)
 	}
 	for _, c := range cases {
-		_, ok := s.Add(c.scope, c.host, c.uri)
+		_, ok := s.Add(c.scope, c.host, c.uri, "")
 		assert.False(t, ok, "scope=%q host=%q uri=%q should be rejected", c.scope, c.host, c.uri)
 	}
 	// Nothing was journaled.
@@ -147,7 +202,7 @@ func TestPurgeStore_InvalidInputsRejected(t *testing.T) {
 
 func TestPurgeStore_HostNormalized(t *testing.T) {
 	s := NewPurgeStore(0)
-	_, ok := s.Add(purgeScopeHost, "  ACME.com:443 ", "")
+	_, ok := s.Add(purgeScopeHost, "  ACME.com:443 ", "", "")
 	require.True(t, ok)
 	res := s.Since(0, allowAll)
 	require.Len(t, res.Entries, 1)

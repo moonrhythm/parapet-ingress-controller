@@ -53,9 +53,12 @@ spec:
             # Serve GET /v1/purges (per-edge bearer, scoped to the edge's hosts) and
             # POST /v1/purges (issue a purge). Issuing REQUIRES CP_PURGE_ADMIN_TOKEN —
             # a stronger credential than the per-edge read tokens — so keep it in its
-            # own Secret. Issue with:
+            # own Secret. Scopes: url / prefix / host / tag / flush-all. Issue with:
             #   curl -H "Authorization: Bearer $ADMIN" -d '{"scope":"url","host":"acme.com","uri":"/a"}' \
             #     https://controlplane:8443/v1/purges
+            #   {"scope":"prefix","host":"acme.com","uri":"/blog"}   # everything under /blog
+            #   {"scope":"tag","tag":"product-42"}                   # by origin Cache-Tag, all hosts
+            #   {"scope":"host","host":"acme.com"} / {"scope":"flush-all"}
             # - name: CP_PURGE_ENABLED
             #   value: "true"
             # - name: CP_PURGE_ADMIN_TOKEN

@@ -161,10 +161,12 @@ GET /v1/waf           Authorization: Bearer <token>   [If-None-Match: "<etag>"]
        (ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct)
 
 GET /v1/purges?since=<seq>   Authorization: Bearer <token>
-  200 {"entries":[{"seq":N,"scope":"url|host|flush-all","host":"…","uri":"…"}],
+  200 {"entries":[{"seq":N,"scope":"url|host|prefix|tag|flush-all","host":"…","uri":"…","tag":"…"}],
        "max_seq": N, "flush_required": false}
        entries        : journal entries with seq > since, SCOPED to the token's hosts
-                        (flush-all reaches every edge; host/url only its allowed hosts)
+                        (flush-all and tag reach every edge; host/url/prefix only its
+                        allowed hosts; scope=prefix uri is the path prefix; scope=tag
+                        carries a surrogate key in tag, no host)
        flush_required : true when the edge's next-needed seq (since+1) was trimmed
                         (it fell behind the retained window), OR when since > max_seq
                         (its cursor is ahead of the CP's journal — a CP restart / fresh
@@ -174,7 +176,16 @@ GET /v1/purges?since=<seq>   Authorization: Bearer <token>
   401 (no/invalid token)   404 (purge distribution disabled)
 
 POST /v1/purges       Authorization: Bearer <ADMIN token>   ← stronger cred than the read token
-  {"scope":"url|host|flush-all", "host":"…", "uri":"…"}  → appends to the journal, returns {"seq":N}
+  {"scope":"url|host|prefix|tag|flush-all", "host":"…", "uri":"…", "tag":"…"}  → appends, returns {"seq":N}
+       (scope=prefix: uri is the path prefix, e.g. "/blog"; path-only, boundary-aware.
+        url+prefix: uri MUST be a rooted "/..." path in the SAME percent-encoded form the
+        request carries — the cache keys on the raw request-uri, so "/café" must be sent
+        as "/caf%C3%A9". A non-"/" uri is rejected 400.
+        scope=tag: tag is a surrogate key from the origin's Cache-Tag response header,
+        host-independent — distributed to every edge, which invalidates any entry whose
+        stored Cache-Tag set contains it. tag is required. NOTE: tag names are
+        broadcast fleet-wide (not host-gated like url/host/prefix), so they are a
+        shared cross-tenant namespace — do not encode secrets in Cache-Tag values.)
        (the admin token is NOT host-scoped — it may purge any host; per-host scoping is
         applied on the read side, not at issue time)
   401 (no/invalid admin token)  400 (invalid scope/host/uri)  404 (purge distribution disabled)
@@ -425,16 +436,22 @@ connection/byte/runtime metrics).
 > `edge/purgereaper.go`; control plane `edgecp/purgestore.go` + `GET`/`POST
 > /v1/purges`). The lookup gate is the `parapet/pkg/cache`
 > `Options.InvalidatedAfter` hook (parapet **v0.17.0**); the reaper uses
-> `Storage.Range` + the raw host/uri in `Meta` (parapet **v0.17.1**). Pure-Go
-> feature, no Rust counterpart.
+> `Storage.Range` + the raw host/uri in `Meta` (parapet **v0.17.1**); tag scope
+> uses the surrogate keys in `Meta.Tags` (parapet **v0.17.2**). Pure-Go feature,
+> no Rust counterpart.
 
 Invalidation is **pulled from the control plane**, exactly like cert and WAF
 distribution: an operator publishes a purge once at the control plane and every
 sharded edge converges on its own timer. There is **no inbound purge port on the
 edge** (edges are out-of-cluster, often NAT'd), and the per-token host scoping is
-the same boundary that gates `/v1/certs` and `/v1/waf`. Three scopes are
-supported: **exact URL** (all `Vary` variants, both schemes, GET+HEAD),
-**whole host**, and **flush-all**.
+the same boundary that gates `/v1/certs` and `/v1/waf`. Five scopes are supported:
+**exact URL** (all `Vary` variants, both schemes, GET+HEAD), **path prefix**
+(every URL under a path on a host — path-only, boundary-aware: `/blog` covers
+`/blog` and `/blog/x` but not `/blogger`), **whole host**, **tag** (every cached
+response carrying a surrogate key from the origin's `Cache-Tag` header — content
+identity, host-independent), and **flush-all**. Host/url/prefix are host-scoped
+(an edge gets only purges for hosts it serves); tag and flush-all reach every edge,
+which then matches each entry's own tags / created-time.
 
 **Why lazy epochs, not eager file deletion.** The cache stores each entry under
 `variantHash = hash(primaryHash ⊕ Vary-values)`, where `primaryHash =
@@ -491,8 +508,8 @@ looked up, so after a broad purge with little traffic the dead bytes would linge
 until LRU pressure evicts them. A **background reaper** (`ReapOnce` / `RunReaper`,
 `EDGE_CACHE_PURGE_SWEEP_INTERVAL`, default 300s, jittered) closes that: it
 `Storage.Range`s over the cache and `Delete`s every entry whose `Meta.Created <=
-epochFor(Meta.Host, Meta.URI)` — using the raw host/uri parapet v0.17.1 stamps into
-`Meta` so all three scopes match off the serving path (an old entry with an empty
+epochFor(Meta.Host, Meta.URI, Meta.Tags)` — using the host/uri/tags parapet stamps
+into `Meta` so every scope matches off the serving path (an old entry with an empty
 `Host` matches the global scope only). Correctness never depends on the reaper —
 the gate already guarantees a purged entry is never served — so it deletes only in
 the **safe direction**: over-deleting a still-valid entry (e.g. a `Created` stamped
@@ -654,10 +671,10 @@ needed. (The Rust **controller** implementation stays in `rust/`; only the Rust
    parapet-core equivalent).
 5. **Cache purge / invalidation** — CP purge journal + `GET`/`POST /v1/purges`,
    edge poll loop with a persisted cursor, lazy epoch invalidation (global / host /
-   url) checked at lookup via the `parapet/pkg/cache` `InvalidatedAfter` hook.
-   A background reaper (`Storage.Range`) physically reclaims invalidated entries
-   off the serving path; the count-cap fold + LRU byte cap bound the rest. Scopes:
-   exact-URL (all variants), whole-host,
-   flush-all. **(done)** See [Purge / invalidation](#purge--invalidation).
-   Edge-only. Path-prefix and Cache-Tag purge are deferred (prefix needs a scan;
-   tags must be recorded at admit time) — the epoch table extends to both later.
+   url / path-prefix / tag) checked at lookup via the `parapet/pkg/cache`
+   `InvalidatedAfter` hook. A background reaper (`Storage.Range`) physically
+   reclaims invalidated entries off the serving path; the count-cap fold + LRU byte
+   cap bound the rest. Scopes: exact-URL (all variants), path-prefix (boundary-aware,
+   path-only), whole-host, tag (surrogate keys from the origin's `Cache-Tag` header,
+   via parapet `Meta.Tags`, host-independent), flush-all. **(done)** See
+   [Purge / invalidation](#purge--invalidation). Edge-only.

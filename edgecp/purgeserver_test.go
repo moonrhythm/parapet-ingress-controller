@@ -84,9 +84,9 @@ func TestPurgeAPI_PostThenGetRoundTrip(t *testing.T) {
 func TestPurgeAPI_GetScopedToAllowedHosts(t *testing.T) {
 	srv, store := purgeTestServer(t)
 	h := srv.Handler()
-	_, _ = store.Add(purgeScopeHost, "acme.com", "")  // edge allowed
-	_, _ = store.Add(purgeScopeHost, "other.com", "") // edge NOT allowed
-	_, _ = store.Add(purgeScopeFlushAll, "", "")      // everyone
+	_, _ = store.Add(purgeScopeHost, "acme.com", "", "")  // edge allowed
+	_, _ = store.Add(purgeScopeHost, "other.com", "", "") // edge NOT allowed
+	_, _ = store.Add(purgeScopeFlushAll, "", "", "")      // everyone
 
 	rec := do(t, h, "GET", "/v1/purges?since=0", "edge-tok", "")
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -97,6 +97,39 @@ func TestPurgeAPI_GetScopedToAllowedHosts(t *testing.T) {
 	for _, e := range got.Entries {
 		assert.NotEqual(t, "other.com", e.Host)
 	}
+}
+
+func TestPurgeAPI_PrefixPostThenGet(t *testing.T) {
+	srv, _ := purgeTestServer(t)
+	h := srv.Handler()
+
+	rec := do(t, h, "POST", "/v1/purges", "admin-secret", `{"scope":"prefix","host":"acme.com","uri":"/blog"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	rec = do(t, h, "GET", "/v1/purges?since=0", "edge-tok", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got PurgeSince
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Entries, 1)
+	assert.Equal(t, "prefix", got.Entries[0].Scope)
+	assert.Equal(t, "/blog", got.Entries[0].URI)
+}
+
+func TestPurgeAPI_TagPostReachesEvenUnscopedEdge(t *testing.T) {
+	srv, _ := purgeTestServer(t) // edge-tok serves only acme.com
+	h := srv.Handler()
+
+	rec := do(t, h, "POST", "/v1/purges", "admin-secret", `{"scope":"tag","tag":"product-42"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// The tag purge has no host, yet the acme.com-only edge still receives it.
+	rec = do(t, h, "GET", "/v1/purges?since=0", "edge-tok", "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got PurgeSince
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.Entries, 1)
+	assert.Equal(t, "tag", got.Entries[0].Scope)
+	assert.Equal(t, "product-42", got.Entries[0].Tag)
 }
 
 func TestPurgeAPI_PostInvalidScopeIs400(t *testing.T) {
