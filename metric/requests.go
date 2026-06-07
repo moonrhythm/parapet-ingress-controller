@@ -45,7 +45,7 @@ type requestKey struct {
 	serviceName string
 	serviceType string
 	method      string
-	status      int
+	status      string
 }
 
 // requestMetric bundles the counter and duration observer for one label set so
@@ -88,6 +88,18 @@ func methodLabel(method string) string {
 	}
 }
 
+// statusLabel bounds the response status label for the `requests` metric. An
+// upstream can write any int via WriteHeader, so labeling the counter — and keying
+// the handle cache — with the raw code lets a buggy/hostile backend mint unbounded
+// permanent series (the same OOM class methodLabel guards against). Valid HTTP
+// codes (100–599) pass through; anything else collapses to "other".
+func statusLabel(status int) string {
+	if status >= 100 && status <= 599 {
+		return strconv.Itoa(status)
+	}
+	return "other"
+}
+
 func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 	duration := time.Since(start)
 
@@ -96,6 +108,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 
 	host := HostLabel(r.Host, p.isKnownHost)
 	method := methodLabel(r.Method)
+	statusStr := statusLabel(status)
 
 	// Edge rejection: a tracked rejection status where the request never reached
 	// a backend (makeHandler sets serviceTarget only when it proxies). Counted in
@@ -112,7 +125,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 		serviceName: s["serviceName"],
 		serviceType: s["serviceType"],
 		method:      method,
-		status:      status,
+		status:      statusStr,
 	}
 
 	rm := p.cache.getOrCreate(key, func() *requestMetric {
@@ -124,7 +137,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 				"ingress_namespace": s["namespace"],
 				"service_type":      s["serviceType"],
 				"service_name":      s["serviceName"],
-				"status":            strconv.Itoa(status),
+				"status":            statusStr,
 			}),
 			observer: p.durations.With(prometheus.Labels{
 				"service_type":      s["serviceType"],

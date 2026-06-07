@@ -266,6 +266,34 @@ func TestPurge_FlushAllRealignsCursorDown(t *testing.T) {
 	assert.EqualValues(t, 3, tbl.Cursor(), "a reset flush realigns the cursor down so it can't re-flush forever")
 }
 
+func TestPurge_PersistStaleVersionSkipped(t *testing.T) {
+	// persist() runs the fsync OFF the table lock and must drop a stale snapshot
+	// whose newer successor already landed, so an older Apply can't clobber a newer
+	// one's on-disk state.
+	path := filepath.Join(t.TempDir(), "purge-state")
+	tbl, err := NewPurgeTable(path, 0)
+	require.NoError(t, err)
+	fixedClock(tbl, 1000)
+
+	// Capture two ordered snapshots (newer = v2).
+	tbl.mu.Lock()
+	tbl.host["a.com"] = 100
+	snap1, ver1 := tbl.snapshotLocked()
+	tbl.host["b.com"] = 200
+	snap2, ver2 := tbl.snapshotLocked()
+	tbl.mu.Unlock()
+	require.Greater(t, ver2, ver1)
+
+	// Land the NEWER one first, then try the older — the older must be skipped.
+	require.NoError(t, tbl.persist(snap2, ver2))
+	require.NoError(t, tbl.persist(snap1, ver1))
+
+	reloaded, err := NewPurgeTable(path, 0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 200, reloaded.InvalidatedAfterMeta(cache.Meta{Host: "b.com"}), "newer snapshot survived")
+	assert.EqualValues(t, 100, reloaded.InvalidatedAfterMeta(cache.Meta{Host: "a.com"}), "stale persist did not roll the file back")
+}
+
 func TestPurge_PersistenceRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "purge-state")
 

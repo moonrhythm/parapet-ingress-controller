@@ -99,7 +99,7 @@ func TestPromRequestsIncCachesAndCounts(t *testing.T) {
 		serviceName: "svc",
 		serviceType: "ClusterIP",
 		method:      "GET",
-		status:      200,
+		status:      "200",
 	}
 
 	// the two 200 calls share one cache entry; a 404 adds a second
@@ -107,7 +107,7 @@ func TestPromRequestsIncCachesAndCounts(t *testing.T) {
 
 	_promRequests.cache.mu.RLock()
 	rm200 := _promRequests.cache.m[key]
-	key.status = 404
+	key.status = "404"
 	rm404 := _promRequests.cache.m[key]
 	_promRequests.cache.mu.RUnlock()
 
@@ -115,4 +115,43 @@ func TestPromRequestsIncCachesAndCounts(t *testing.T) {
 	assert.NotNil(t, rm200)
 	assert.NotNil(t, rm404)
 	assert.NotSame(t, rm200, rm404)
+}
+
+func TestStatusLabel(t *testing.T) {
+	assert.Equal(t, "100", statusLabel(100))
+	assert.Equal(t, "200", statusLabel(200))
+	assert.Equal(t, "599", statusLabel(599))
+	// out of the valid HTTP range -> collapsed
+	assert.Equal(t, "other", statusLabel(0))
+	assert.Equal(t, "other", statusLabel(99))
+	assert.Equal(t, "other", statusLabel(600))
+	assert.Equal(t, "other", statusLabel(12345))
+	assert.Equal(t, "other", statusLabel(-1))
+}
+
+func TestStatusLabelBoundsRequestCardinality(t *testing.T) {
+	// An upstream can write any int via WriteHeader. Without statusLabel, each
+	// distinct code mints a new handle-cache entry + permanent series; statusLabel
+	// must collapse out-of-range codes to one "other" series per (host, method).
+	const host = "status-card-test.example.com"
+	s := state.State{"namespace": "ns", "ingress": "ing", "serviceName": "svc", "serviceType": "ClusterIP"}
+	countEntries := func() int {
+		n := 0
+		_promRequests.cache.mu.RLock()
+		for k := range _promRequests.cache.m {
+			if k.host == host {
+				n++
+			}
+		}
+		_promRequests.cache.mu.RUnlock()
+		return n
+	}
+	start := time.Now()
+	r := httptest.NewRequest("GET", "http://"+host+"/x", nil)
+	r = r.WithContext(state.NewContext(r.Context(), s))
+	for code := 1000; code < 1500; code++ {
+		_promRequests.Inc(r, code, start)
+	}
+	assert.Equal(t, 1, countEntries(),
+		"500 distinct out-of-range status codes must collapse to a single 'other' series per (host,method)")
 }
