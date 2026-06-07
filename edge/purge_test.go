@@ -121,14 +121,16 @@ func TestPurge_FlushAllClearsAndSupersedes(t *testing.T) {
 		{Seq: 1, Scope: ScopeURL, Host: "a.com", URI: "/x"},
 		{Seq: 2, Scope: ScopeHost, Host: "b.com"},
 		{Seq: 3, Scope: ScopePrefix, Host: "c.com", URI: "/blog"},
-	}, 3))
+		{Seq: 4, Scope: ScopeTag, Tag: "t1"},
+	}, 4))
 	fixedClock(tbl, 5000)
-	require.NoError(t, tbl.FlushAll(4))
+	require.NoError(t, tbl.FlushAll(5))
 
 	st := tbl.Stats()
 	assert.Zero(t, st.HostRecs, "host map cleared on flush")
 	assert.Zero(t, st.URLRecs, "url map cleared on flush")
 	assert.Zero(t, st.PrefixRecs, "prefix map cleared on flush")
+	assert.Zero(t, st.TagRecs, "tag map cleared on flush")
 	assert.EqualValues(t, 5000, epochFor(tbl, "GET", "http://anything.com/q"))
 }
 
@@ -229,6 +231,32 @@ func TestPurge_PrefixCapFold(t *testing.T) {
 	assert.Zero(t, tbl.Stats().PrefixRecs, "overflowing prefix records folded into global")
 	assert.EqualValues(t, 1, tbl.Stats().Folds)
 	assert.EqualValues(t, 1000, epochFor(tbl, "GET", "http://a.com/1"), "still invalidated via the global epoch")
+}
+
+func TestPurge_TagScope(t *testing.T) {
+	tbl, _ := NewPurgeTable("", 0)
+	fixedClock(tbl, 1000)
+	require.NoError(t, tbl.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeTag, Tag: "product-42"}}, 1))
+
+	// Any entry carrying the surrogate key is invalidated, regardless of host/url.
+	assert.EqualValues(t, 1000, tbl.InvalidatedAfterMeta(cache.Meta{Host: "shop.com", URI: "/p", Tags: []string{"product-42"}}))
+	assert.EqualValues(t, 1000, tbl.InvalidatedAfterMeta(cache.Meta{Host: "other.com", URI: "/x", Tags: []string{"a", "product-42"}}))
+	// Entries without the tag are untouched.
+	assert.EqualValues(t, 0, tbl.InvalidatedAfterMeta(cache.Meta{Host: "shop.com", URI: "/p", Tags: []string{"category-shoes"}}))
+	assert.EqualValues(t, 0, tbl.InvalidatedAfterMeta(cache.Meta{Host: "shop.com", URI: "/p"}))
+}
+
+func TestPurge_TagPersistenceRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "purge-state")
+	t1, err := NewPurgeTable(path, 0)
+	require.NoError(t, err)
+	fixedClock(t1, 6000)
+	require.NoError(t, t1.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeTag, Tag: "sku-7"}}, 1))
+
+	t2, err := NewPurgeTable(path, 0)
+	require.NoError(t, err)
+	assert.EqualValues(t, 6000, t2.InvalidatedAfterMeta(cache.Meta{Tags: []string{"sku-7"}}), "tag record survives reload")
+	assert.EqualValues(t, 1, t2.Stats().TagRecs)
 }
 
 func TestPurge_FlushAllRealignsCursorDown(t *testing.T) {

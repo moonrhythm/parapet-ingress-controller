@@ -161,15 +161,17 @@ invariants:
 - **Cache purge (edge-only)** — invalidation is **pulled** from the control plane
   (`GET`/`POST /v1/purges`, a per-edge-scoped journal + cursor), mirroring
   cert/WAF distribution; no inbound port on the edge. Lazy **epoch** invalidation
-  (global / host / url-keyed-on-`host⊕uri`) is checked at lookup via the
-  `parapet/pkg/cache` `InvalidatedAfter` hook (parapet ≥ v0.17.0). Epochs use the
-  **edge's own clock** at apply time (no trusted CP timestamp; the cursor makes
-  apply idempotent, monotonic-clamped against an NTP step-back). Scopes: exact-URL
-  (all variants), path-prefix (boundary-aware, path-only), whole-host, flush-all. A
+  (global / host / url-keyed-on-`host⊕uri` / path-prefix / tag) is checked at
+  lookup via the `parapet/pkg/cache` `InvalidatedAfter` hook (parapet ≥ v0.17.0).
+  Epochs use the **edge's own clock** at apply time (no trusted CP timestamp; the
+  cursor makes apply idempotent, monotonic-clamped against an NTP step-back).
+  Scopes: exact-URL (all variants), path-prefix (boundary-aware, path-only),
+  whole-host, tag (surrogate keys from the origin's `Cache-Tag` header via parapet
+  `Meta.Tags`, host-independent — distributed to every edge), flush-all. A
   background reaper
   (`EDGE_CACHE_PURGE_SWEEP_INTERVAL`) physically reclaims invalidated entries off
-  the serving path, using `Storage.Range` + the raw host/uri in `Meta` (parapet ≥
-  v0.17.1); the in-memory record table is bounded by a count-cap fold into the
+  the serving path, using `Storage.Range` + the host/uri/tags in `Meta` (parapet ≥
+  v0.17.2); the in-memory record table is bounded by a count-cap fold into the
   global epoch (over-invalidates, never under-), and disk by the cache's LRU byte
   cap. Issuing a purge needs `CP_PURGE_ADMIN_TOKEN` (a stronger
   credential than the per-edge read tokens). Edge-only — no controller mirror, no

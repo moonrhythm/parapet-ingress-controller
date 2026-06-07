@@ -13,6 +13,7 @@ const (
 	purgeScopeHost     = "host"
 	purgeScopeURL      = "url"
 	purgeScopePrefix   = "prefix"
+	purgeScopeTag      = "tag"
 )
 
 // defaultPurgeJournalMax bounds the in-memory journal. Purges are operator-issued
@@ -23,12 +24,14 @@ const (
 const defaultPurgeJournalMax = 4096
 
 // purgeRecord is one journal entry. host is normalized (lowercased, port-stripped);
-// uri is the request-uri (path+query) verbatim from the operator.
+// uri is the request-uri (path+query, or path prefix) verbatim from the operator;
+// tag is a surrogate key (tag scope, host-independent).
 type purgeRecord struct {
 	seq   uint64
 	scope string
 	host  string
 	uri   string
+	tag   string
 }
 
 // PurgeEntryDTO is the JSON wire shape of one purge entry (matches edge.PurgeEntry).
@@ -37,6 +40,7 @@ type PurgeEntryDTO struct {
 	Scope string `json:"scope"`
 	Host  string `json:"host,omitempty"`
 	URI   string `json:"uri,omitempty"`
+	Tag   string `json:"tag,omitempty"`
 }
 
 // PurgeSince is the GET /v1/purges response: the entries an edge hasn't applied yet
@@ -73,23 +77,24 @@ func NewPurgeStore(maxEntries int) *PurgeStore {
 }
 
 // Add appends a purge and returns its seq. scope must be one of flush-all / host /
-// url / prefix. host is required (and normalized) for host/url/prefix; uri is
+// url / prefix / tag. host is required (and normalized) for host/url/prefix; uri is
 // required for url (the exact on-the-wire path+query) and prefix (the path prefix),
 // and MUST start with "/" so it can match a request path (a request-uri always
-// does) — a no-leading-slash value would silently match nothing. uri must be in
-// the same percent-encoded form the request carries (the cache keys on the raw
-// RequestURI). A bad scope/host/uri returns (0, false) so the handler can 400.
-func (s *PurgeStore) Add(scope, host, uri string) (uint64, bool) {
+// does) — a no-leading-slash value would silently match nothing; uri must be in the
+// same percent-encoded form the request carries (the cache keys on the raw
+// RequestURI). tag is required for tag scope (a surrogate key, host-independent). A
+// bad scope/host/uri/tag returns (0, false) so the handler can 400.
+func (s *PurgeStore) Add(scope, host, uri, tag string) (uint64, bool) {
 	scope = strings.TrimSpace(scope)
 	switch scope {
 	case purgeScopeFlushAll:
-		host, uri = "", ""
+		host, uri, tag = "", "", ""
 	case purgeScopeHost:
 		host = normHostCP(host)
 		if host == "" {
 			return 0, false
 		}
-		uri = ""
+		uri, tag = "", ""
 	case purgeScopeURL, purgeScopePrefix:
 		// url: uri is the exact path+query; prefix: uri is the path prefix. Both must
 		// be a rooted path ("/..."), else they'd never match a real request path —
@@ -99,6 +104,18 @@ func (s *PurgeStore) Add(scope, host, uri string) (uint64, bool) {
 		if host == "" || !strings.HasPrefix(uri, "/") {
 			return 0, false
 		}
+		tag = ""
+	case purgeScopeTag:
+		// tag is a surrogate key, host-independent — distributed to every edge, which
+		// then matches it against each entry's own Cache-Tag set. NOTE: unlike
+		// host/url/prefix (host-gated by Since's allow), tag names are broadcast
+		// fleet-wide, so they are a SHARED, cross-tenant-visible namespace — operators
+		// must not encode secrets in Cache-Tag values.
+		tag = strings.TrimSpace(tag)
+		if tag == "" {
+			return 0, false
+		}
+		host, uri = "", ""
 	default:
 		return 0, false
 	}
@@ -106,7 +123,7 @@ func (s *PurgeStore) Add(scope, host, uri string) (uint64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lastSeq++
-	s.entries = append(s.entries, purgeRecord{seq: s.lastSeq, scope: scope, host: host, uri: uri})
+	s.entries = append(s.entries, purgeRecord{seq: s.lastSeq, scope: scope, host: host, uri: uri, tag: tag})
 	if len(s.entries) > s.maxKeep {
 		// Trim oldest; re-slice into a fresh backing array so the dropped records
 		// are reclaimed rather than pinned by the slice header.
@@ -119,10 +136,10 @@ func (s *PurgeStore) Add(scope, host, uri string) (uint64, bool) {
 }
 
 // Since returns the purges an edge with cursor `since` hasn't applied: entries with
-// seq > since, filtered to flush-all (affects every edge) plus host/url/prefix
-// entries whose host the edge may serve (per allow). FlushRequired is set when the edge's
-// next-needed seq was already trimmed (since+1 < minSeq) — the edge then bumps its
-// global epoch and jumps to MaxSeq.
+// seq > since, filtered to flush-all and tag (both host-independent, so they reach
+// every edge) plus host/url/prefix entries whose host the edge may serve (per
+// allow). FlushRequired is set when the edge's next-needed seq was already trimmed
+// (since+1 < minSeq) — the edge then bumps its global epoch and jumps to MaxSeq.
 func (s *PurgeStore) Since(since uint64, allow func(host string) bool) PurgeSince {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -147,10 +164,12 @@ func (s *PurgeStore) Since(since uint64, allow func(host string) bool) PurgeSinc
 		if e.seq <= since {
 			continue
 		}
-		if e.scope != purgeScopeFlushAll && !allow(e.host) {
+		// flush-all and tag are host-independent (every edge); host/url/prefix are
+		// gated by the token's hosts.
+		if e.scope != purgeScopeFlushAll && e.scope != purgeScopeTag && !allow(e.host) {
 			continue
 		}
-		res.Entries = append(res.Entries, PurgeEntryDTO{Seq: e.seq, Scope: e.scope, Host: e.host, URI: e.uri})
+		res.Entries = append(res.Entries, PurgeEntryDTO{Seq: e.seq, Scope: e.scope, Host: e.host, URI: e.uri, Tag: e.tag})
 	}
 	return res
 }

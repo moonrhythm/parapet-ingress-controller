@@ -117,11 +117,11 @@ var (
 	}, []string{"edge_id"})
 
 	// edgePurgeRecords is the current in-memory record count per scope map
-	// (host|url|prefix), so an operator can watch the table stay bounded.
+	// (host|url|prefix|tag), so an operator can watch the table stay bounded.
 	edgePurgeRecords = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: prom.Namespace,
 		Name:      "edge_cache_purge_records",
-		Help:      "Current cache-purge invalidation-table records, by scope map (host|url|prefix).",
+		Help:      "Current cache-purge invalidation-table records, by scope map (host|url|prefix|tag).",
 	}, []string{"scope", "edge_id"})
 
 	// edgePurgeFolds is the cumulative count of conservative cap-folds (a map
@@ -179,6 +179,7 @@ func setPurgeMetrics(st PurgeStats) {
 	edgePurgeRecords.WithLabelValues("host", edgeID).Set(float64(st.HostRecs))
 	edgePurgeRecords.WithLabelValues("url", edgeID).Set(float64(st.URLRecs))
 	edgePurgeRecords.WithLabelValues("prefix", edgeID).Set(float64(st.PrefixRecs))
+	edgePurgeRecords.WithLabelValues("tag", edgeID).Set(float64(st.TagRecs))
 	edgePurgeFolds.WithLabelValues(edgeID).Set(float64(st.Folds))
 }
 

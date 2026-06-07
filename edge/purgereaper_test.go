@@ -88,6 +88,28 @@ func TestReapOnce_PrefixReaps(t *testing.T) {
 	assert.True(t, okB, "/about untouched (outside the prefix)")
 }
 
+func TestReapOnce_TagReaps(t *testing.T) {
+	s := cache.NewMemory(1 << 20)
+	fresh := time.Now().Add(time.Hour).UnixNano()
+	putEntry(t, s, "aa01", cache.Meta{PrimaryHex: "aa01", Host: "shop.com", URI: "/p1", Tags: []string{"product-42"}, Created: 100, FreshUntil: fresh}, []byte("x"))
+	putEntry(t, s, "bb02", cache.Meta{PrimaryHex: "bb02", Host: "blog.com", URI: "/post", Tags: []string{"product-42"}, Created: 100, FreshUntil: fresh}, []byte("y")) // different host, same tag
+	putEntry(t, s, "cc03", cache.Meta{PrimaryHex: "cc03", Host: "shop.com", URI: "/p2", Tags: []string{"product-99"}, Created: 100, FreshUntil: fresh}, []byte("z"))
+
+	tbl, _ := NewPurgeTable("", 0)
+	fixedClock(tbl, 200)
+	require.NoError(t, tbl.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeTag, Tag: "product-42"}}, 1))
+
+	fixedClock(tbl, 300)
+	ReapOnce(s, tbl)
+
+	_, _, okA := s.Get("aa01")
+	assert.False(t, okA, "tagged product-42 reaped (shop.com)")
+	_, _, okB := s.Get("bb02")
+	assert.False(t, okB, "tagged product-42 reaped across hosts (blog.com)")
+	_, _, okC := s.Get("cc03")
+	assert.True(t, okC, "product-99 untouched")
+}
+
 func TestReapOnce_NoPurgesIsNoOp(t *testing.T) {
 	s := cache.NewMemory(1 << 20)
 	fresh := time.Now().Add(time.Hour).UnixNano()

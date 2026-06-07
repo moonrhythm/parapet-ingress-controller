@@ -369,14 +369,15 @@ func (s *Server) handlePurgeAdmin(w http.ResponseWriter, r *http.Request) {
 		Scope string `json:"scope"`
 		Host  string `json:"host"`
 		URI   string `json:"uri"`
+		Tag   string `json:"tag"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&body); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	seq, ok := s.purge.Add(body.Scope, body.Host, body.URI)
+	seq, ok := s.purge.Add(body.Scope, body.Host, body.URI, body.Tag)
 	if !ok {
-		http.Error(w, "invalid scope/host/uri (scope must be flush-all|host|url|prefix; host required for host/url/prefix; uri required for url, and the path prefix for prefix)", http.StatusBadRequest)
+		http.Error(w, "invalid scope/host/uri/tag (scope must be flush-all|host|url|prefix|tag; host required for host/url/prefix; uri (rooted /path) required for url and prefix; tag required for tag)", http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

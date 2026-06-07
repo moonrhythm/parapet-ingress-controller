@@ -30,18 +30,22 @@ const (
 	// ScopePrefix invalidates every URL under a path prefix on a host (path-only,
 	// boundary-aware; query strings ignored). The prefix travels in the URI field.
 	ScopePrefix Scope = "prefix"
+	// ScopeTag invalidates every cached response carrying a surrogate key (from the
+	// origin's Cache-Tag header), across all hosts. The tag travels in the Tag field.
+	ScopeTag Scope = "tag"
 )
 
 // PurgeEntry is one journal record as distributed by the control plane and applied
 // by the edge. Seq is the monotonic journal sequence (idempotency cursor); Host is
 // required for host/url/prefix scopes; URI carries the exact path+query for url
-// scope and the path prefix for prefix scope. It is also the JSON wire shape
-// returned by GET /v1/purges.
+// scope and the path prefix for prefix scope; Tag carries the surrogate key for tag
+// scope (host-independent). It is also the JSON wire shape returned by GET /v1/purges.
 type PurgeEntry struct {
 	Seq   uint64 `json:"seq"`
 	Scope Scope  `json:"scope"`
 	Host  string `json:"host,omitempty"`
 	URI   string `json:"uri,omitempty"`
+	Tag   string `json:"tag,omitempty"`
 }
 
 // PurgeTable is the edge's cache-invalidation state: a small, in-memory table of
@@ -65,6 +69,9 @@ type PurgeEntry struct {
 //     /blog matches /blog and /blog/x but not /blogger; query strings ignored).
 //     A linear scan of the host's prefix records, so it is O(prefixes-for-host) at
 //     lookup rather than O(1); the record count is bounded by the cap-fold.
+//   - tag     — every cached response carrying a surrogate key (the origin's
+//     Cache-Tag header, stored in Meta.Tags); host-independent, matched against the
+//     entry's own tags at lookup (O(tags-on-entry), a small bounded set).
 //
 // The table persists {global, host, url, prefix, cursor} to a single file with an
 // atomic temp+fsync+rename, so maps and cursor can never desync. It is safe for
@@ -75,6 +82,7 @@ type PurgeTable struct {
 	host   map[string]int64       // normalized host    -> epoch
 	url    map[string]int64       // hash(host ⊕ uri)   -> epoch
 	prefix map[string][]prefixRec // normalized host    -> path-prefix records
+	tag    map[string]int64       // surrogate key      -> epoch (host-independent)
 	cursor uint64                 // last journal seq applied (idempotency)
 
 	// highWater is the largest epoch ever stamped. Every new stamp is clamped to be
@@ -120,6 +128,7 @@ func NewPurgeTable(path string, maxRecords int) (*PurgeTable, error) {
 		host:    map[string]int64{},
 		url:     map[string]int64{},
 		prefix:  map[string][]prefixRec{},
+		tag:     map[string]int64{},
 		path:    path,
 		maxRecs: maxRecords,
 	}
@@ -136,12 +145,13 @@ func (t *PurgeTable) now() int64 {
 }
 
 // InvalidatedAfter is the parapet/pkg/cache Options.InvalidatedAfter hook. It
-// returns the invalidation epoch (unix nanos) applying to r: the max of the
-// global, per-host, and per-url epochs. The cache treats a hit whose Meta.Created
-// is <= this value as stale. Host normalization mirrors cache.primaryHash
-// (lowercase + strip port) so the keys line up exactly. The stored Meta is unused.
-func (t *PurgeTable) InvalidatedAfter(r *http.Request, _ cache.Meta) int64 {
-	return t.epochFor(normHost(r.Host), r.URL.RequestURI())
+// returns the invalidation epoch (unix nanos) applying to r: the max of the global,
+// per-host, per-url, per-prefix, and per-tag epochs. The cache treats a hit whose
+// Meta.Created is <= this value as stale. Host normalization mirrors
+// cache.primaryHash (lowercase + strip port) so the keys line up exactly. The
+// stored entry's surrogate keys (m.Tags) are folded in for tag-scoped purges.
+func (t *PurgeTable) InvalidatedAfter(r *http.Request, m cache.Meta) int64 {
+	return t.epochFor(normHost(r.Host), r.URL.RequestURI(), m.Tags)
 }
 
 // InvalidatedAfterMeta is the reaper's variant of InvalidatedAfter: it reads the
@@ -150,13 +160,14 @@ func (t *PurgeTable) InvalidatedAfter(r *http.Request, _ cache.Meta) int64 {
 // idempotent on Meta.Host (the cache stamps it normalized); an old entry with an
 // empty Host matches only the global scope.
 func (t *PurgeTable) InvalidatedAfterMeta(m cache.Meta) int64 {
-	return t.epochFor(normHost(m.Host), m.URI)
+	return t.epochFor(normHost(m.Host), m.URI, m.Tags)
 }
 
-// epochFor returns the invalidation epoch (unix nanos) applying to a normalized
-// host + uri: the max of the global, per-host, and per-url epochs. Shared by the
-// lookup hook and the reaper.
-func (t *PurgeTable) epochFor(host, uri string) int64 {
+// epochFor returns the invalidation epoch (unix nanos) applying to an entry: the
+// max of the global, per-host, per-url, per-prefix, and per-tag epochs. host+uri
+// come from the request or the stored Meta; tags come from the stored Meta (the
+// origin's surrogate keys). Shared by the lookup hook and the reaper.
+func (t *PurgeTable) epochFor(host, uri string, tags []string) int64 {
 	uk := urlKey(host, uri)
 	path := pathOf(uri)
 	t.mu.RLock()
@@ -173,6 +184,12 @@ func (t *PurgeTable) epochFor(host, uri string) int64 {
 	for _, p := range t.prefix[host] {
 		if p.Epoch > e && matchPrefix(path, p.Prefix) {
 			e = p.Epoch
+		}
+	}
+	// Tag scope: each surrogate key the entry carries (host-independent).
+	for _, tg := range tags {
+		if v := t.tag[tg]; v > e {
+			e = v
 		}
 	}
 	return e
@@ -226,6 +243,7 @@ func (t *PurgeTable) FlushAll(maxSeq uint64) error {
 	t.host = map[string]int64{}
 	t.url = map[string]int64{}
 	t.prefix = map[string][]prefixRec{}
+	t.tag = map[string]int64{}
 	t.cursor = maxSeq
 	return t.saveLocked()
 }
@@ -239,6 +257,7 @@ func (t *PurgeTable) applyLocked(e PurgeEntry) {
 		t.host = map[string]int64{}
 		t.url = map[string]int64{}
 		t.prefix = map[string][]prefixRec{}
+		t.tag = map[string]int64{}
 	case ScopeHost:
 		if h := normHost(e.Host); h != "" {
 			t.host[h] = t.stamp()
@@ -252,6 +271,11 @@ func (t *PurgeTable) applyLocked(e PurgeEntry) {
 	case ScopePrefix:
 		if h := normHost(e.Host); h != "" {
 			t.applyPrefixLocked(h, normalizePrefix(e.URI), t.stamp())
+			t.enforceCapLocked()
+		}
+	case ScopeTag:
+		if e.Tag != "" {
+			t.tag[e.Tag] = t.stamp()
 			t.enforceCapLocked()
 		}
 	}
@@ -303,6 +327,10 @@ func (t *PurgeTable) enforceCapLocked() {
 		t.prefix = map[string][]prefixRec{}
 		folded = true
 	}
+	if len(t.tag) > t.maxRecs {
+		t.tag = map[string]int64{}
+		folded = true
+	}
 	if folded {
 		t.global = t.highWater // highWater >= every epoch stamped, so it covers the dropped records
 		t.folds++
@@ -332,6 +360,7 @@ type PurgeStats struct {
 	HostRecs   int
 	URLRecs    int
 	PrefixRecs int
+	TagRecs    int
 	Folds      uint64
 }
 
@@ -345,6 +374,7 @@ func (t *PurgeTable) Stats() PurgeStats {
 		HostRecs:   len(t.host),
 		URLRecs:    len(t.url),
 		PrefixRecs: t.prefixCount(),
+		TagRecs:    len(t.tag),
 		Folds:      t.folds,
 	}
 }
@@ -358,6 +388,7 @@ type persistState struct {
 	Host   map[string]int64       `json:"host"`
 	URL    map[string]int64       `json:"url"`
 	Prefix map[string][]prefixRec `json:"prefix,omitempty"`
+	Tag    map[string]int64       `json:"tag,omitempty"`
 	Cursor uint64                 `json:"cursor"`
 }
 
@@ -388,6 +419,9 @@ func (t *PurgeTable) load() error {
 	if st.Prefix != nil {
 		t.prefix = st.Prefix
 	}
+	if st.Tag != nil {
+		t.tag = st.Tag
+	}
 	t.global = st.Global
 	t.cursor = st.Cursor
 	t.highWater = st.Global
@@ -408,6 +442,11 @@ func (t *PurgeTable) load() error {
 			}
 		}
 	}
+	for _, v := range t.tag {
+		if v > t.highWater {
+			t.highWater = v
+		}
+	}
 	return nil
 }
 
@@ -422,6 +461,7 @@ func (t *PurgeTable) saveLocked() error {
 		Host:   t.host,
 		URL:    t.url,
 		Prefix: t.prefix,
+		Tag:    t.tag,
 		Cursor: t.cursor,
 	})
 	if err != nil {
