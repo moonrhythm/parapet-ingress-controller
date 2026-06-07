@@ -25,7 +25,7 @@ const (
 // set and `scoped()` filters it. Lock-free reads via atomic pointers; the three
 // inputs (global ConfigMaps, zone ConfigMaps, Ingresses) update independently.
 type WafStore struct {
-	mu       sync.Mutex
+	mu       sync.RWMutex // write-held by Set*/recompute; read-held by scoped for a consistent snapshot
 	global   atomic.Pointer[string]
 	zones    atomic.Pointer[map[string]string] // zoneKey -> rules YAML
 	hostZone atomic.Pointer[map[string]string] // lowercased host -> zoneKey
@@ -105,7 +105,19 @@ type scopedSnapshot struct {
 // scoped builds the response for an edge, including only host→zone entries whose
 // host the edge may serve (per `allow`) and the zones those entries reference.
 // Global is always included (it's the platform baseline, identical for all edges).
+//
+// It reads global/zones/hostZone/gen under the read lock so the four are a single
+// CONSISTENT snapshot of the store's state — without it, the four independent atomic
+// reads could straddle a concurrent SetZones/SetHostZone/recompute and return, e.g.,
+// a host→zone binding whose zone rules aren't in the (older) zones map, or a
+// generation that doesn't match the payload. (Cross-reloader eventual consistency
+// between the zone and ingress watches is inherent and corrected on the next poll;
+// parapet re-runs the WAF authoritatively regardless.) scoped runs per edge poll, so
+// the brief RLock is negligible.
 func (s *WafStore) scoped(allow func(host string) bool) scopedSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	allZones := *s.zones.Load()
 	allHostZone := *s.hostZone.Load()
 

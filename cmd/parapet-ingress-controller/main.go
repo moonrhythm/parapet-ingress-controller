@@ -200,7 +200,7 @@ func main() {
 	if !disableLog {
 		m.Use(logger.Stdout())
 	}
-	m.Use(state.Middleware())
+	m.Use(state.Middleware(!disableLog))
 	m.Use(metric.Requests(ctrl.IsKnownHost))
 	m.Use(compress.Gzip())
 	m.Use(compress.BrWithQuality(4))

@@ -28,7 +28,7 @@ func TestInjectStateIngress(t *testing.T) {
 			},
 		},
 	}
-	ctx.Use(state.Middleware())
+	ctx.Use(state.Middleware(true))
 	InjectStateIngress(ctx)
 
 	var called bool

@@ -233,6 +233,33 @@ func TestPurge_PrefixCapFold(t *testing.T) {
 	assert.EqualValues(t, 1000, epochFor(tbl, "GET", "http://a.com/1"), "still invalidated via the global epoch")
 }
 
+func TestPurge_NoPurgeGate(t *testing.T) {
+	tbl, _ := NewPurgeTable("", 0)
+	// Before any purge: the serving-path gate short-circuits to 0 without locking.
+	assert.False(t, tbl.active.Load())
+	assert.EqualValues(t, 0, tbl.InvalidatedAfterMeta(cache.Meta{Host: "a.com", URI: "/x", Tags: []string{"t"}}))
+
+	fixedClock(tbl, 1000)
+	require.NoError(t, tbl.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeHost, Host: "a.com"}}, 1))
+	// After a purge: the gate opens and lookups resolve normally.
+	assert.True(t, tbl.active.Load())
+	assert.EqualValues(t, 1000, tbl.InvalidatedAfterMeta(cache.Meta{Host: "a.com", URI: "/x"}))
+	assert.EqualValues(t, 0, tbl.InvalidatedAfterMeta(cache.Meta{Host: "other.com", URI: "/x"}))
+}
+
+func TestPurge_GateActiveAfterReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "purge-state")
+	t1, _ := NewPurgeTable(path, 0)
+	fixedClock(t1, 2000)
+	require.NoError(t, t1.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeHost, Host: "a.com"}}, 1))
+
+	// A reload of persisted purge state must re-open the gate (else lookups would
+	// short-circuit to 0 and silently under-invalidate after a restart).
+	t2, _ := NewPurgeTable(path, 0)
+	assert.True(t, t2.active.Load())
+	assert.EqualValues(t, 2000, t2.InvalidatedAfterMeta(cache.Meta{Host: "a.com", URI: "/x"}))
+}
+
 func TestPurge_TagScope(t *testing.T) {
 	tbl, _ := NewPurgeTable("", 0)
 	fixedClock(tbl, 1000)

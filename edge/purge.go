@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/moonrhythm/parapet/pkg/cache"
@@ -105,6 +106,14 @@ type PurgeTable struct {
 	dirtyVer     uint64
 	persistMu    sync.Mutex
 	persistedVer uint64
+
+	// active is true once any purge has ever been stamped (or loaded from disk). The
+	// serving-path hook (InvalidatedAfter -> epochFor) reads it lock-free FIRST and
+	// returns 0 immediately when false — so an edge that caches but has never been
+	// issued a purge pays nothing per cache hit (no RLock, no urlKey hash, no scans).
+	// It only ever flips false->true (epochs and the global flush never revert), so a
+	// stale false read just costs one request the (eventually-consistent) miss.
+	active atomic.Bool
 }
 
 // prefixRec is one path-prefix purge for a host: the normalized prefix (trailing
@@ -176,6 +185,9 @@ func (t *PurgeTable) InvalidatedAfterMeta(m cache.Meta) int64 {
 // come from the request or the stored Meta; tags come from the stored Meta (the
 // origin's surrogate keys). Shared by the lookup hook and the reaper.
 func (t *PurgeTable) epochFor(host, uri string, tags []string) int64 {
+	if !t.active.Load() {
+		return 0 // no purge ever applied: skip the lock, the urlKey hash, and the scans
+	}
 	uk := urlKey(host, uri)
 	path := pathOf(uri)
 	t.mu.RLock()
@@ -315,6 +327,7 @@ func (t *PurgeTable) stamp() int64 {
 		n = t.highWater
 	}
 	t.highWater = n
+	t.active.Store(true) // a purge now exists; the serving-path gate must stop short-circuiting
 	return n
 }
 
@@ -456,6 +469,11 @@ func (t *PurgeTable) load() error {
 		if v > t.highWater {
 			t.highWater = v
 		}
+	}
+	// highWater > 0 ⇒ at least one purge was loaded ⇒ the serving-path gate must
+	// stop short-circuiting after a restart that reloaded persisted purge state.
+	if t.highWater > 0 {
+		t.active.Store(true)
 	}
 	return nil
 }
