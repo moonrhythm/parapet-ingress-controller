@@ -20,7 +20,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/edgecp"
 )
 
-func caPEMFor(t *testing.T) (certPEM, keyPEM []byte) {
+func caPEMFor(t testing.TB) (certPEM, keyPEM []byte) {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	tmpl := &x509.Certificate{
@@ -452,7 +452,7 @@ func TestNewClientRequiresCA(t *testing.T) {
 	}
 }
 
-func leafSignedBy(t *testing.T, sg *edgecp.Signer, id string) *x509.Certificate {
+func leafSignedBy(t testing.TB, sg *edgecp.Signer, id string) *x509.Certificate {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	chainPEM, _, _, err := sg.Sign(key.Public(), id)
