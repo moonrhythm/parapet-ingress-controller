@@ -220,6 +220,35 @@ func NewManager() *Manager { return &Manager{} }
 // to CIDR-only without prompting directly-connecting browsers; see ServerTLSConfig).
 func (m *Manager) ClientCAs() *x509.CertPool { return m.clientCAs.Load() }
 
+// WaitReady blocks until the edge-CA pool is loaded (the first successful bundle apply)
+// or until timeout elapses / ctx is cancelled, whichever comes first, and reports whether
+// the pool is loaded. It NEVER blocks longer than timeout: the trust CP is an optional
+// overlay, so a caller gating readiness on it stays fail-static — it serves CIDR-only on a
+// false return rather than coupling availability to the CP. timeout <= 0 returns the
+// current state immediately. Intended as a one-shot startup gate (firstReload) so the
+// edge's first connections aren't established during the cold-start window, when no
+// CertificateRequest is sent and a mTLS-only edge would stay CIDR-only until the
+// connection recycles. Polls (no apply-time signalling needed for a one-shot startup wait).
+func (m *Manager) WaitReady(ctx context.Context, timeout time.Duration) bool {
+	if m.clientCAs.Load() != nil || timeout <= 0 {
+		return m.clientCAs.Load() != nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return m.clientCAs.Load() != nil
+		case <-t.C:
+			if m.clientCAs.Load() != nil {
+				return true
+			}
+		}
+	}
+}
+
 // WarmStartFloor returns the persisted last-good generation loaded as the
 // anti-resurrection floor (0 = none). Read-only, for observability/tests.
 func (m *Manager) WarmStartFloor() uint64 { return m.floor }
@@ -359,7 +388,8 @@ func (m *Manager) CAID() string {
 // connection the edge opens DURING cold start carries no client cert for its lifetime, so
 // it stays CIDR-only until recycled (~idle timeout) even after the pool loads, instead of
 // flipping to mTLS-trusted mid-connection. It self-heals on reconnect and is never an
-// abort, so the bounded CIDR-only window is an acceptable trade for never prompting.
+// abort. The startup readiness gate (WaitReady / EDGE_TRUST_READY_WAIT) shrinks the window
+// by holding the core NotReady until the pool loads, so the edge isn't routed here first.
 func (m *Manager) ServerTLSConfig(
 	getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error),
 	fallback []tls.Certificate,

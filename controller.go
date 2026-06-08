@@ -74,6 +74,17 @@ type Controller struct {
 	WAFConfig    WAFConfig
 	PodNamespace string
 
+	// WaitTrustReady, when set (edge auto-trust enabled), is invoked by firstReload
+	// just before the controller reports Ready. It blocks until the edge-CA pool has
+	// loaded — bounded, with a fail-static deadline fallback — so the edge's first
+	// connections aren't established during the cold-start window (when the :443 config
+	// sends no CertificateRequest and the connection would stay CIDR-only, i.e.
+	// untrusted for a mTLS-only edge, until it recycles). It MUST return on its own
+	// deadline even if the pool never loads: the trust CP is an optional overlay and
+	// must never gate serving. Installed by main before Watch(); nil (skipped) when
+	// auto-trust is off. See trust.Manager.WaitReady.
+	WaitTrustReady func()
+
 	// globalWAF is the always-on baseline firewall; zones holds the tenant zone
 	// registry keyed by <namespace>/<name>, swapped atomically on WAF reload.
 	// WAF reloads are decoupled from the mux — they never rebuild routes.
@@ -257,6 +268,15 @@ func (ctrl *Controller) firstReload() {
 	ctrl.reloadSecretDebounced()
 	ctrl.reloadEndpointDebounced()
 	ctrl.reloadWAFDebounced() // no-op when WAF disabled
+
+	// Edge auto-trust: bounded wait for the edge-CA pool before reporting Ready, so the
+	// edge isn't routed here during the cold-start window. Runs AFTER preload (above), so
+	// the parallel trust fetch has had the whole preload to land — usually it already
+	// has, making this a no-op. Fail-static: WaitTrustReady returns on its own deadline
+	// even if the pool never loads, so a CP outage at boot never blocks serving.
+	if ctrl.WaitTrustReady != nil {
+		ctrl.WaitTrustReady()
+	}
 
 	// ready to serve requests
 	ctrl.health.SetReady(true)
