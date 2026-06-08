@@ -26,18 +26,22 @@ func storageLen(s cache.Storage) int {
 	return n
 }
 
+// ReapOnce delegates to the parapet purge table's Reap (covered exhaustively
+// there); these verify the edge wrapper end-to-end through the journal Apply path.
+
 func TestReapOnce_DeletesInvalidatedKeepsOthers(t *testing.T) {
 	s := cache.NewMemory(1 << 20)
 	fresh := time.Now().Add(time.Hour).UnixNano()
-	putEntry(t, s, "aa01", cache.Meta{PrimaryHex: "aa01", Host: "acme.com", URI: "/a", Created: 100, FreshUntil: fresh}, []byte("x"))
-	putEntry(t, s, "bb02", cache.Meta{PrimaryHex: "bb02", Host: "other.com", URI: "/b", Created: 100, FreshUntil: fresh}, []byte("y"))
-	putEntry(t, s, "cc03", cache.Meta{PrimaryHex: "cc03", Host: "acme.com", URI: "/c", Created: 250, FreshUntil: fresh}, []byte("z")) // created AFTER the purge
+	putEntry(t, s, "aa01", cache.Meta{Host: "acme.com", URI: "/a", Created: 100, FreshUntil: fresh}, []byte("x"))
+	putEntry(t, s, "bb02", cache.Meta{Host: "other.com", URI: "/b", Created: 100, FreshUntil: fresh}, []byte("y"))
+	putEntry(t, s, "cc03", cache.Meta{Host: "acme.com", URI: "/c", Created: 250, FreshUntil: fresh}, []byte("z")) // created AFTER the purge
 
-	tbl, _ := NewPurgeTable("", 0)
-	fixedClock(tbl, 200)
+	clk := &stepClock{}
+	clk.set(200)
+	tbl := newClockedTable(t, "", clk)
 	require.NoError(t, tbl.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeHost, Host: "acme.com"}}, 1)) // host epoch 200
 
-	fixedClock(tbl, 300)
+	clk.set(300)
 	ReapOnce(s, tbl)
 
 	_, _, okA := s.Get("aa01")
@@ -46,60 +50,38 @@ func TestReapOnce_DeletesInvalidatedKeepsOthers(t *testing.T) {
 	assert.True(t, okB, "other.com untouched (different host)")
 	_, _, okC := s.Get("cc03")
 	assert.True(t, okC, "acme.com /c (created 250 > 200) survives — not over-reaped")
-
-	// The reaper does NOT retire records (that direction is unsafe under a clock
-	// step); the host record stays and keeps gating future entries.
 	assert.EqualValues(t, 1, tbl.Stats().HostRecs, "record kept (retirement intentionally not done)")
 }
 
 func TestReapOnce_GlobalReapsAllIncludingEmptyHost(t *testing.T) {
 	s := cache.NewMemory(1 << 20)
 	fresh := time.Now().Add(time.Hour).UnixNano()
-	putEntry(t, s, "aa01", cache.Meta{PrimaryHex: "aa01", Host: "", URI: "/old", Created: 100, FreshUntil: fresh}, []byte("x")) // pre-v0.17.1 entry, no Host
-	putEntry(t, s, "bb02", cache.Meta{PrimaryHex: "bb02", Host: "a.com", URI: "/y", Created: 100, FreshUntil: fresh}, []byte("y"))
+	putEntry(t, s, "aa01", cache.Meta{Host: "", URI: "/old", Created: 100, FreshUntil: fresh}, []byte("x")) // no Host
+	putEntry(t, s, "bb02", cache.Meta{Host: "a.com", URI: "/y", Created: 100, FreshUntil: fresh}, []byte("y"))
 
-	tbl, _ := NewPurgeTable("", 0)
-	fixedClock(tbl, 200)
+	clk := &stepClock{}
+	clk.set(200)
+	tbl := newClockedTable(t, "", clk)
 	require.NoError(t, tbl.FlushAll(1)) // global epoch 200
 
-	fixedClock(tbl, 300)
+	clk.set(300)
 	ReapOnce(s, tbl)
-
 	assert.Zero(t, storageLen(s), "flush-all reaps every entry, even one with an empty Host")
-	assert.Positive(t, epochFor(tbl, "GET", "http://anything.com/"), "global epoch kept (no retirement)")
 }
 
-func TestReapOnce_PrefixReaps(t *testing.T) {
+func TestReapOnce_TagReapsAcrossHosts(t *testing.T) {
 	s := cache.NewMemory(1 << 20)
 	fresh := time.Now().Add(time.Hour).UnixNano()
-	putEntry(t, s, "aa01", cache.Meta{PrimaryHex: "aa01", Host: "acme.com", URI: "/blog/p1", Created: 100, FreshUntil: fresh}, []byte("x"))
-	putEntry(t, s, "bb02", cache.Meta{PrimaryHex: "bb02", Host: "acme.com", URI: "/about", Created: 100, FreshUntil: fresh}, []byte("y"))
+	putEntry(t, s, "aa01", cache.Meta{Host: "shop.com", URI: "/p1", Tags: []string{"product-42"}, Created: 100, FreshUntil: fresh}, []byte("x"))
+	putEntry(t, s, "bb02", cache.Meta{Host: "blog.com", URI: "/post", Tags: []string{"product-42"}, Created: 100, FreshUntil: fresh}, []byte("y"))
+	putEntry(t, s, "cc03", cache.Meta{Host: "shop.com", URI: "/p2", Tags: []string{"product-99"}, Created: 100, FreshUntil: fresh}, []byte("z"))
 
-	tbl, _ := NewPurgeTable("", 0)
-	fixedClock(tbl, 200)
-	require.NoError(t, tbl.Apply([]PurgeEntry{{Seq: 1, Scope: ScopePrefix, Host: "acme.com", URI: "/blog"}}, 1))
-
-	fixedClock(tbl, 300)
-	ReapOnce(s, tbl)
-
-	_, _, okA := s.Get("aa01")
-	assert.False(t, okA, "/blog/p1 reaped by the /blog prefix purge")
-	_, _, okB := s.Get("bb02")
-	assert.True(t, okB, "/about untouched (outside the prefix)")
-}
-
-func TestReapOnce_TagReaps(t *testing.T) {
-	s := cache.NewMemory(1 << 20)
-	fresh := time.Now().Add(time.Hour).UnixNano()
-	putEntry(t, s, "aa01", cache.Meta{PrimaryHex: "aa01", Host: "shop.com", URI: "/p1", Tags: []string{"product-42"}, Created: 100, FreshUntil: fresh}, []byte("x"))
-	putEntry(t, s, "bb02", cache.Meta{PrimaryHex: "bb02", Host: "blog.com", URI: "/post", Tags: []string{"product-42"}, Created: 100, FreshUntil: fresh}, []byte("y")) // different host, same tag
-	putEntry(t, s, "cc03", cache.Meta{PrimaryHex: "cc03", Host: "shop.com", URI: "/p2", Tags: []string{"product-99"}, Created: 100, FreshUntil: fresh}, []byte("z"))
-
-	tbl, _ := NewPurgeTable("", 0)
-	fixedClock(tbl, 200)
+	clk := &stepClock{}
+	clk.set(200)
+	tbl := newClockedTable(t, "", clk)
 	require.NoError(t, tbl.Apply([]PurgeEntry{{Seq: 1, Scope: ScopeTag, Tag: "product-42"}}, 1))
 
-	fixedClock(tbl, 300)
+	clk.set(300)
 	ReapOnce(s, tbl)
 
 	_, _, okA := s.Get("aa01")
@@ -113,9 +95,10 @@ func TestReapOnce_TagReaps(t *testing.T) {
 func TestReapOnce_NoPurgesIsNoOp(t *testing.T) {
 	s := cache.NewMemory(1 << 20)
 	fresh := time.Now().Add(time.Hour).UnixNano()
-	putEntry(t, s, "aa01", cache.Meta{PrimaryHex: "aa01", Host: "a.com", URI: "/a", Created: 100, FreshUntil: fresh}, []byte("x"))
+	putEntry(t, s, "aa01", cache.Meta{Host: "a.com", URI: "/a", Created: 100, FreshUntil: fresh}, []byte("x"))
 
-	tbl, _ := NewPurgeTable("", 0)
+	tbl, err := NewPurgeTable("", 0)
+	require.NoError(t, err)
 	ReapOnce(s, tbl)
 	assert.Equal(t, 1, storageLen(s), "nothing purged -> nothing reaped")
 }

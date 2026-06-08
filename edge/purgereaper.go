@@ -26,14 +26,7 @@ import (
 // bounded by the monotonic, over-invalidating count-cap fold (enforceCapLocked) —
 // see PurgeTable. Purges are operator-issued, so the maps stay small regardless.
 func ReapOnce(storage cache.Storage, table *PurgeTable) {
-	var reaped int
-	storage.Range(func(key string, m cache.Meta) bool {
-		if m.Created <= table.InvalidatedAfterMeta(m) {
-			storage.Delete(key)
-			reaped++
-		}
-		return true
-	})
+	reaped := table.Reap(storage)
 	if reaped > 0 {
 		slog.Info("edge: cache reaper swept invalidated entries", "reaped", reaped)
 	}
