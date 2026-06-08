@@ -187,7 +187,8 @@ func main() {
 	ctrl.Use(plugin.BasicAuth)
 	ctrl.Use(plugin.ForwardAuth)
 	ctrl.Use(plugin.StripPrefix)
-	go ctrl.Watch()
+	// Watch starts below, AFTER the edge-trust readiness hook is wired — firstReload
+	// reads ctrl.WaitTrustReady, so it must be installed before Watch runs.
 
 	m := parapet.Middlewares{}
 	m.Use(ctrl.Healthz())
@@ -283,6 +284,34 @@ func main() {
 		go trustMgr.Run(context.Background(), tc, pollInterval)
 		slog.Info("edge auto-trust enabled (CA-only mTLS)", "endpoint", ep)
 	}
+
+	// Edge auto-trust: gate readiness on the edge-CA pool, bounded and fail-static, so a
+	// freshly-started core isn't routed edge traffic during the cold-start window — when
+	// :443 sends no CertificateRequest yet and a mTLS-only edge (no CIDR cover) would stay
+	// untrusted on any connection it opens until that connection recycles. The wait runs
+	// after k8s preload (in firstReload), by which point the parallel trust fetch has
+	// usually landed, so it is normally a no-op. EDGE_TRUST_READY_WAIT bounds it (default
+	// 10s); on timeout the core reports Ready and serves CIDR-only until the bundle loads
+	// (the edge converges to mTLS-trusted then). Set 0 to disable the wait (pure
+	// fail-static, the pre-gate behavior). Off entirely when auto-trust is off.
+	if trustMgr != nil {
+		readyWait := config.DurationDefault("EDGE_TRUST_READY_WAIT", 10*time.Second)
+		if readyWait < 0 {
+			readyWait = 0 // negative is meaningless; normalize to "disabled" so the logging below is consistent
+		}
+		ctrl.WaitTrustReady = func() {
+			if trustMgr.WaitReady(context.Background(), readyWait) {
+				slog.Info("edge trust: CA pool loaded; reporting Ready (edge mTLS active)")
+			} else if readyWait > 0 {
+				slog.Warn("edge trust: CA pool not loaded within EDGE_TRUST_READY_WAIT; "+
+					"reporting Ready and serving CIDR-only until the bundle loads (edge mTLS converges then)",
+					"wait", readyWait)
+			}
+		}
+	}
+
+	// Start watching now that the readiness hook (read by firstReload) is installed.
+	go ctrl.Watch()
 
 	// The installed-once trust predicate: static CIDR OR (with auto-trust) a client
 	// cert cryptographically verified to the edge CA. The verification happens in
