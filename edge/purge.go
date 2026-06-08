@@ -186,11 +186,16 @@ type PurgeStats struct {
 	Folds      uint64
 }
 
-// Stats returns a concurrent-safe snapshot.
+// Stats returns a concurrent-safe snapshot. The cursor and the table's record
+// counts are read under one mu hold (lock order mu -> table) so they reflect the
+// same instant — a concurrent Apply can't slip a newer cursor past stale counts.
 func (t *PurgeTable) Stats() PurgeStats {
+	t.mu.Lock()
+	cursor := t.cursor
 	s := t.tbl.Stats()
+	t.mu.Unlock()
 	return PurgeStats{
-		Cursor:     t.Cursor(),
+		Cursor:     cursor,
 		Global:     s.Global,
 		HostRecs:   s.HostRecs,
 		URLRecs:    s.URLRecs,
