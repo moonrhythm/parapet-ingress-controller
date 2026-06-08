@@ -296,6 +296,9 @@ func main() {
 	// fail-static, the pre-gate behavior). Off entirely when auto-trust is off.
 	if trustMgr != nil {
 		readyWait := config.DurationDefault("EDGE_TRUST_READY_WAIT", 10*time.Second)
+		if readyWait < 0 {
+			readyWait = 0 // negative is meaningless; normalize to "disabled" so the logging below is consistent
+		}
 		ctrl.WaitTrustReady = func() {
 			if trustMgr.WaitReady(context.Background(), readyWait) {
 				slog.Info("edge trust: CA pool loaded; reporting Ready (edge mTLS active)")
