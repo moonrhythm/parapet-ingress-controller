@@ -215,9 +215,9 @@ const verifyCacheCap = 4096
 
 func NewManager() *Manager { return &Manager{} }
 
-// ClientCAs returns the live pool (nil before the first successful load — the
-// caller then requests-but-does-not-verify client certs so the cold-start window
-// degrades to CIDR-only rather than aborting edge handshakes).
+// ClientCAs returns the live pool (nil before the first successful load — while it is
+// nil ServerTLSConfig requests no client cert at all, so the cold-start window degrades
+// to CIDR-only without prompting directly-connecting browsers; see ServerTLSConfig).
 func (m *Manager) ClientCAs() *x509.CertPool { return m.clientCAs.Load() }
 
 // WarmStartFloor returns the persisted last-good generation loaded as the
@@ -327,24 +327,61 @@ func (m *Manager) CAID() string {
 	return ""
 }
 
-// ServerTLSConfig builds the core's :443 *tls.Config. It REQUESTS an optional client
-// cert (tls.RequestClientCert) but NEVER verifies it at the TLS layer — so a client
-// cert that doesn't chain to the edge CA (e.g. Cloudflare Authenticated Origin Pulls)
-// can't abort the handshake. Edge trust is decided per request by VerifyClientCert
-// against the live edge-CA pool: a chaining cert is mTLS-trusted, anything else falls
-// through to CIDR, and the handshake always completes. The SNI server cert is
-// unchanged — getCertificate (the controller's cert table) and the self-signed
-// fallback are served exactly as before.
+// ServerTLSConfig builds the core's :443 *tls.Config. When an edge CA is loaded it
+// REQUESTS an optional client cert (tls.RequestClientCert) but NEVER verifies it at the
+// TLS layer — so a client cert that doesn't chain to the edge CA (e.g. Cloudflare
+// Authenticated Origin Pulls) can't abort the handshake. Edge trust is decided per
+// request by VerifyClientCert against the live edge-CA pool: a chaining cert is
+// mTLS-trusted, anything else falls through to CIDR, and the handshake always completes.
+// The SNI server cert is unchanged — getCertificate (the controller's cert table) and
+// the self-signed fallback are served exactly as before.
+//
+// The request advertises the live edge-CA subjects (ClientCAs) so a browser connecting
+// DIRECTLY to :443 can filter by them: Chromium (Chrome/Edge) and Safari offer only
+// client certs chaining to the (internal) edge CA, so a normal user — who has none — is
+// offered nothing and is NOT shown the certificate-selection modal. That is the reported
+// symptom: a bare RequestClientCert with no advertised CAs makes those browsers offer
+// EVERY client cert in the store, which is why Windows users with an enrollment/smartcard
+// cert get prompted. (Firefox filters the offered list weakly, so a Firefox user with an
+// unrelated personal cert may still be prompted; enterprise AutoSelectCertificateForUrls
+// and smartcard-PIN prompts also live outside this filter — both pre-exist this code.)
+// The edge's CP-issued cert still chains and is presented. Advertising ClientCAs does NOT
+// enable TLS-layer verification — that needs ClientAuth >= VerifyClientCertIfGiven; under
+// RequestClientCert it only populates the advertised CA list, so a non-chaining cert
+// still can't abort the handshake. Resolved per handshake (GetConfigForClient) against
+// the hot-reloaded pool, so a CA rotation is picked up without rebuilding the listener.
+//
+// Before any CA is loaded (cold start) nobody can be mTLS-trusted, so the core requests
+// no client cert at all: a directly-connecting browser is never prompted, and the edge
+// simply stays CIDR-only until the first bundle loads — the same cold-start trust outcome
+// as requesting-but-not-verifying (the edge is untrusted while the pool is nil either
+// way), minus the prompt. One nuance vs the old always-request config: a keep-alive
+// connection the edge opens DURING cold start carries no client cert for its lifetime, so
+// it stays CIDR-only until recycled (~idle timeout) even after the pool loads, instead of
+// flipping to mTLS-trusted mid-connection. It self-heals on reconnect and is never an
+// abort, so the bounded CIDR-only window is an acceptable trade for never prompting.
 func (m *Manager) ServerTLSConfig(
 	getCertificate func(*tls.ClientHelloInfo) (*tls.Certificate, error),
 	fallback []tls.Certificate,
 ) *tls.Config {
-	return &tls.Config{
+	base := &tls.Config{
 		MinVersion:     tls.VersionTLS12,
 		Certificates:   fallback,
 		GetCertificate: getCertificate,
-		ClientAuth:     tls.RequestClientCert,
+		// ClientAuth left at NoClientCert: the cold-start (nil-pool) config below
+		// returns base unchanged, so no client cert is requested and no browser prompts.
 	}
+	base.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		pool := m.clientCAs.Load()
+		if pool == nil {
+			return nil, nil // no edge CA yet → reuse base (NoClientCert): never prompt
+		}
+		c := base.Clone()
+		c.ClientAuth = tls.RequestClientCert
+		c.ClientCAs = pool // advertise the edge-CA subjects so browsers filter and skip the prompt
+		return c, nil
+	}
+	return base
 }
 
 // VerifyClientCert reports whether the peer presented a client cert that chains to the
