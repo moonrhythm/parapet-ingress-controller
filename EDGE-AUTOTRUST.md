@@ -74,7 +74,15 @@ not a source IP.
 4. **The core verifies it — per request, not at the TLS layer.** The `:443`
    `tls.Config` uses `ClientAuth = tls.RequestClientCert`: it *requests* a client cert
    but **never verifies it during the handshake**, so a non-edge client cert never
-   aborts the connection. This is what lets the edge **and** another mTLS client that
+   aborts the connection. The request is resolved **per handshake**
+   (`GetConfigForClient`) against the live edge-CA pool: it advertises the edge-CA
+   subjects (`ClientCAs`) so a browser hitting `:443` directly filters them out and is
+   **not** shown a certificate-selection prompt (Chromium/Safari — see
+   `trust.Manager.ServerTLSConfig`; Firefox filters weakly), and **before any CA loads it
+   requests no client cert at all**, so a cold-start handshake never prompts. Advertising
+   `ClientCAs` does **not** enable TLS-layer verification (that would need
+   `VerifyClientCertIfGiven`) — it only populates the advertised CA list. This is what
+   lets the edge **and** another mTLS client that
    hits `:443` directly (e.g. **Cloudflare Authenticated Origin Pulls**, whose cert
    chains to Cloudflare's CA, not the edge CA) coexist on the same port — Cloudflare's
    cert would otherwise fail `VerifyClientCertIfGiven` and break every Cloudflare
@@ -154,10 +162,14 @@ trustProxy = func(r *http.Request) bool {
 `ClientAuth = tls.RequestClientCert` (request-but-never-verify) so a non-edge client
 cert (Cloudflare Authenticated Origin Pulls) can't abort the handshake; the edge-CA
 chain check is done per request by `VerifyClientCert` (nil `r.TLS` / `:80` ⇒ false,
-i.e. CIDR-only on plaintext). The pool is no longer fed into the `tls.Config`'s
-`ClientCAs`; it lives in the manager for the per-request verify (memoized by leaf
-fingerprint per generation). Only the *feed* into the pool changes; trust still reads
-no per-request map.
+i.e. CIDR-only on plaintext). The pool **is** advertised into the `tls.Config`'s
+`ClientCAs` — but only as the `CertificateRequest`'s acceptable-CA list (resolved per
+handshake via `GetConfigForClient`), so a directly-connecting browser filters it out and
+is never shown a cert-selection prompt. It is **not** used for TLS-layer verification:
+under `RequestClientCert` Go never verifies against `ClientCAs`, so the authoritative
+edge-CA chain check still happens per request in the manager (memoized by leaf
+fingerprint per generation), and before any CA loads the core requests no client cert at
+all. Trust still reads no per-request map.
 
 ### The trust pull (tokenless CP client)
 
