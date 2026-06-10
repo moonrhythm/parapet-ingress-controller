@@ -45,7 +45,7 @@ func TestWAFCountryResolverWired(t *testing.T) {
 		Country: func(_ *http.Request) string { return "CN" },
 	}
 	ctrl.InitWAF()
-	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
 rules:
   - id: block-cn
     expression: request.country == "CN"
@@ -66,13 +66,13 @@ func TestReloadWAF(t *testing.T) {
 
 	ctrl := newWAFController()
 
-	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
 rules:
   - id: block-scanners
     expression: request.user_agent.contains("sqlmap")
     action: block
 `))
-	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", roleZone, `
 rules:
   - id: block-admin
     expression: request.path.startsWith("/admin")
@@ -80,7 +80,7 @@ rules:
 `))
 	// a global ruleset outside the controller's namespace must be ignored
 	// (tenants can't inject baseline rules).
-	ctrl.watchedConfigMaps.Store("cust1/waf-global", wafCM("cust1", "waf-global", wafRoleGlobal, `
+	ctrl.watchedConfigMaps.Store("cust1/waf-global", wafCM("cust1", "waf-global", roleGlobal, `
 rules:
   - id: tenant-injected-global
     expression: "true"
@@ -104,7 +104,7 @@ func TestReloadWAF_BadZoneKeepsLastGood(t *testing.T) {
 
 	ctrl := newWAFController()
 
-	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", roleZone, `
 rules:
   - id: ok
     expression: request.path.startsWith("/x")
@@ -114,7 +114,7 @@ rules:
 	require.Equal(t, []string{"ok"}, ctrl.LookupZone("cust1/acme").Rules())
 
 	// push a broken rule (uncompilable expression) into the same zone
-	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", roleZone, `
 rules:
   - id: broken
     expression: this is not cel
@@ -140,8 +140,8 @@ rules:
     expression: request.path.startsWith("/admin")
     action: block
 `
-	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, acmeRules))
-	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", roleZone, acmeRules))
+	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", roleZone, `
 rules:
   - id: block-x
     expression: request.path.startsWith("/x")
@@ -164,7 +164,7 @@ rules:
 
 	// A reload triggered by an unrelated zone change must still reuse the
 	// untouched zone's instance.
-	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", roleZone, `
 rules:
   - id: block-y
     expression: request.path.startsWith("/y")
@@ -181,7 +181,7 @@ func TestReloadWAF_ChangedZoneRebuilt(t *testing.T) {
 	t.Parallel()
 
 	ctrl := newWAFController()
-	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", roleZone, `
 rules:
   - id: block-admin
     expression: request.path.startsWith("/admin")
@@ -191,7 +191,7 @@ rules:
 	require.Equal(t, []string{"block-admin"}, ctrl.LookupZone("cust1/acme").Rules())
 
 	// Change the rule input -> recompiled, new ruleset live (same reused instance).
-	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", roleZone, `
 rules:
   - id: block-api
     expression: request.path.startsWith("/api")
@@ -206,7 +206,7 @@ func TestReloadWAF_AddRemoveZones(t *testing.T) {
 	t.Parallel()
 
 	ctrl := newWAFController()
-	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", roleZone, `
 rules:
   - id: block-admin
     expression: request.path.startsWith("/admin")
@@ -217,7 +217,7 @@ rules:
 	require.NotNil(t, acme1)
 
 	// Add a second zone; the first must remain (and reuse its instance).
-	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust2/beta", wafCM("cust2", "beta", roleZone, `
 rules:
   - id: block-x
     expression: request.path.startsWith("/x")
@@ -235,7 +235,7 @@ rules:
 
 	// Re-add the first zone with the original rules; it gets a fresh instance and
 	// must be recompiled (its prior fingerprint was dropped with it).
-	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", wafRoleZone, `
+	ctrl.watchedConfigMaps.Store("cust1/acme", wafCM("cust1", "acme", roleZone, `
 rules:
   - id: block-admin
     expression: request.path.startsWith("/admin")
@@ -252,7 +252,7 @@ func TestReloadWAF_GlobalReusedAndRebuilt(t *testing.T) {
 	t.Parallel()
 
 	ctrl := newWAFController()
-	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
 rules:
   - id: block-scanners
     expression: request.user_agent.contains("sqlmap")
@@ -269,7 +269,7 @@ rules:
 	assert.Equal(t, []string{"block-scanners"}, ctrl.globalWAF.Rules())
 
 	// Changed global input: recompiled, fingerprint advances.
-	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
 rules:
   - id: block-bots
     expression: request.user_agent.contains("bot")
@@ -287,14 +287,14 @@ func TestReloadWAF_ConcurrentReloadsRaceFree(t *testing.T) {
 
 	// Seed a global ruleset plus several zones so each pass read-modify-writes
 	// both globalWAFFingerprint (string) and the zoneFingerprints map.
-	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", wafRoleGlobal, `
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
 rules:
   - id: block-scanners
     expression: request.user_agent.contains("sqlmap")
     action: block
 `))
 	for _, z := range []string{"acme", "beta", "gamma", "delta"} {
-		ctrl.watchedConfigMaps.Store("cust/"+z, wafCM("cust", z, wafRoleZone, `
+		ctrl.watchedConfigMaps.Store("cust/"+z, wafCM("cust", z, roleZone, `
 rules:
   - id: block-admin
     expression: request.path.startsWith("/admin")
@@ -333,13 +333,13 @@ func TestReloadWAF_MultipleGlobalConfigMapsDeterministicOrder(t *testing.T) {
 	// (waf-a before waf-b), not the random sync.Map.Range order — otherwise
 	// equal-priority precedence and the fingerprint would flip between reloads.
 	ctrl := newWAFController()
-	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-a", wafCM("ctrl-ns", "waf-a", wafRoleGlobal, `
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-a", wafCM("ctrl-ns", "waf-a", roleGlobal, `
 rules:
   - id: rule-a
     expression: "true"
     action: log
 `))
-	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-b", wafCM("ctrl-ns", "waf-b", wafRoleGlobal, `
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-b", wafCM("ctrl-ns", "waf-b", roleGlobal, `
 rules:
   - id: rule-b
     expression: "true"

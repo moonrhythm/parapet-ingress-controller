@@ -24,11 +24,13 @@ import (
 // wafLabelKey marks a ConfigMap as WAF input. Its value selects the role:
 // "global" (baseline ruleset, honored only in the controller's own namespace)
 // or "zone" (a tenant zone whose ID is the ConfigMap name). A single key means
-// one watch with one existence selector catches both roles.
+// one watch with one existence selector catches both roles. The role values
+// are shared with the rate-limit ConfigMaps (controller_ratelimit.go), which
+// follow the same global/zone model under their own label key.
 const (
-	wafLabelKey   = "parapet.moonrhythm.io/waf"
-	wafRoleGlobal = "global"
-	wafRoleZone   = "zone"
+	wafLabelKey = "parapet.moonrhythm.io/waf"
+	roleGlobal  = "global"
+	roleZone    = "zone"
 )
 
 // WAFConfig configures the WAF. It is set on the Controller before Watch().
@@ -54,7 +56,7 @@ func (ctrl *Controller) InitWAF() {
 	if !ctrl.WAFConfig.Enabled {
 		return
 	}
-	ctrl.globalWAF = ctrl.newWAF(wafRoleGlobal)
+	ctrl.globalWAF = ctrl.newWAF(roleGlobal)
 	empty := map[string]*waf.WAF{}
 	ctrl.zones.Store(&empty)
 	ctrl.zoneFingerprints = map[string]string{}
@@ -162,7 +164,7 @@ func (ctrl *Controller) reloadWAFDebounced() {
 	ctrl.watchedConfigMaps.Range(func(_, value any) bool {
 		cm := value.(*v1.ConfigMap)
 		switch cm.Labels[wafLabelKey] {
-		case wafRoleGlobal:
+		case roleGlobal:
 			// Global rules are platform-owned: only honored from the controller's
 			// own namespace so a tenant can't inject baseline rules.
 			if cm.Namespace != ctrl.PodNamespace {
@@ -171,7 +173,7 @@ func (ctrl *Controller) reloadWAFDebounced() {
 				return true
 			}
 			globalCMs = append(globalCMs, cm)
-		case wafRoleZone:
+		case roleZone:
 			key := cm.Namespace + "/" + cm.Name
 			zoneDocs[key] = append(zoneDocs[key], sortedDataValues(cm.Data)...)
 		}
@@ -238,7 +240,7 @@ func (ctrl *Controller) reloadWAFDebounced() {
 			continue
 		}
 		if !reused {
-			w = ctrl.newWAF(wafRoleZone)
+			w = ctrl.newWAF(roleZone)
 		}
 		if rules, err := wafrule.Parse(docs...); err != nil {
 			slog.Error("waf: invalid zone ruleset, keeping previous", "zone", key, "error", err)
@@ -257,11 +259,12 @@ func (ctrl *Controller) reloadWAFDebounced() {
 	slog.Info("reloaded waf", "global_rules", len(ctrl.globalWAF.Rules()), "zones", len(newZones))
 }
 
-// fingerprintDocs returns a content fingerprint of the rule documents that feed
-// a single WAF. Callers pass the already-sorted, deterministic doc slice
-// (sortedDataValues), so equal effective input yields an equal fingerprint
-// regardless of ConfigMap map iteration order. The length prefix per doc keeps
-// concatenation unambiguous (so ["a","bc"] and ["ab","c"] differ).
+// fingerprintDocs returns a content fingerprint of the config documents that
+// feed a single compiled instance (a WAF ruleset or a rate-limit set). Callers
+// pass the already-sorted, deterministic doc slice (sortedDataValues), so equal
+// effective input yields an equal fingerprint regardless of ConfigMap map
+// iteration order. The length prefix per doc keeps concatenation unambiguous
+// (so ["a","bc"] and ["ab","c"] differ).
 func fingerprintDocs(docs []string) string {
 	h := sha256.New()
 	var lenbuf [8]byte
@@ -273,9 +276,10 @@ func fingerprintDocs(docs []string) string {
 	return string(h.Sum(nil))
 }
 
-// sortedDataValues returns the ConfigMap data values ordered by key, so rule
-// declaration order (which matters within equal priority) is deterministic
-// across reloads regardless of map iteration order.
+// sortedDataValues returns the ConfigMap data values ordered by key, so
+// document declaration order (which matters for equal-priority WAF rules and
+// for rate-limit evaluation order) is deterministic across reloads regardless
+// of map iteration order.
 func sortedDataValues(data map[string]string) []string {
 	keys := make([]string, 0, len(data))
 	for k := range data {

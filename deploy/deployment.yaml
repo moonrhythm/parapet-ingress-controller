@@ -67,6 +67,10 @@ spec:
         # custom path. Uncomment to enable:
         # - name: WAF_ENABLED
         #   value: "true"
+        # Opt into ConfigMap-driven rate limiting (global + zone sets, the same
+        # label/zone model as the WAF). See RATELIMIT.md. Uncomment to enable:
+        # - name: RATELIMIT_ENABLED
+        #   value: "true"
         ports:
         - name: http
           containerPort: 80

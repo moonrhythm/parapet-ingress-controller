@@ -280,7 +280,9 @@ func (c *fsClient) WatchEndpoints(ctx context.Context, namespace string) (watch.
 
 // GetConfigMaps returns all loaded config maps. The label selector is ignored
 // here (the fs backend has no label index); the controller filters by the
-// parapet.moonrhythm.io/waf label value after listing.
+// label value (parapet.moonrhythm.io/waf, parapet.moonrhythm.io/ratelimit)
+// after listing, so the unfiltered list is safe — unlabeled ConfigMaps fall
+// through each reloader's role switch.
 func (c *fsClient) GetConfigMaps(ctx context.Context, namespace, labelSelector string) ([]v1.ConfigMap, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

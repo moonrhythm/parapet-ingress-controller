@@ -52,6 +52,8 @@ func main() {
 	autoH2C := config.Bool("UPSTREAM_AUTO_H2C")
 	autoH2CTTL := config.DurationDefault("UPSTREAM_AUTO_H2C_TTL", 10*time.Minute)
 
+	rateLimitEnabled := config.Bool("RATELIMIT_ENABLED")
+
 	wafConfig := controller.WAFConfig{
 		Enabled:       config.Bool("WAF_ENABLED"),
 		FailClosed:    config.String("WAF_FAIL_MODE") == "closed",
@@ -136,6 +138,7 @@ func main() {
 		"http_server_max_header_bytes", httpServerMaxHeaderBytes,
 		"load_all_certs", loadAllCerts,
 		"waf_enabled", wafConfig.Enabled,
+		"ratelimit_enabled", rateLimitEnabled,
 	)
 
 	if enableProfiler {
@@ -171,6 +174,8 @@ func main() {
 	ctrl.PodNamespace = podNamespace
 	ctrl.WAFConfig = wafConfig
 	ctrl.InitWAF()
+	ctrl.RateLimitEnabled = rateLimitEnabled
+	ctrl.InitRateLimit()
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)
 	if wafConfig.Enabled {
@@ -179,6 +184,11 @@ func main() {
 	ctrl.Use(plugin.RedirectHTTPS)
 	ctrl.Use(plugin.InjectHSTS)
 	ctrl.Use(plugin.RedirectRules)
+	if rateLimitEnabled {
+		// Zone rate limits run just before the per-ingress annotation limiters:
+		// coarse tenant-wide limits first, then the ingress's own.
+		ctrl.Use(plugin.RateLimitZone(ctrl.LookupRateLimitZone))
+	}
 	ctrl.Use(plugin.RateLimit)
 	ctrl.Use(plugin.BodyLimit)
 	ctrl.Use(plugin.UpstreamProtocol)
@@ -212,6 +222,15 @@ func main() {
 		// counted above, and request.host is already normalized. Per-zone WAF
 		// runs inside the per-ingress chain (plugin.WAFZone).
 		m.Use(ctrl.GlobalWAF())
+	}
+	if rateLimitEnabled {
+		// Global rate limits run after the global WAF, deliberately: WAF-blocked
+		// traffic never burns rate budget, and a rate-limited client can't dodge
+		// the WAF's matching/metrics. (The reverse order would shed limiter
+		// rejections before spending CEL evaluation on them — chosen against.)
+		// Rejections here are access-logged and counted above, like WAF blocks.
+		// Per-zone limits run inside the per-ingress chain (plugin.RateLimitZone).
+		m.Use(ctrl.GlobalRateLimit())
 	}
 	// Forward the resolved GeoIP country/ASN to upstreams. Mounted only when a DB
 	// is loaded (resolver non-nil); runs just before routing so the headers reach

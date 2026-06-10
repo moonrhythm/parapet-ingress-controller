@@ -26,6 +26,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
+	"github.com/moonrhythm/parapet-ingress-controller/ratelimitrule"
 	"github.com/moonrhythm/parapet-ingress-controller/route"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
@@ -85,11 +86,22 @@ type Controller struct {
 	// auto-trust is off. See trust.Manager.WaitReady.
 	WaitTrustReady func()
 
+	// RateLimitEnabled gates the ConfigMap-driven rate limiting (global + zone
+	// sets, mirroring the WAF model). Set before Watch(); when false the feature
+	// does no work: no ConfigMap watch, no mount. See controller_ratelimit.go.
+	RateLimitEnabled bool
+
 	// globalWAF is the always-on baseline firewall; zones holds the tenant zone
 	// registry keyed by <namespace>/<name>, swapped atomically on WAF reload.
 	// WAF reloads are decoupled from the mux — they never rebuild routes.
 	globalWAF *waf.WAF
 	zones     atomic.Pointer[map[string]*waf.WAF]
+
+	// globalRateLimit is the baseline rate-limit set; rlZones holds the tenant
+	// zone registry keyed by <namespace>/<name>, swapped atomically on rate-limit
+	// reload. Decoupled from the mux exactly like the WAF registries.
+	globalRateLimit *ratelimitrule.Limiter
+	rlZones         atomic.Pointer[map[string]*ratelimitrule.Limiter]
 
 	// WAF rule-input fingerprints from the last reload, used to skip recompiling
 	// CEL rulesets whose effective input (the sorted concatenated rule YAML) is
@@ -104,12 +116,21 @@ type Controller struct {
 	globalWAFFingerprint string
 	zoneFingerprints     map[string]string
 
+	// Rate-limit reload state, the exact mirror of the WAF fields above —
+	// rlReloadMu serializes overlapping debounce-fired passes, the fingerprints
+	// skip reapplying unchanged input (which for rate limits also preserves live
+	// counters). Accessed only under rlReloadMu.
+	rlReloadMu          sync.Mutex
+	globalRLFingerprint string
+	rlZoneFingerprints  map[string]string
+
 	// holds current k8s state
-	watchedIngresses  sync.Map
-	watchedServices   sync.Map
-	watchedSecrets    sync.Map
-	watchedEndpoints  sync.Map
-	watchedConfigMaps sync.Map
+	watchedIngresses    sync.Map
+	watchedServices     sync.Map
+	watchedSecrets      sync.Map
+	watchedEndpoints    sync.Map
+	watchedConfigMaps   sync.Map
+	watchedRLConfigMaps sync.Map
 
 	certTable  cert.Table
 	routeTable route.Table
@@ -119,10 +140,11 @@ type Controller struct {
 	plugins []plugin.Plugin
 	health  *healthz.Healthz
 
-	reloadIngressDebounce *debounce.Debounce
-	reloadServiceDebounce *debounce.Debounce
-	reloadSecretDebounce  *debounce.Debounce
-	reloadWAFDebounce     *debounce.Debounce
+	reloadIngressDebounce   *debounce.Debounce
+	reloadServiceDebounce   *debounce.Debounce
+	reloadSecretDebounce    *debounce.Debounce
+	reloadWAFDebounce       *debounce.Debounce
+	reloadRateLimitDebounce *debounce.Debounce
 }
 
 // New creates new ingress controller
@@ -138,6 +160,7 @@ func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl.reloadServiceDebounce = debounce.New(ctrl.reloadServiceDebounced, 300*time.Millisecond)
 	ctrl.reloadSecretDebounce = debounce.New(ctrl.reloadSecretDebounced, 300*time.Millisecond)
 	ctrl.reloadWAFDebounce = debounce.New(ctrl.reloadWAFDebounced, 300*time.Millisecond)
+	ctrl.reloadRateLimitDebounce = debounce.New(ctrl.reloadRateLimitDebounced, 300*time.Millisecond)
 	ctrl.proxy = proxy
 	ctrl.proxy.OnDialError = ctrl.routeTable.MarkBad
 	return ctrl
@@ -168,6 +191,9 @@ func (ctrl *Controller) Watch() {
 	go ctrl.watchEndpoints(ctx)
 	if ctrl.WAFConfig.Enabled {
 		go ctrl.watchConfigMaps(ctx)
+	}
+	if ctrl.RateLimitEnabled {
+		go ctrl.watchRateLimitConfigMaps(ctx)
 	}
 }
 
@@ -231,6 +257,19 @@ func (ctrl *Controller) preloadResources(ctx context.Context) {
 			return nil
 		})
 	}
+
+	if ctrl.RateLimitEnabled {
+		preloadList(ctx, "ratelimit-configmaps", func() error {
+			configmaps, err := k8s.GetConfigMaps(ctx, ctrl.watchNamespace, rateLimitLabelKey)
+			if err != nil {
+				return err
+			}
+			for i := range configmaps {
+				ctrl.watchedRLConfigMaps.Store(configmaps[i].Namespace+"/"+configmaps[i].Name, &configmaps[i])
+			}
+			return nil
+		})
+	}
 }
 
 // preloadList runs fn, retrying with capped exponential backoff on error until it
@@ -267,7 +306,8 @@ func (ctrl *Controller) firstReload() {
 	ctrl.reloadIngressDebounced()
 	ctrl.reloadSecretDebounced()
 	ctrl.reloadEndpointDebounced()
-	ctrl.reloadWAFDebounced() // no-op when WAF disabled
+	ctrl.reloadWAFDebounced()       // no-op when WAF disabled
+	ctrl.reloadRateLimitDebounced() // no-op when rate limiting disabled
 
 	// Edge auto-trust: bounded wait for the edge-CA pool before reporting Ready, so the
 	// edge isn't routed here during the cold-start window. Runs AFTER preload (above), so
