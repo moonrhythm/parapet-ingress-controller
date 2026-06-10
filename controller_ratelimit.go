@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sort"
 
 	"github.com/moonrhythm/parapet"
@@ -21,21 +22,46 @@ import (
 // Kubernetes label selector can't OR two keys; the stores stay separate too.
 const rateLimitLabelKey = "parapet.moonrhythm.io/ratelimit"
 
+// RateLimitConfig configures the ConfigMap-driven rate limiting. It is set on
+// the Controller before Watch(). When Enabled is false the feature does no
+// work: no ConfigMap watch, no mount, no per-request cost.
+type RateLimitConfig struct {
+	Enabled bool
+	// Country resolves the client's ISO country for `country`-keyed limits —
+	// the same GeoIP resolver the WAF uses for request.country. nil makes
+	// SetLimits reject country keys. Set from WAF_GEOIP_DB in main.
+	Country func(*http.Request) string
+	// ASN resolves the client's autonomous system number for `asn`-keyed
+	// limits — the WAF's request.asn resolver. nil makes SetLimits reject asn
+	// keys. Set from WAF_ASN_DB in main.
+	ASN func(*http.Request) int64
+}
+
+// newRateLimiter builds a Limiter wired with the controller's metric observer,
+// host collapser, and GeoIP key resolvers — used for the global instance and
+// every zone, so all sets accept the same key characteristics.
+func (ctrl *Controller) newRateLimiter(namePrefix string) *ratelimitrule.Limiter {
+	return &ratelimitrule.Limiter{
+		NamePrefix: namePrefix,
+		Observe:    observe.RateLimit,
+		// Collapse host bucket keys the router doesn't serve: the global set sees
+		// every request (random-Host floods 404 at the router), and a zone bound
+		// to an ingress with host-less catch-all rules receives any Host too.
+		KnownHost: ctrl.IsKnownHost,
+		Country:   ctrl.RateLimitConfig.Country,
+		ASN:       ctrl.RateLimitConfig.ASN,
+	}
+}
+
 // InitRateLimit builds the global rate-limit instance and the (empty) zone
-// registry. Call after setting RateLimitEnabled and PodNamespace, before
+// registry. Call after setting RateLimitConfig and PodNamespace, before
 // Watch(). No-op when disabled — disabled means no ConfigMap watch, no mount,
 // no per-request work.
 func (ctrl *Controller) InitRateLimit() {
-	if !ctrl.RateLimitEnabled {
+	if !ctrl.RateLimitConfig.Enabled {
 		return
 	}
-	ctrl.globalRateLimit = &ratelimitrule.Limiter{
-		NamePrefix: "global",
-		Observe:    observe.RateLimit,
-		// Collapse host bucket keys the router doesn't serve: the global set sees
-		// every request, including random-Host floods that will 404 at the router.
-		KnownHost: ctrl.IsKnownHost,
-	}
+	ctrl.globalRateLimit = ctrl.newRateLimiter("global")
 	empty := map[string]*ratelimitrule.Limiter{}
 	ctrl.rlZones.Store(&empty)
 	ctrl.rlZoneFingerprints = map[string]string{}
@@ -91,7 +117,7 @@ func (ctrl *Controller) reloadRateLimit() {
 // changed set carries over counters for limits whose shaping config didn't
 // move (SetLimits' per-limit reuse).
 func (ctrl *Controller) reloadRateLimitDebounced() {
-	if !ctrl.RateLimitEnabled || ctrl.globalRateLimit == nil {
+	if !ctrl.RateLimitConfig.Enabled || ctrl.globalRateLimit == nil {
 		return
 	}
 	// Serialize the whole pass: the debounce can fire two passes concurrently
@@ -197,14 +223,7 @@ func (ctrl *Controller) reloadRateLimitDebounced() {
 			continue
 		}
 		if !reused {
-			l = &ratelimitrule.Limiter{
-				NamePrefix: "zone:" + key,
-				Observe:    observe.RateLimit,
-				// Zone traffic usually carries a served Host, but an ingress with
-				// host-less (catch-all) rules routes ANY Host into its zone — so
-				// zones need the unknown-Host collapse as much as the global set.
-				KnownHost: ctrl.IsKnownHost,
-			}
+			l = ctrl.newRateLimiter("zone:" + key)
 		}
 		if limits, err := ratelimitrule.Parse(docs...); err != nil {
 			slog.Error("ratelimit: invalid zone limits, keeping previous", "zone", key, "error", err)

@@ -62,12 +62,14 @@ func main() {
 		InspectBody:   int64(config.Int("WAF_INSPECT_BODY")),
 		DisableMacros: config.Bool("WAF_DISABLE_MACROS"),
 	}
-	// GeoIP databases for the WAF. WAF_GEOIP_DB (request.country) and WAF_ASN_DB
-	// (request.asn) default to the paths baked into the image; set either to a
-	// custom path, or to "" to disable. A missing file at an explicitly-set path
-	// is logged as an error; a missing file at the default path is a quiet no-op
-	// (the DB just wasn't baked). Loading is always non-fatal.
-	if wafConfig.Enabled {
+	// GeoIP databases, shared by the WAF (request.country / request.asn) and by
+	// rate-limit `country` / `asn` keys — loaded when either feature is on.
+	// WAF_GEOIP_DB and WAF_ASN_DB default to the paths baked into the image; set
+	// either to a custom path, or to "" to disable. A missing file at an
+	// explicitly-set path is logged as an error; a missing file at the default
+	// path is a quiet no-op (the DB just wasn't baked). Loading is always
+	// non-fatal.
+	if wafConfig.Enabled || rateLimitEnabled {
 		// dbPath returns (path, explicit): the env value when set ("" disables),
 		// else the baked default (a missing default file is not an error).
 		dbPath := func(env, def string) (string, bool) {
@@ -81,13 +83,13 @@ func main() {
 			db, err := geoip.Open(path)
 			switch {
 			case err != nil && explicit:
-				slog.Error("waf: can not open geoip database; request.country will be empty",
+				slog.Error("geoip: can not open country database; request.country will be empty and ratelimit country keys are rejected",
 					"path", path, "error", err)
 			case err != nil:
-				slog.Debug("waf: no geoip database at default path; request.country disabled",
+				slog.Debug("geoip: no country database at default path; country lookups disabled",
 					"path", path)
 			default:
-				slog.Info("waf: geoip database loaded", "path", path)
+				slog.Info("geoip: country database loaded", "path", path)
 				wafConfig.Country = func(r *http.Request) string {
 					// CountryCached memoizes by client IP so repeat IPs skip the
 					// mmdb lookup; semantics are identical to db.Country.
@@ -103,13 +105,13 @@ func main() {
 			db, err := geoip.OpenASN(path)
 			switch {
 			case err != nil && explicit:
-				slog.Error("waf: can not open asn database; request.asn will be 0",
+				slog.Error("geoip: can not open asn database; request.asn will be 0 and ratelimit asn keys are rejected",
 					"path", path, "error", err)
 			case err != nil:
-				slog.Debug("waf: no asn database at default path; request.asn disabled",
+				slog.Debug("geoip: no asn database at default path; asn lookups disabled",
 					"path", path)
 			default:
-				slog.Info("waf: asn database loaded", "path", path)
+				slog.Info("geoip: asn database loaded", "path", path)
 				wafConfig.ASN = func(r *http.Request) int64 {
 					// ASNCached memoizes by client IP so repeat IPs skip the mmdb
 					// lookup and the per-call strconv.ParseInt; semantics are
@@ -174,7 +176,15 @@ func main() {
 	ctrl.PodNamespace = podNamespace
 	ctrl.WAFConfig = wafConfig
 	ctrl.InitWAF()
-	ctrl.RateLimitEnabled = rateLimitEnabled
+	ctrl.RateLimitConfig = controller.RateLimitConfig{
+		Enabled: rateLimitEnabled,
+		// The WAF's GeoIP resolvers double as the ratelimit country/asn key
+		// resolvers (nil when the DB isn't loaded — SetLimits then rejects
+		// limits using those keys, loudly, instead of bucketing everyone
+		// together).
+		Country: wafConfig.Country,
+		ASN:     wafConfig.ASN,
+	}
 	ctrl.InitRateLimit()
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)

@@ -18,7 +18,7 @@ import (
 func newRLController() *Controller {
 	ctrl := New("", proxy.New())
 	ctrl.PodNamespace = "ctrl-ns"
-	ctrl.RateLimitEnabled = true
+	ctrl.RateLimitConfig = RateLimitConfig{Enabled: true}
 	ctrl.InitRateLimit()
 	return ctrl
 }
@@ -480,4 +480,58 @@ limits:
 	}
 	assert.True(t, names["global:glimit"], "global limits emit name=global:<id> (got %v)", names)
 	assert.True(t, names["zone:metrics-ns/mz:zlimit"], "zone limits emit name=zone:<ns>/<name>:<id> (got %v)", names)
+}
+
+func TestReloadRateLimit_GeoKeyResolversWired(t *testing.T) {
+	t.Parallel()
+
+	// RateLimitConfig's GeoIP resolvers must flow into the global limiter AND
+	// zone limiters, so asn/country keys compile; without them SetLimits
+	// rejects such limits (keep-last-good) instead of bucketing everyone
+	// together.
+	const asnLimit = `
+limits:
+  - id: per-asn
+    key: asn
+    rate: 1
+    window: 1h
+`
+	ctrl := newRLController() // no resolvers wired
+	ctrl.watchedRLConfigMaps.Store("cust1/acme", rlCM("cust1", "acme", roleZone, asnLimit))
+	ctrl.reloadRateLimitDebounced()
+	zone := ctrl.LookupRateLimitZone("cust1/acme")
+	require.NotNil(t, zone)
+	assert.Empty(t, zone.IDs(), "asn key without a resolver is rejected (zone enforces nothing rather than mis-bucketing)")
+
+	ctrl2 := New("", proxy.New())
+	ctrl2.PodNamespace = "ctrl-ns"
+	ctrl2.RateLimitConfig = RateLimitConfig{
+		Enabled: true,
+		ASN:     func(*http.Request) int64 { return 64500 },
+		Country: func(*http.Request) string { return "TH" },
+	}
+	ctrl2.InitRateLimit()
+	ctrl2.watchedRLConfigMaps.Store("cust1/acme", rlCM("cust1", "acme", roleZone, asnLimit))
+	ctrl2.watchedRLConfigMaps.Store("ctrl-ns/rl", rlCM("ctrl-ns", "rl", roleGlobal, `
+limits:
+  - id: per-country
+    key: country
+    rate: 1
+    window: 1h
+`))
+	ctrl2.reloadRateLimitDebounced()
+	require.Equal(t, []string{"per-asn"}, ctrl2.LookupRateLimitZone("cust1/acme").IDs())
+	require.Equal(t, []string{"per-country"}, ctrl2.globalRateLimit.IDs())
+
+	// Everyone resolves to the same ASN -> one shared bucket: second request 429.
+	zone2 := ctrl2.LookupRateLimitZone("cust1/acme")
+	do := func() bool {
+		r := httptest.NewRequest(http.MethodGet, "http://app/", nil)
+		w := httptest.NewRecorder()
+		var called bool
+		zone2.Serve(w, r, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+		return called
+	}
+	assert.True(t, do())
+	assert.False(t, do(), "asn key resolves through the wired resolver")
 }

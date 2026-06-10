@@ -22,6 +22,34 @@ type Document struct {
 	Limits []Limit `yaml:"limits"`
 }
 
+// Keys is a limit's bucket-dimension spec: one or more characteristics whose
+// per-request values compose into the bucket key. YAML accepts a scalar
+// ("key: ip", "key: header:x-api-key") or a sequence
+// ("key: [ip, header:x-api-key]").
+type Keys []string
+
+// UnmarshalYAML accepts a scalar (one characteristic) or a sequence.
+func (k *Keys) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var s string
+		if err := value.Decode(&s); err != nil {
+			return err
+		}
+		*k = Keys{s}
+		return nil
+	case yaml.SequenceNode:
+		var ss []string
+		if err := value.Decode(&ss); err != nil {
+			return err
+		}
+		*k = ss
+		return nil
+	default:
+		return fmt.Errorf("key must be a string or a list of strings")
+	}
+}
+
 // Limit is one rate limit. Defaults and enums are resolved/validated by
 // Limiter.SetLimits, not here.
 type Limit struct {
@@ -29,9 +57,11 @@ type Limit struct {
 	// must be unique, at most 63 chars, and use only [A-Za-z0-9._-] (a "/" or ":"
 	// would make the parapet_ratelimit_total name ambiguous).
 	ID string `yaml:"id"`
-	// Key selects the bucket dimension: "ip" (default; IPv6 aggregated per /64),
-	// "host", or "ip-host".
-	Key string `yaml:"key"`
+	// Key lists the characteristics composed into the bucket key (default
+	// ["ip"]): "ip" (IPv6 aggregated per /64), "host", "asn" / "country"
+	// (GeoIP; require the resolver to be wired), "header:<name>",
+	// "cookie:<name>". "ip-host" is an alias for ip + host.
+	Key Keys `yaml:"key"`
 	// Rate is the max requests admitted per Window per key. Required, > 0.
 	Rate int `yaml:"rate"`
 	// Window is a Go duration string ("10s", "1m", "1h"), bounded to 1s..1h. The

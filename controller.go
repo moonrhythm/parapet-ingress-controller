@@ -86,10 +86,11 @@ type Controller struct {
 	// auto-trust is off. See trust.Manager.WaitReady.
 	WaitTrustReady func()
 
-	// RateLimitEnabled gates the ConfigMap-driven rate limiting (global + zone
-	// sets, mirroring the WAF model). Set before Watch(); when false the feature
-	// does no work: no ConfigMap watch, no mount. See controller_ratelimit.go.
-	RateLimitEnabled bool
+	// RateLimitConfig configures the ConfigMap-driven rate limiting (global +
+	// zone sets, mirroring the WAF model). Set before Watch(); when disabled the
+	// feature does no work: no ConfigMap watch, no mount. See
+	// controller_ratelimit.go.
+	RateLimitConfig RateLimitConfig
 
 	// globalWAF is the always-on baseline firewall; zones holds the tenant zone
 	// registry keyed by <namespace>/<name>, swapped atomically on WAF reload.
@@ -192,7 +193,7 @@ func (ctrl *Controller) Watch() {
 	if ctrl.WAFConfig.Enabled {
 		go ctrl.watchConfigMaps(ctx)
 	}
-	if ctrl.RateLimitEnabled {
+	if ctrl.RateLimitConfig.Enabled {
 		go ctrl.watchRateLimitConfigMaps(ctx)
 	}
 }
@@ -258,7 +259,7 @@ func (ctrl *Controller) preloadResources(ctx context.Context) {
 		})
 	}
 
-	if ctrl.RateLimitEnabled {
+	if ctrl.RateLimitConfig.Enabled {
 		preloadList(ctx, "ratelimit-configmaps", func() error {
 			configmaps, err := k8s.GetConfigMaps(ctx, ctrl.watchNamespace, rateLimitLabelKey)
 			if err != nil {

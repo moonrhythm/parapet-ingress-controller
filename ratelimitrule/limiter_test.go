@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -86,7 +87,24 @@ func TestLimiter_SetLimitsValidation(t *testing.T) {
 		{"id too long", func(l *ratelimitrule.Limit) {
 			l.ID = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" // 64
 		}},
-		{"unknown key", func(l *ratelimitrule.Limit) { l.Key = "header" }},
+		{"unknown key", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"token"} }},
+		{"bare header key without name", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"header"} }},
+		{"header key with empty name", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"header:"} }},
+		{"header key with invalid name", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"header:x api key"} }},
+		{"cookie key without name", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"cookie"} }},
+		{"duplicate key part", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"ip", "ip"} }},
+		{"ip-host overlapping ip", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"ip-host", "ip"} }},
+		{"asn key without resolver", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"asn"} }},
+		{"country key without resolver", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"country"} }},
+		// "country:US" reads like filter syntax ("limit US clients") but names are
+		// only valid on header/cookie — silently compiling it as a plain
+		// per-country limit on ALL traffic would be a misconfiguration trap.
+		{"name suffix on ip", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"ip:1.2.3.4"} }},
+		{"name suffix on host", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"host:example.com"} }},
+		{"name suffix on ip-host", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"ip-host:x"} }},
+		{"name suffix on country", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"country:US"} }},
+		{"name suffix on asn", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"asn:13335"} }},
+		{"uppercase kind", func(l *ratelimitrule.Limit) { l.Key = ratelimitrule.Keys{"IP"} }},
 		{"zero rate", func(l *ratelimitrule.Limit) { l.Rate = 0 }},
 		{"negative rate", func(l *ratelimitrule.Limit) { l.Rate = -5 }},
 		{"missing window", func(l *ratelimitrule.Limit) { l.Window = "" }},
@@ -143,7 +161,7 @@ func TestLimiter_NormalizedDefaults(t *testing.T) {
 	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{limit("a", 5, "1m")}))
 	got := l.Limits()
 	require.Len(t, got, 1)
-	assert.Equal(t, "ip", got[0].Key)
+	assert.Equal(t, ratelimitrule.Keys{"ip"}, got[0].Key)
 	assert.Equal(t, "fixed", got[0].Algorithm)
 	assert.Equal(t, "enforce", got[0].Mode)
 	assert.Equal(t, http.StatusTooManyRequests, got[0].Status)
@@ -267,7 +285,7 @@ func TestLimiter_HostKeyCollapsesUnknownHosts(t *testing.T) {
 		KnownHost: func(host string) bool { return host == "a.example.com" },
 	}
 	lim := limit("a", 1, "1h")
-	lim.Key = "host"
+	lim.Key = ratelimitrule.Keys{"host"}
 	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
 
 	take := func(host string) bool {
@@ -290,7 +308,7 @@ func TestLimiter_IPHostKey(t *testing.T) {
 
 	l := &ratelimitrule.Limiter{}
 	lim := limit("a", 1, "1h")
-	lim.Key = "ip-host"
+	lim.Key = ratelimitrule.Keys{"ip-host"}
 	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
 
 	take := func(ip, host string) bool {
@@ -471,7 +489,7 @@ func TestLimiter_HostKeyedExcludeStillResolvesIP(t *testing.T) {
 	// silently dead and health checkers start getting limited.
 	l := &ratelimitrule.Limiter{}
 	lim := limit("a", 1, "1h")
-	lim.Key = "host"
+	lim.Key = ratelimitrule.Keys{"host"}
 	lim.Exclude = []string{"10.0.0.0/8"}
 	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
 
@@ -518,7 +536,7 @@ func TestLimiter_IPHostKeyCollapsesUnknownHosts(t *testing.T) {
 		KnownHost: func(host string) bool { return host == "a.example.com" },
 	}
 	lim := limit("a", 1, "1h")
-	lim.Key = "ip-host"
+	lim.Key = ratelimitrule.Keys{"ip-host"}
 	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
 
 	take := func(ip, host string) bool {
@@ -536,4 +554,167 @@ func TestLimiter_IPHostKeyCollapsesUnknownHosts(t *testing.T) {
 		"unknown hosts collapse inside the ip-host composite too")
 	assert.True(t, take("1.2.3.4", "a.example.com"), "the known host keeps its own composite bucket")
 	assert.True(t, take("5.6.7.8", "rnd3.attacker.test"), "a different IP is still a fresh bucket")
+}
+
+func TestLimiter_ASNAndCountryKeys(t *testing.T) {
+	t.Parallel()
+
+	// Resolvers keyed off X-Real-Ip stand in for the GeoIP DBs: the whole
+	// 1.1.1.0/24 "network" maps to one ASN/country, everything else to another.
+	l := &ratelimitrule.Limiter{
+		ASN: func(r *http.Request) int64 {
+			if strings.HasPrefix(r.Header.Get("X-Real-Ip"), "1.1.1.") {
+				return 13335
+			}
+			return 64500
+		},
+		Country: func(r *http.Request) string {
+			if strings.HasPrefix(r.Header.Get("X-Real-Ip"), "1.1.1.") {
+				return "AU"
+			}
+			return "TH"
+		},
+	}
+	asnLim := limit("per-asn", 1, "1h")
+	asnLim.Key = ratelimitrule.Keys{"asn"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{asnLim}))
+
+	assert.True(t, func() bool {
+		_, c := serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": "1.1.1.1"})
+		return c
+	}())
+	_, called := serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": "1.1.1.2"})
+	assert.False(t, called, "different IPs in the same ASN share the asn bucket")
+	_, called = serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": "8.8.8.8"})
+	assert.True(t, called, "another ASN is a fresh bucket")
+
+	countryLim := limit("per-country", 1, "1h")
+	countryLim.Key = ratelimitrule.Keys{"country"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{countryLim}))
+
+	assert.True(t, func() bool {
+		_, c := serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": "1.1.1.1"})
+		return c
+	}())
+	_, called = serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": "1.1.1.1"})
+	assert.False(t, called, "same country shares the bucket")
+	_, called = serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": "8.8.8.8"})
+	assert.True(t, called, "another country is a fresh bucket")
+}
+
+func TestLimiter_HeaderKey(t *testing.T) {
+	t.Parallel()
+
+	l := &ratelimitrule.Limiter{}
+	lim := limit("per-token", 1, "1h")
+	lim.Key = ratelimitrule.Keys{"header:X-Api-Key"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
+
+	take := func(hdr map[string]string) bool {
+		_, called := serve(l, http.MethodGet, "/", hdr)
+		return called
+	}
+
+	assert.True(t, take(map[string]string{"X-Api-Key": "alice"}))
+	assert.False(t, take(map[string]string{"x-api-key": "alice"}),
+		"header names are case-insensitive: same value shares the bucket")
+	assert.True(t, take(map[string]string{"X-Api-Key": "bob"}), "another value is a fresh bucket")
+
+	assert.True(t, take(nil))
+	assert.False(t, take(map[string]string{"Other": "x"}), "requests without the header share one bucket")
+
+	// Values past the cap share their prefix's bucket (conservative).
+	long := strings.Repeat("a", 200)
+	assert.True(t, take(map[string]string{"X-Api-Key": long}))
+	assert.False(t, take(map[string]string{"X-Api-Key": long + "-different-tail"}),
+		"over-long values are truncated into their prefix's bucket")
+}
+
+func TestLimiter_CookieKey(t *testing.T) {
+	t.Parallel()
+
+	l := &ratelimitrule.Limiter{}
+	lim := limit("per-session", 1, "1h")
+	lim.Key = ratelimitrule.Keys{"cookie:sid"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
+
+	take := func(cookie string) bool {
+		hdr := map[string]string{}
+		if cookie != "" {
+			hdr["Cookie"] = cookie
+		}
+		_, called := serve(l, http.MethodGet, "/", hdr)
+		return called
+	}
+
+	assert.True(t, take("sid=alice"))
+	assert.False(t, take("sid=alice; other=1"), "same cookie value shares the bucket")
+	assert.True(t, take("sid=bob"), "another value is a fresh bucket")
+	assert.True(t, take(""))
+	assert.False(t, take("other=1"), "requests without the cookie share one bucket")
+
+	// Cookie names are case-SENSITIVE (matching http.Request.Cookie), unlike
+	// header names: a cookie:SID limit must not see sid= cookies.
+	upperName := limit("per-SID", 1, "1h")
+	upperName.Key = ratelimitrule.Keys{"cookie:SID"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{upperName}))
+	assert.True(t, take("sid=alice"))
+	assert.False(t, take("sid=bob"), "sid= cookies all land in the missing-SID shared bucket")
+	assert.True(t, take("SID=alice"), "an exact-case SID cookie is its own bucket")
+}
+
+func TestLimiter_CompositeKey(t *testing.T) {
+	t.Parallel()
+
+	l := &ratelimitrule.Limiter{}
+	lim := limit("ip-and-token", 1, "1h")
+	lim.Key = ratelimitrule.Keys{"ip", "header:X-Api-Key"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
+
+	take := func(ip, token string) bool {
+		_, called := serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": ip, "X-Api-Key": token})
+		return called
+	}
+
+	assert.True(t, take("1.2.3.4", "alice"))
+	assert.False(t, take("1.2.3.4", "alice"), "same composite shares the bucket")
+	assert.True(t, take("1.2.3.4", "bob"), "same IP, other token: fresh bucket")
+	assert.True(t, take("5.6.7.8", "alice"), "other IP, same token: fresh bucket")
+}
+
+func TestLimiter_KeyNormalizationCarriesCountersOver(t *testing.T) {
+	t.Parallel()
+
+	// Different spellings of the same key spec must produce the same cfgKey, so
+	// a cosmetic re-spelling doesn't reset live counters.
+	l := &ratelimitrule.Limiter{}
+	lim := limit("a", 1, "1h")
+	lim.Key = ratelimitrule.Keys{"ip-host"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
+
+	hdr := map[string]string{"X-Real-Ip": "1.2.3.4"}
+	_, called := serve(l, http.MethodGet, "/", hdr)
+	require.True(t, called)
+	_, called = serve(l, http.MethodGet, "/", hdr)
+	require.False(t, called, "budget spent")
+
+	respelled := limit("a", 1, "1h")
+	respelled.Key = ratelimitrule.Keys{"ip", "host"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{respelled}))
+	_, called = serve(l, http.MethodGet, "/", hdr)
+	assert.False(t, called, "ip-host alias and [ip, host] share a cfgKey: counters carried over")
+
+	hl := limit("b", 1, "1h")
+	hl.Key = ratelimitrule.Keys{"header:X-API-Key"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{hl}))
+	_, called = serve(l, http.MethodGet, "/", map[string]string{"X-Api-Key": "k"})
+	require.True(t, called)
+	_, called = serve(l, http.MethodGet, "/", map[string]string{"X-Api-Key": "k"})
+	require.False(t, called)
+
+	hlLower := limit("b", 1, "1h")
+	hlLower.Key = ratelimitrule.Keys{"header:x-api-key"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{hlLower}))
+	_, called = serve(l, http.MethodGet, "/", map[string]string{"X-Api-Key": "k"})
+	assert.False(t, called, "header-name case is normalized: counters carried over")
 }

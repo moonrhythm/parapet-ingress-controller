@@ -2,8 +2,8 @@
 
 Request-rate limiting in the request path, with a **global** baseline set
 (platform-owned) plus opt-in **zones** (tenant-owned) that an ingress binds by
-reference — the same Cloudflare-style zone model as the [WAF](WAF.md), under its
-own marker label. Strategies build on `parapet/pkg/ratelimit`; the parser and
+reference — the same zone model as the [WAF](WAF.md), under its own marker
+label. Strategies build on `parapet/pkg/ratelimit`; the parser and
 runtime live in [`ratelimitrule/`](ratelimitrule/).
 
 > Status: **implemented** in the Go controller (`controller_ratelimit.go`,
@@ -29,7 +29,8 @@ multiple global ConfigMaps) are concatenated in deterministic (sorted) order.
 ```yaml
 limits:
   - id: per-ip              # required; unique in the set; [A-Za-z0-9._-], <= 63 chars
-    key: ip                 # ip (default) | host | ip-host
+    key: ip                 # one characteristic, or a list composed into one bucket key:
+                            #   key: [ip, header:x-api-key]
     rate: 100               # required; admitted requests per window per bucket
     window: 1m              # required; Go duration, 1s..1h
     algorithm: fixed        # fixed (default) | sliding
@@ -40,18 +41,30 @@ limits:
       - 10.0.0.0/8
 ```
 
-- **`key`** picks the bucket dimension:
-  - `ip` — the client IP (parapet's trusted `X-Real-IP`, so it honors
-    `TRUST_PROXY`). IPv4 buckets per address; **IPv6 buckets per /64** so one
-    eyeball network can't mint unbounded keys. An unparsable value buckets by
-    its raw string.
-  - `host` — the request Host (already lowercased and port-stripped). Hosts
-    the router doesn't serve collapse into one shared bucket, so a random-Host
-    flood can't inflate the map (such requests 404 anyway). This applies to the
-    global set (which sees every request) and to zones — relevant when a zone
-    is bound to an ingress with host-less (catch-all) rules, which route any
-    Host.
-  - `ip-host` — both, e.g. "100 req/min per IP per site".
+- **`key`** lists the characteristics whose per-request values compose into the
+  bucket key (default `ip`; a YAML scalar is one characteristic, a list is a
+  composite — e.g. `[ip, header:x-api-key]` = "per IP per API key"):
+
+  | Characteristic | Bucket value | Cardinality |
+  |---|---|---|
+  | `ip` | client IP from parapet's trusted `X-Real-IP` (honors `TRUST_PROXY`); IPv4 per address, **IPv6 per /64** so one eyeball network can't mint unbounded keys; an unparsable value buckets by its raw string | bounded by real clients |
+  | `host` | request Host (lowercased, port-stripped); hosts the router doesn't serve collapse into one shared bucket — applies to the global set and to zones bound to host-less catch-all rules | bounded by served hosts + 1 |
+  | `asn` | the client's autonomous system number (the WAF's `request.asn` GeoIP resolver); requires the ASN DB (`WAF_ASN_DB`) — **rejected at load when it isn't available**, since every client would silently share one bucket | bounded (~100k ASNs) |
+  | `country` | the client's ISO country (the WAF's `request.country` resolver, `XX` when unplaceable); requires the GeoIP DB (`WAF_GEOIP_DB`), rejected at load without it | bounded (~250) |
+  | `header:<name>` | the named request header's value (first value, case-insensitive name); missing header ⇒ one shared `""` bucket | **client-controlled — see warning** |
+  | `cookie:<name>` | the named cookie's value (case-sensitive name, like `http.Request.Cookie`); missing ⇒ shared `""` bucket | **client-controlled — see warning** |
+
+  `ip-host` is kept as an alias for `[ip, host]`. Duplicate characteristics in
+  one key are rejected. Header/cookie values are truncated to 128 bytes for the
+  bucket key (over-long values share their prefix's bucket — conservative).
+
+  ⚠️ **`header`/`cookie` cardinality warning**: unlike every other
+  characteristic, the bucket value is freely mintable by clients — an attacker
+  can send a new value per request and hold one map entry each until the
+  window retires it (~1–2 windows). Use them for values your edge can vouch
+  for (API keys behind auth, session cookies), keep windows short, and ship
+  `mode: shadow` first. The `asn`/`country` keys exist precisely as the
+  bounded alternatives for "group clients coarser than per-IP".
 - **`window`** is capped at **1h** deliberately: a limiter holds every distinct
   bucket key seen within ~1–2 windows in memory, so the cap bounds the worst
   case to what the pre-existing per-hour annotation limiter already allowed.
@@ -206,7 +219,8 @@ its last generations until the next request or until its zone is deleted.
   hits** are served without reaching the controller — uncounted and unlimited.
 - **No request matching.** Limits apply to every request on the bound scope;
   path/header conditions are the WAF's job (CEL), not a second expression
-  language here. Likely v2 keys: `none` (one aggregate bucket), `header:<x>`.
+  language here. (Keying — who shares a bucket — is the `key` characteristics
+  above; a likely v2 addition is `none`, one aggregate bucket per limit.)
 - **No concurrency strategies.** In-flight caps stay with the env-configured
   host limiters (`Put`/release semantics don't fit the zone model's
   hot-swapped, take-only chain).

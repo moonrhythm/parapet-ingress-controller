@@ -121,9 +121,11 @@ Full design in **[RATELIMIT.md](RATELIMIT.md)**. Summary: gated by
 plus tenant zones (labeled `…/ratelimit: zone`, zone id = ConfigMap name),
 bound per-Ingress by `ratelimit-zone` — **same-namespace only**, a deliberate
 divergence from `waf-zone` because zones carry shared counter state. Limits
-are `id`/`key` (ip, host, ip-host) / `rate`+`window` (1s..1h) /
-`algorithm` (fixed, sliding) / `mode` (enforce, shadow) / `status` (429, 503) /
-`exclude` CIDRs. Reloads are debounced, mux-decoupled, all-or-nothing
+are `id`/`key` (a characteristic or a composite list: `ip`, `host`, `asn`,
+`country`, `header:<name>`, `cookie:<name>`; the GeoIP-backed keys require the
+`WAF_GEOIP_DB`/`WAF_ASN_DB` databases, which load when either the WAF or rate
+limiting is enabled) / `rate`+`window` (1s..1h) / `algorithm` (fixed, sliding)
+/ `mode` (enforce, shadow) / `status` (429, 503) / `exclude` CIDRs. Reloads are debounced, mux-decoupled, all-or-nothing
 (last-good kept), and preserve live counters for limits whose shaping config
 didn't change. `/.well-known/acme-challenge` is never limited. Counters are
 per-pod; the edge proxy does not enforce these limits and edge cache hits
@@ -218,8 +220,8 @@ invariants:
 | `RATELIMIT_ENABLED` | `false` | **Go-only** | Master switch for ConfigMap-driven rate limiting (global + zone sets; see [RATELIMIT.md](RATELIMIT.md)) |
 | `WAF_FAIL_MODE` | `open` | both | `open` (skip on rule error) / `closed` (500) |
 | `WAF_EVAL_TIMEOUT` | `5ms` | both | Per-request ruleset deadline |
-| `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | both | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); sets `request.country`. Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.country` `""`); a missing explicit path is an error |
-| `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | both | Path to an IPLocate ip-to-asn `.mmdb` (flat string `asn`); sets `request.asn`. Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.asn` `0`); a missing explicit path is an error |
+| `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | both | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); sets `request.country` and serves rate-limit `country` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.country` `""`); a missing explicit path is an error |
+| `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | both | Path to an IPLocate ip-to-asn `.mmdb` (flat string `asn`); sets `request.asn` and serves rate-limit `asn` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.asn` `0`); a missing explicit path is an error |
 | `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | **Go-only** | Max header size (no Pingora 0.8 equivalent) |
 | `TR_MAX_CONNS_PER_HOST` | stdlib | **Go-only** | Max conns per host (no Pingora 0.8 equivalent) |
 | `PROFILER` / `PROFILER_NAME` | `false` | **Go-only** | Cloud Profiler (no Rust SDK) |

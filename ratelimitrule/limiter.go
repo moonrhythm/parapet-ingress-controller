@@ -45,13 +45,41 @@ const (
 // a single /64 can't mint 2^64 distinct keys against an ip-keyed limit.
 var ipv6Mask = net.CIDRMask(64, 128)
 
+// maxKeyPartLen caps a header/cookie value's contribution to the bucket key.
+// Values past the cap share a bucket with their 128-byte prefix — conservative
+// (never relaxes a limit) — and a client can't inflate per-entry memory with
+// megabyte header values. Entry COUNT for these client-controlled
+// characteristics is still unbounded within the window retention; see the
+// cardinality warning in RATELIMIT.md.
+const maxKeyPartLen = 128
+
+// keyKind is one bucket characteristic. A limit's bucket key is the
+// "\n"-joined composition of its parts' per-request values. The composition is
+// injective for reachable inputs — but NOT because no part can contain a
+// newline: raw IP bytes can (any octet 0x0A, e.g. 10.x.x.x). It holds because
+// every OTHER part value is newline-free (Go's server rejects control bytes in
+// Host/header/cookie values; ASN/country are formatted), a limit's part list
+// is fixed, and duplicate parts are rejected — so the newline-free parts
+// anchor unambiguous boundaries around the at-most-variable IP part. Even a
+// hypothetical collision would only share a bucket (a stricter limit), never
+// cross a security boundary. Re-derive this argument before adding a part
+// kind whose value can carry raw bytes.
 type keyKind uint8
 
 const (
 	keyIP keyKind = iota
 	keyHost
-	keyIPHost
+	keyASN
+	keyCountry
+	keyHeader
+	keyCookie
 )
+
+// keyPart is one compiled characteristic; name carries the header/cookie name.
+type keyPart struct {
+	kind keyKind
+	name string
+}
 
 type mode uint8
 
@@ -65,7 +93,7 @@ const (
 // published.
 type compiledLimit struct {
 	id       string
-	key      keyKind
+	keyParts []keyPart
 	strategy ratelimit.Strategy
 	mode     mode
 	status   int
@@ -83,10 +111,13 @@ type compiledLimit struct {
 // The request path loads the pointer exactly once per request and evaluates
 // that whole set, so a mid-request swap can't mix old and new limits.
 type set struct {
-	limits    []compiledLimit
-	source    []Limit // normalized input, for introspection
-	needsIP   bool    // any limit keys on ip or carries an exclude list
-	knownHost func(host string) bool
+	limits      []compiledLimit
+	source      []Limit // normalized input, for introspection
+	needsIP     bool    // any limit keys on ip or carries an exclude list
+	needsCookie bool    // any limit keys on a cookie
+	knownHost   func(host string) bool
+	country     func(*http.Request) string // nil only when no limit keys on country
+	asn         func(*http.Request) int64  // nil only when no limit keys on asn
 }
 
 // Limiter is a hot-swappable set of rate limits — the runtime for both the
@@ -116,6 +147,17 @@ type Limiter struct {
 	// Host, but an ingress with host-less (catch-all) rules routes ANY Host into
 	// its zone, so an unwired zone would be unbounded-key mintable.
 	KnownHost func(host string) bool
+
+	// Country resolves the client's ISO country for `country` keys (the same
+	// GeoIP resolver the WAF uses for request.country). nil makes SetLimits
+	// reject country-keyed limits: without a resolver every client would share
+	// one bucket, silently turning the limit into an aggregate cap.
+	Country func(*http.Request) string
+
+	// ASN resolves the client's autonomous system number for `asn` keys (the
+	// WAF's request.asn resolver). nil makes SetLimits reject asn-keyed limits,
+	// for the same reason as Country.
+	ASN func(*http.Request) int64
 }
 
 // Limits returns the normalized limits of the live set (defaults resolved), in
@@ -192,13 +234,23 @@ func (l *Limiter) SetLimits(limits []Limit) error {
 		limits:    compiled,
 		source:    source,
 		knownHost: l.KnownHost,
+		country:   l.Country,
+		asn:       l.ASN,
 	}
 	for i := range compiled {
-		// The exclude clause matters on its own: a host-keyed limit's exclude
-		// list still needs the client IP resolved, or it would silently never
-		// match (skip sees a nil IP).
-		if compiled[i].key != keyHost || len(compiled[i].exclude) > 0 {
+		// The exclude clause matters on its own: a limit without an ip part
+		// still needs the client IP resolved for its exclude list, or it would
+		// silently never match (skip sees a nil IP).
+		if len(compiled[i].exclude) > 0 {
 			s.needsIP = true
+		}
+		for _, p := range compiled[i].keyParts {
+			switch p.kind {
+			case keyIP:
+				s.needsIP = true
+			case keyCookie:
+				s.needsCookie = true
+			}
 		}
 	}
 	l.set.Store(s)
@@ -214,17 +266,9 @@ func (l *Limiter) compileLimit(lim Limit) (compiledLimit, Limit, error) {
 		errs = append(errs, err)
 	}
 
-	var kind keyKind
-	switch lim.Key {
-	case "", "ip":
-		kind, lim.Key = keyIP, "ip"
-	case "host":
-		kind = keyHost
-	case "ip-host":
-		kind = keyIPHost
-	default:
-		errs = append(errs, fmt.Errorf("unknown key %q (want ip|host|ip-host)", lim.Key))
-	}
+	parts, normKeys, keyErrs := l.compileKeys(lim.Key)
+	errs = append(errs, keyErrs...)
+	lim.Key = normKeys
 
 	if lim.Rate <= 0 {
 		errs = append(errs, fmt.Errorf("rate must be > 0 (got %d)", lim.Rate))
@@ -291,13 +335,15 @@ func (l *Limiter) compileLimit(lim Limit) (compiledLimit, Limit, error) {
 	}
 
 	c := compiledLimit{
-		id:      lim.ID,
-		key:     kind,
-		mode:    m,
-		status:  lim.Status,
-		message: lim.Message,
-		exclude: exclude,
-		cfgKey:  lim.Key + "|" + lim.Algorithm + "|" + strconv.Itoa(lim.Rate) + "|" + lim.Window,
+		id:       lim.ID,
+		keyParts: parts,
+		mode:     m,
+		status:   lim.Status,
+		message:  lim.Message,
+		exclude:  exclude,
+		// Normalized key parts can't contain "," (header/cookie names are HTTP
+		// tokens, which exclude it), so the join is unambiguous.
+		cfgKey: strings.Join(lim.Key, ",") + "|" + lim.Algorithm + "|" + strconv.Itoa(lim.Rate) + "|" + lim.Window,
 	}
 	if lim.Algorithm == "sliding" {
 		c.strategy = newSlidingWindow(lim.Rate, window)
@@ -308,6 +354,107 @@ func (l *Limiter) compileLimit(lim Limit) (compiledLimit, Limit, error) {
 		c.observe = l.Observe(l.NamePrefix + ":" + lim.ID)
 	}
 	return c, lim, nil
+}
+
+// compileKeys validates and normalizes a limit's key spec into compiled parts.
+// An empty spec defaults to ["ip"]; the "ip-host" alias expands to ip + host.
+// Returned normKeys is the canonical form (lowercased header names, alias
+// expanded) — it feeds cfgKey, so spec spellings that mean the same thing
+// carry counters over across reloads.
+func (l *Limiter) compileKeys(keys Keys) (parts []keyPart, normKeys Keys, errs []error) {
+	if len(keys) == 0 {
+		keys = Keys{"ip"}
+	}
+	seen := map[string]struct{}{}
+	add := func(norm string, p keyPart) {
+		if _, dup := seen[norm]; dup {
+			errs = append(errs, fmt.Errorf("duplicate key part %q", norm))
+			return
+		}
+		seen[norm] = struct{}{}
+		parts = append(parts, p)
+		normKeys = append(normKeys, norm)
+	}
+	for _, k := range keys {
+		name := ""
+		hasName := false
+		if i := strings.IndexByte(k, ':'); i >= 0 {
+			k, name = k[:i], k[i+1:]
+			hasName = true
+		}
+		// Only header/cookie take a :<name> suffix. Anything else is rejected
+		// loudly: "country:US" or "host:example.com" read like filter syntax but
+		// would otherwise silently compile as a plain per-country/per-host limit
+		// on ALL traffic.
+		if hasName {
+			switch k {
+			case "header", "cookie":
+			default:
+				errs = append(errs, fmt.Errorf("key %q does not take a :<name> suffix (got %q)", k, name))
+				continue
+			}
+		}
+		switch k {
+		case "", "ip":
+			// "" mirrors the pre-list schema, which accepted an explicit empty
+			// key as the ip default.
+			add("ip", keyPart{kind: keyIP})
+		case "host":
+			add("host", keyPart{kind: keyHost})
+		case "ip-host":
+			add("ip", keyPart{kind: keyIP})
+			add("host", keyPart{kind: keyHost})
+		case "asn":
+			if l.ASN == nil {
+				errs = append(errs, errors.New("key asn requires the ASN database (WAF_ASN_DB) — without it every client would share one bucket"))
+				continue
+			}
+			add("asn", keyPart{kind: keyASN})
+		case "country":
+			if l.Country == nil {
+				errs = append(errs, errors.New("key country requires the GeoIP database (WAF_GEOIP_DB) — without it every client would share one bucket"))
+				continue
+			}
+			add("country", keyPart{kind: keyCountry})
+		case "header":
+			if err := validateFieldName(name); err != nil {
+				errs = append(errs, fmt.Errorf("key header: %w", err))
+				continue
+			}
+			// Header names are case-insensitive: normalize to lowercase so two
+			// spellings share a cfgKey (and counters across reloads).
+			add("header:"+strings.ToLower(name), keyPart{kind: keyHeader, name: name})
+		case "cookie":
+			if err := validateFieldName(name); err != nil {
+				errs = append(errs, fmt.Errorf("key cookie: %w", err))
+				continue
+			}
+			// Cookie names are case-sensitive (http.Request.Cookie matches
+			// exactly); keep the given spelling.
+			add("cookie:"+name, keyPart{kind: keyCookie, name: name})
+		default:
+			errs = append(errs, fmt.Errorf("unknown key %q (want ip|host|asn|country|header:<name>|cookie:<name>)", k))
+		}
+	}
+	return parts, normKeys, errs
+}
+
+// validateFieldName checks a header/cookie name: non-empty and an HTTP token
+// (RFC 7230) — which also guarantees it can't contain "," (the cfgKey join)
+// or whitespace/control characters.
+func validateFieldName(name string) error {
+	if name == "" {
+		return errors.New("missing name (want header:<name> / cookie:<name>)")
+	}
+	for i := 0; i < len(name); i++ {
+		switch c := name[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return fmt.Errorf("invalid character %q in name %q", c, name)
+		}
+	}
+	return nil
 }
 
 func validateID(id string) error {
@@ -364,6 +511,21 @@ func (s *set) serve(w http.ResponseWriter, r *http.Request, next http.Handler) {
 		rawIP = header.Get(r.Header, header.XRealIP)
 		ip = net.ParseIP(rawIP)
 	}
+	// Cookies are parsed once per request and shared across every cookie-keyed
+	// limit: http.Request.Cookie re-parses the WHOLE Cookie header (which the
+	// client sizes, up to the server's header cap) on every call, so per-part
+	// calls would hand clients a CPU knob multiplied by the limit count. First
+	// occurrence wins, matching Request.Cookie.
+	var cookies map[string]string
+	if s.needsCookie {
+		all := r.Cookies()
+		cookies = make(map[string]string, len(all))
+		for _, c := range all {
+			if _, ok := cookies[c.Name]; !ok {
+				cookies[c.Name] = c.Value
+			}
+		}
+	}
 
 	for i := range s.limits {
 		lim := &s.limits[i]
@@ -371,7 +533,7 @@ func (s *set) serve(w http.ResponseWriter, r *http.Request, next http.Handler) {
 		if lim.skip(ip) {
 			continue
 		}
-		key := lim.bucketKey(r, ip, rawIP, s.knownHost)
+		key := s.bucketKey(lim, r, ip, rawIP, cookies)
 		if lim.strategy.Take(key) {
 			if lim.observe != nil {
 				lim.observe(ratelimit.Event{Name: "", Result: ratelimit.ResultAllowed})
@@ -409,20 +571,55 @@ func (lim *compiledLimit) skip(ip net.IP) bool {
 	return false
 }
 
-// bucketKey builds the strategy key for this limit. IPv4 buckets per address,
-// IPv6 per /64 (one eyeball network can't mint unbounded keys); an unparsable
-// X-Real-IP falls back to its raw string, like parapet's ClientIP. host-keyed
-// buckets collapse unknown hosts when knownHost is wired.
-func (lim *compiledLimit) bucketKey(r *http.Request, ip net.IP, rawIP string, knownHost func(string) bool) string {
-	switch lim.key {
+// bucketKey builds the strategy key for this limit by composing its parts'
+// per-request values with "\n" (see keyKind for why that is unambiguous). The
+// single-part case skips the builder — it is the common shape and stays
+// alloc-free for ip/host keys.
+func (s *set) bucketKey(lim *compiledLimit, r *http.Request, ip net.IP, rawIP string, cookies map[string]string) string {
+	if len(lim.keyParts) == 1 {
+		return s.partValue(lim.keyParts[0], r, ip, rawIP, cookies)
+	}
+	var b strings.Builder
+	for i, p := range lim.keyParts {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(s.partValue(p, r, ip, rawIP, cookies))
+	}
+	return b.String()
+}
+
+// partValue resolves one characteristic for this request. IPv4 buckets per
+// address, IPv6 per /64 (one eyeball network can't mint unbounded keys); an
+// unparsable X-Real-IP falls back to its raw string, like parapet's ClientIP.
+// host collapses unknown hosts when knownHost is wired. A missing header or
+// cookie contributes "" (those clients share a bucket); values are truncated
+// to maxKeyPartLen.
+func (s *set) partValue(p keyPart, r *http.Request, ip net.IP, rawIP string, cookies map[string]string) string {
+	switch p.kind {
 	case keyHost:
-		return hostKey(r.Host, knownHost)
-	case keyIPHost:
-		// "\n" can never appear in a valid Host, so the composite is unambiguous.
-		return ipKey(ip, rawIP) + "\n" + hostKey(r.Host, knownHost)
-	default:
+		return hostKey(r.Host, s.knownHost)
+	case keyASN:
+		return strconv.FormatInt(s.asn(r), 10)
+	case keyCountry:
+		return s.country(r)
+	case keyHeader:
+		return truncPart(r.Header.Get(p.name))
+	case keyCookie:
+		return truncPart(cookies[p.name])
+	default: // keyIP
 		return ipKey(ip, rawIP)
 	}
+}
+
+// truncPart caps a client-controlled value's contribution to the bucket key.
+// Over-long values share their prefix's bucket — conservative, never relaxing
+// a limit.
+func truncPart(v string) string {
+	if len(v) > maxKeyPartLen {
+		return v[:maxKeyPartLen]
+	}
+	return v
 }
 
 func ipKey(ip net.IP, rawIP string) string {
