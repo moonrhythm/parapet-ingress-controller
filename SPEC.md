@@ -228,6 +228,8 @@ the metric exists in both.
 | `parapet_backend_network_read_bytes{addr}` / `_write_bytes{addr}` | both |
 | `parapet_network_request_bytes` / `parapet_network_response_bytes` | both |
 | `parapet_waf_matches{rule_id,action,scope}` | both (note: **no** `_total` suffix) |
+| `parapet_waf_eval_duration_seconds{outcome,scope}` | **Go-only** (histogram of per-request rule-eval latency; `outcome` = `pass\|allow\|block\|error`, fired once per evaluated request — the pass path `parapet_waf_matches` can't see) |
+| `parapet_ratelimit_total{name,result}` | **Go-only** (`result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters) |
 | `parapet_connections{state}` | **Go-only** (no Pingora `ConnState` equivalent) |
 | `go_*` runtime, Cloud Profiler/Trace | **Go-only** |
 | `parapet_rejected_requests{reason}`, `parapet_tls_sni_no_cert_total{reason}`, `process_*` (custom `/proc`) | **Rust-only** (Go gets `process_*` from client_golang) |

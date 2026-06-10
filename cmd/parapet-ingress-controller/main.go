@@ -25,6 +25,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/geoip"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
+	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 	"github.com/moonrhythm/parapet-ingress-controller/plugin"
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
@@ -471,9 +472,15 @@ func hostRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
 		metric.RejectedRequest("host_limit")
 	}
 
+	// Decision counter (allowed|limited) — the limited side complements the
+	// existing host-limit rejection metrics with an allowed denominator.
+	rlObserve := observe.RateLimit("host")
+
 	if concurrentSize > 0 {
 		slog.Info("setting up host rate limit", "strategy", "ConcurrentQueue", "capacity", concurrentCapacity, "size", concurrentSize)
 		return ratelimit.RateLimiter{
+			Name:    "host",
+			Observe: rlObserve,
 			Strategy: &ratelimit.ConcurrentQueueStrategy{
 				Capacity: concurrentCapacity,
 				Size:     concurrentSize,
@@ -487,6 +494,8 @@ func hostRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
 
 	slog.Info("setting up host rate limit", "strategy", "Concurrent", "capacity", concurrentCapacity)
 	return ratelimit.RateLimiter{
+		Name:    "host",
+		Observe: rlObserve,
 		Strategy: &ratelimit.ConcurrentStrategy{
 			Capacity: concurrentCapacity,
 		},
@@ -540,9 +549,13 @@ func hostCountryRateLimit(isKnownHost func(host string) bool) parapet.Middleware
 		metric.RejectedRequest("host_limit")
 	}
 
+	rlObserve := observe.RateLimit("host-country")
+
 	if concurrentSize > 0 {
 		slog.Info("setting up host country rate limit", "strategy", "ConcurrentQueue", "capacity", concurrentCapacity, "size", concurrentSize)
 		return ratelimit.RateLimiter{
+			Name:    "host-country",
+			Observe: rlObserve,
 			Strategy: &ratelimit.ConcurrentQueueStrategy{
 				Capacity: concurrentCapacity,
 				Size:     concurrentSize,
@@ -556,6 +569,8 @@ func hostCountryRateLimit(isKnownHost func(host string) bool) parapet.Middleware
 
 	slog.Info("setting up host country rate limit", "strategy", "Concurrent", "capacity", concurrentCapacity)
 	return ratelimit.RateLimiter{
+		Name:    "host-country",
+		Observe: rlObserve,
 		Strategy: &ratelimit.ConcurrentStrategy{
 			Capacity: concurrentCapacity,
 		},

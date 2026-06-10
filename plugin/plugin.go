@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 	networking "k8s.io/api/networking/v1"
 
+	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
@@ -143,14 +144,23 @@ func RateLimit(ctx Context) {
 		return n
 	}
 
+	// use wires the decision counter (allowed|limited) before mounting. The
+	// name label is <ns>/<name>:<window> — bounded by the ingresses an operator
+	// creates (the same argument as rule_id on parapet_waf_matches).
+	use := func(rl *ratelimit.RateLimiter, window string) {
+		rl.Name = ctx.ingressID() + ":" + window
+		rl.Observe = observe.RateLimit(rl.Name)
+		ctx.Use(rl)
+	}
+
 	if n := rate("/ratelimit-s"); n > 0 {
-		ctx.Use(ratelimit.FixedWindowPerSecond(n))
+		use(ratelimit.FixedWindowPerSecond(n), "s")
 	}
 	if n := rate("/ratelimit-m"); n > 0 {
-		ctx.Use(ratelimit.FixedWindowPerMinute(n))
+		use(ratelimit.FixedWindowPerMinute(n), "m")
 	}
 	if n := rate("/ratelimit-h"); n > 0 {
-		ctx.Use(ratelimit.FixedWindowPerHour(n))
+		use(ratelimit.FixedWindowPerHour(n), "h")
 	}
 }
 

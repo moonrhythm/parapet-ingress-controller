@@ -275,6 +275,14 @@ Rule snapshots apply with the same **all-or-nothing compile + atomic swap +
 keep-last-good** semantics as parapet's `SetRules`; on a fetch failure the edge
 **fails static** (keeps last-good) — never fail-open to "no WAF".
 
+Both layers record per-request rule-eval latency on `:9187` as
+`parapet_waf_eval_duration_seconds{outcome,scope}` (`outcome` =
+`pass|allow|block|error`, `scope` = `global|zone`), same metric as the
+controller; an empty ruleset (before the first snapshot lands) takes the
+no-rules fast path and records nothing. Edge rule *matches* are debug-logged
+but not yet a counter (the controller's `parapet_waf_matches` is
+controller-only).
+
 ### parapet stays authoritative (the backstop)
 
 The control plane derives `host[/path] → zoneKey` from the Ingress objects
@@ -364,10 +372,17 @@ cacheable object locally removes a full origin round trip. Enabled with
   fetch (no stampede): the first request fills while streaming to its own client
   and to disk; others wait (≤ a 2s timeout) then read the just-filled entry, or
   fall through to their own fetch if it turned out uncacheable.
-- **Observability.** Sets `X-Cache: HIT|MISS` (HIT = served from the edge cache,
-  MISS = fetched from parapet). Cache hit/miss counts are not yet a Prometheus
-  metric; the edge does expose a `:9187` metrics endpoint (connections, bytes, Go
-  runtime) — `EDGE_METRICS_LISTEN`, set `""` to disable.
+- **Observability.** Sets `X-Cache: HIT|MISS|STALE` (HIT = served from the edge
+  cache, MISS = fetched from parapet, STALE = served stale under RFC 5861).
+  Cache outcomes are counted on the `:9187` metrics
+  endpoint (`EDGE_METRICS_LISTEN`, set `""` to disable) as
+  `parapet_cache_total{result}` (`HIT|MISS|STALE|STALE_ERROR|BYPASS` — BYPASS is
+  the ineligible-request path that sends no `X-Cache` header) plus
+  `parapet_cache_fill_duration_seconds` (origin-fill latency, observed only when
+  parapet was contacted on the serving path). Deliberately **no `host` label** —
+  the edge serves any Host the client sends, so a host label would be unbounded
+  series under a flood. Unless `DISABLE_LOG` is set, each access-log line also
+  carries the outcome as a `cacheStatus` field.
 
 ### On-disk layout (sharded by hash)
 
@@ -424,11 +439,11 @@ invalidated entries off the serving path; the in-memory record table is bounded 
 the count-cap fold, and disk by the cache's LRU byte cap.
 
 A fetch/IO error on the read path **fails static** (degrades to a cache miss →
-serve from origin), never erroring the client request. **Not yet:**
-stale-while-revalidate / stale-if-error, Range/partial caching, per-route policy
-via Ingress annotations, chunked-GET caching (a GET needs a `Content-Length`),
-and cache hit/miss Prometheus metrics (the `:9187` listener exists for
-connection/byte/runtime metrics).
+serve from origin), never erroring the client request. RFC 5861
+stale-while-revalidate / stale-if-error are honored when the origin opts in via
+`Cache-Control` (part of `parapet/pkg/cache`). **Not yet:** Range/partial
+caching, per-route policy via Ingress annotations, and chunked-GET caching (a
+GET needs a `Content-Length`).
 
 ### Purge / invalidation
 

@@ -33,6 +33,7 @@ import (
 
 	"github.com/moonrhythm/parapet-ingress-controller/edge"
 	"github.com/moonrhythm/parapet-ingress-controller/geoip"
+	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 	"github.com/moonrhythm/parapet-ingress-controller/trustcidr"
 )
 
@@ -220,7 +221,17 @@ func main() {
 			}
 		}
 		if storage != nil {
-			opts := cache.Options{MaxFileSize: maxFile}
+			// Cache outcomes: bounded prom counters (no host label — serve-all
+			// means r.Host is unbounded) + a cacheStatus access-log field
+			// (no-op under DISABLE_LOG — no logger record to set).
+			cacheMetrics := observe.CacheResult()
+			opts := cache.Options{
+				MaxFileSize: maxFile,
+				OnResult: func(r *http.Request, info cache.ResultInfo) {
+					cacheMetrics(r, info)
+					cache.LogResult(r, info)
+				},
+			}
 			// Cache-purge: an invalidation table fed from the control plane gates each
 			// hit (parapet's Options.InvalidatedAfter). On by default with the cache; the
 			// poll loop fail-statics if the CP isn't distributing purges. The table
