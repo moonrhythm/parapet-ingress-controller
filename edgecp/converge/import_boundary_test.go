@@ -26,6 +26,7 @@ func TestServingPathDoesNotImportConvergeOrPromClient(t *testing.T) {
 		"github.com/moonrhythm/parapet-ingress-controller/cmd/edge-proxy",
 		"github.com/moonrhythm/parapet-ingress-controller/trust", // the core trust manager
 		"github.com/moonrhythm/parapet-ingress-controller/metric",
+		"github.com/moonrhythm/parapet-ingress-controller/metric/observe",
 	}
 	for _, pkg := range servingPkgs {
 		out, err := exec.Command("go", "list", "-deps", pkg).Output()

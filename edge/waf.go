@@ -10,6 +10,7 @@ import (
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/waf"
 
+	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 	"github.com/moonrhythm/parapet-ingress-controller/wafrule"
 )
 
@@ -40,7 +41,7 @@ type EdgeWAF struct {
 // ruleset and every zone, so the edge — the first hop — resolves both from the
 // true client IP.
 func NewEdgeWAF(country func(*http.Request) string, asn func(*http.Request) int64) *EdgeWAF {
-	newWAF := func() *waf.WAF {
+	newWAF := func(scope string) *waf.WAF {
 		w := waf.New()
 		w.Country = country
 		w.ASN = asn
@@ -49,10 +50,15 @@ func NewEdgeWAF(country func(*http.Request) string, asn func(*http.Request) int6
 		w.Logger = waf.LoggerFunc(func(format string, args ...any) {
 			slog.Debug(fmt.Sprintf(format, args...))
 		})
+		// Eval latency + outcome per evaluated request (the no-rules pass-through
+		// before rules load doesn't fire it), same metric as the controller.
+		// observe (not metric) keeps the controller's init-materialized
+		// core-trust series off the edge's /metrics.
+		w.Observe = observe.WAFEval(scope)
 		return w
 	}
-	w := &EdgeWAF{newZone: newWAF}
-	w.global = newWAF()
+	w := &EdgeWAF{newZone: func() *waf.WAF { return newWAF("zone") }}
+	w.global = newWAF("global")
 	empty := map[string]*waf.WAF{}
 	w.zones.Store(&empty)
 	emptyHZ := map[string]string{}

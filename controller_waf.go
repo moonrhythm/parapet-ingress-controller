@@ -17,6 +17,7 @@ import (
 
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
+	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 	"github.com/moonrhythm/parapet-ingress-controller/wafrule"
 )
 
@@ -99,6 +100,9 @@ func (ctrl *Controller) newWAF(scope string) *waf.WAF {
 	w.Logger = waf.LoggerFunc(func(format string, args ...any) {
 		slog.Debug(fmt.Sprintf(format, args...))
 	})
+	// Eval latency + outcome, once per evaluated request — the pass path OnMatch
+	// can't see. Handles resolve here (per WAF instance), not per request.
+	w.Observe = observe.WAFEval(scope)
 	w.OnMatch = func(ev waf.MatchEvent) {
 		metric.WAFMatch(ev.RuleID, ev.Action.String(), scope)
 		lvl := slog.LevelDebug
