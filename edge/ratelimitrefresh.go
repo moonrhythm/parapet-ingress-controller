@@ -30,21 +30,11 @@ func RefreshRateLimitOnce(cp *CpClient, e *EdgeRateLimit) {
 // RunRateLimitRefresh runs the periodic rate-limit refresh forever. The first
 // tick is jittered by [0,interval] (fleet poll-instant decorrelation). Same
 // cadence as the cert/WAF refresh (EDGE_REFRESH_INTERVAL); fail-static.
-func RunRateLimitRefresh(ctx context.Context, cp *CpClient, e *EdgeRateLimit, interval time.Duration) {
+// poke (nil ok) wakes the loop immediately on a /v1/events change signal; the
+// timer remains the fallback floor, and refreshes stay single-flight here.
+func RunRateLimitRefresh(ctx context.Context, cp *CpClient, e *EdgeRateLimit, interval time.Duration, poke <-chan struct{}) {
 	if interval <= 0 { // time.NewTicker panics on a non-positive interval
 		interval = 300 * time.Second
 	}
-	if !sleepCtx(ctx, fullJitter(interval)) {
-		return
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			RefreshRateLimitOnce(cp, e)
-		}
-	}
+	runRefreshLoop(ctx, interval, poke, func() { RefreshRateLimitOnce(cp, e) })
 }

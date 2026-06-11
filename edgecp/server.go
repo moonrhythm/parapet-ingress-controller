@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // Server is the edge control-plane HTTP API. It authorizes each request by the
@@ -36,6 +37,11 @@ type Server struct {
 	// disabled, POST /v1/metrics → 404). Serving happens on the separate
 	// CP_METRICS_LISTEN via MetricsHandler, not on this API mux.
 	metricsStore *MetricsStore
+
+	// events is the optional change-notification hub (nil = /v1/events → 404 and
+	// edges fall back to pure polling). The stream is a wake-up signal only; the
+	// edge still fetches through the scoped, ETag-revalidated endpoints above.
+	events *EventsHub
 
 	// signerState is the (signer, generation) snapshot, replaced WHOLESALE by
 	// SetSigner so a reader Loads both halves coherently (never a torn signer-from-A
@@ -131,6 +137,13 @@ func (s *Server) WithRateLimit(rl *RateLimitStore) *Server {
 	return s
 }
 
+// WithEvents enables the change-notification stream (GET /v1/events). Returns
+// the server for chaining; the caller runs hub.Run in its own goroutine.
+func (s *Server) WithEvents(hub *EventsHub) *Server {
+	s.events = hub
+	return s
+}
+
 // WithPurge enables cache-purge distribution: GET /v1/purges (per-edge bearer,
 // scoped) and POST /v1/purges (gated by adminToken). An empty adminToken leaves
 // POST locked out (every issue attempt 401s) — read distribution still works.
@@ -207,6 +220,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
 	mux.HandleFunc("GET /v1/ratelimit", s.handleRateLimit)
 	mux.HandleFunc("GET /v1/purges", s.handlePurges)
+	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/purges", s.handlePurgeAdmin)
 	mux.HandleFunc("POST /v1/metrics", s.handleMetricsPush)
 	mux.HandleFunc("POST /v1/edge-cert", s.handleEdgeCert)
@@ -344,8 +358,21 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "encode", http.StatusInternalServerError)
 		return
 	}
-	// ETag over the scoped bytes (per-edge content differs, so per-edge etag).
-	etag := etagOfString(string(body))
+	// ETag over the scoped bytes (per-edge content differs, so per-edge etag) —
+	// with the GENERATION ZEROED: it is a process-local counter, so two CP
+	// replicas serving byte-identical content would otherwise mint different
+	// validators and an edge whose polls rotate across replicas would never
+	// 304 (full bundle + recompile every poll). The real generation still rides
+	// the 200 body; the in-body ca_id/signing fp stay in the validator (they are
+	// replica-identical — derived from the shared CA Secret).
+	etagResp := resp
+	etagResp.Generation = 0
+	etagBody, err := json.Marshal(etagResp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	etag := etagOfString(string(etagBody))
 	w.Header().Set("ETag", etag)
 	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {
 		w.WriteHeader(http.StatusNotModified)
@@ -404,7 +431,16 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "encode", http.StatusInternalServerError)
 		return
 	}
-	etag := etagOfString(string(body))
+	// Generation zeroed in the validator for the same reason as handleWAF:
+	// process-local counters must not defeat 304 revalidation across replicas.
+	etagResp := resp
+	etagResp.Generation = 0
+	etagBody, err := json.Marshal(etagResp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	etag := etagOfString(string(etagBody))
 	w.Header().Set("ETag", etag)
 	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {
 		w.WriteHeader(http.StatusNotModified)
@@ -440,6 +476,87 @@ func (s *Server) handlePurges(w http.ResponseWriter, r *http.Request) {
 	res := s.purge.Since(since, func(host string) bool { return s.authz.Allowed(token, host) })
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(res)
+}
+
+// handleEvents serves the change-notification SSE stream (GET /v1/events),
+// authorized by the per-edge bearer token. Each event is the full version
+// vector (EventsSnapshot) — an opaque wake-up signal; the edge re-fetches
+// changed material through the scoped, ETag-revalidated endpoints, so nothing
+// here bypasses authorization or fail-static apply. The first event is the
+// current snapshot (a reconnecting edge immediately covers its gap), then one
+// event per change, with `: ping` keepalive comments between (sized to stay
+// under a fronting LB's idle timeout). Subscribers are capped (503 +
+// Retry-After when full — the edge falls back to polling, its floor anyway).
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.events == nil {
+		http.Error(w, "events disabled", http.StatusNotFound)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+	ch, cancel, ok := s.events.Subscribe(token)
+	if !ok {
+		retryAfter := s.events.RetryAfterSecs
+		if retryAfter <= 0 {
+			retryAfter = 30
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+		http.Error(w, "too many event subscribers", http.StatusServiceUnavailable)
+		return
+	}
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no") // tell buffering proxies to pass events through
+
+	writeEvent := func(snap EventsSnapshot) bool {
+		body, err := json.Marshal(snap)
+		if err != nil {
+			return false
+		}
+		if _, err := w.Write([]byte("event: change\ndata: " + string(body) + "\n\n")); err != nil {
+			return false
+		}
+		flusher.Flush()
+		return true
+	}
+	if !writeEvent(s.events.Current()) {
+		return
+	}
+
+	// Floor the ping cadence: time.NewTicker panics on <= 0 (a hub configured
+	// from a zeroed env var must degrade, not break every stream), and the ping
+	// exists to beat a fronting LB's idle timeout — 20s matches the default.
+	pingInterval := s.events.PingInterval
+	if pingInterval <= 0 {
+		pingInterval = 20 * time.Second
+	}
+	ping := time.NewTicker(pingInterval)
+	defer ping.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case snap := <-ch:
+			if !writeEvent(snap) {
+				return
+			}
+		case <-ping.C:
+			if _, err := w.Write([]byte(": ping\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 // handlePurgeAdmin issues a cache purge (POST /v1/purges), gated by the purge admin

@@ -74,7 +74,10 @@ enforces the ConfigMap-driven global+zone rate limits (`edge/ratelimit.go`,
 per-edge counters, mounted after the WAF and before the cache), optionally
 caches responses via `parapet/pkg/cache` (memory or disk backend,
 selected by `EDGE_CACHE_BACKEND`), and forwards to parapet (`edge/forward.go`). Refresh loops are fail-static
-(`edge/refresh.go`, `edge/wafrefresh.go`, `edge/ratelimitrefresh.go`). It is **not** the controller — no k8s
+(`edge/refresh.go`, `edge/wafrefresh.go`, `edge/ratelimitrefresh.go`); by default the CP's `GET /v1/events`
+SSE change stream (`edge/events.go` + `edgecp/events.go`, `EDGE_EVENTS_ENABLED`/`CP_EVENTS_ENABLED`) pokes
+them on change — a version-vector wake-up signal only, so updates land in seconds while the jittered polls
+stay the correctness floor (stream failure / 404 from an old CP ⇒ pure polling). It is **not** the controller — no k8s
 client, no Ingress watch — so it lives beside, not inside, the controller. Like
 the controller it honors `TRUST_PROXY` (shared `trustcidr` package): default `""`
 keeps the first-hop distrust posture; set it (e.g. `cloudflare`) when the edge

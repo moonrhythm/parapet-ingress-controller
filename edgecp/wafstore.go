@@ -103,6 +103,10 @@ func (s *WafStore) fingerprint() string {
 	return b.String()
 }
 
+// Version is the store's full-content etag — an opaque change signal for the
+// /v1/events stream (per-edge scoping happens at fetch time, not here).
+func (s *WafStore) Version() string { return *s.curEtag.Load() }
+
 // scopedSnapshot is the per-edge WAF payload: global (shared) + only the zones
 // and host bindings for hosts the edge is allowed to serve.
 type scopedSnapshot struct {

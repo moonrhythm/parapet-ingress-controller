@@ -350,15 +350,52 @@ func main() {
 	// the per-edge bearer token (scoped to the edge's hosts); issuing a purge needs
 	// CP_PURGE_ADMIN_TOKEN — a stronger credential than the edges hold. Without that
 	// token, issuance is locked out, so refuse to enable an issue-less purge plane.
+	var purgeStore *edgecp.PurgeStore
 	if os.Getenv("CP_PURGE_ENABLED") == "true" {
 		adminToken := os.Getenv("CP_PURGE_ADMIN_TOKEN")
 		if adminToken == "" {
 			slog.Error("CP_PURGE_ENABLED=true requires CP_PURGE_ADMIN_TOKEN (the credential that gates POST /v1/purges)")
 			os.Exit(1)
 		}
-		purgeStore := edgecp.NewPurgeStore(envInt("CP_PURGE_MAX_ENTRIES", 0))
+		purgeStore = edgecp.NewPurgeStore(envInt("CP_PURGE_MAX_ENTRIES", 0))
 		server = server.WithPurge(purgeStore, adminToken)
 		slog.Info("edge control plane: cache-purge distribution enabled")
+	}
+
+	// Change-notification stream (GET /v1/events): a per-edge SSE wake-up signal
+	// so the fleet converges in ~seconds instead of one poll interval. The hub
+	// samples the stores' version vector and broadcasts on change; edges
+	// re-fetch through the scoped, ETag-revalidated endpoints, so authz and
+	// fail-static semantics are untouched. Keep the ping cadence under any
+	// fronting LB's idle timeout (Google ALB drops idle streams at ~60s), and
+	// size the LB's backend/response timeout well above it — the stream is cut
+	// at that timeout and the edge transparently reconnects.
+	if envOr("CP_EVENTS_ENABLED", "true") == "true" {
+		hub := edgecp.NewEventsHub(func() edgecp.EventsSnapshot {
+			var snap edgecp.EventsSnapshot
+			snap.Certs = store.Version()
+			if wafStore != nil {
+				snap.WAF = wafStore.Version()
+			}
+			if rlStore != nil {
+				snap.RateLimit = rlStore.Version()
+			}
+			if purgeStore != nil {
+				snap.Purges = purgeStore.LastSeq()
+			}
+			return snap
+		})
+		hub.PingInterval = time.Duration(envInt("CP_EVENTS_PING_INTERVAL", 20)) * time.Second
+		hub.MaxSubscribers = envInt("CP_EVENTS_MAX_SUBSCRIBERS", 1024)
+		// Per-token cap: replicas share one token (one stream each), so size it
+		// >= replicas-per-token. It exists so one edge in a stream-leaking
+		// reconnect loop can't eat the global cap and starve the rest of the fleet.
+		hub.MaxPerToken = envInt("CP_EVENTS_MAX_PER_TOKEN", 32)
+		hub.RetryAfterSecs = envInt("CP_EVENTS_RETRY_AFTER", 30)
+		go hub.Run(ctx)
+		server = server.WithEvents(hub)
+		slog.Info("edge control plane: change-event stream enabled",
+			"ping_interval", hub.PingInterval, "max_subscribers", hub.MaxSubscribers)
 	}
 
 	// Convergence /metrics on a SEPARATE, unauthenticated listener (never the

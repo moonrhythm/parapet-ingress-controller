@@ -32,22 +32,12 @@ func RefreshWafOnce(cp *CpClient, w *EdgeWAF, coord *RemintCoordinator) {
 
 // RunWafRefresh runs the periodic WAF refresh forever. The first tick is jittered by
 // [0,interval] (fleet poll-instant decorrelation). Same cadence as the cert refresh
-// (EDGE_REFRESH_INTERVAL); fail-static.
-func RunWafRefresh(ctx context.Context, cp *CpClient, w *EdgeWAF, interval time.Duration, coord *RemintCoordinator) {
+// (EDGE_REFRESH_INTERVAL); fail-static. poke (nil ok) wakes the loop immediately —
+// the /v1/events stream's change signal — so the timer is only the fallback floor.
+// All refreshes run on THIS goroutine, keeping them single-flight per resource.
+func RunWafRefresh(ctx context.Context, cp *CpClient, w *EdgeWAF, interval time.Duration, coord *RemintCoordinator, poke <-chan struct{}) {
 	if interval <= 0 { // time.NewTicker panics on a non-positive interval
 		interval = 300 * time.Second
 	}
-	if !sleepCtx(ctx, fullJitter(interval)) {
-		return
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			RefreshWafOnce(cp, w, coord)
-		}
-	}
+	runRefreshLoop(ctx, interval, poke, func() { RefreshWafOnce(cp, w, coord) })
 }
