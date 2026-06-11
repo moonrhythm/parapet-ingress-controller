@@ -148,8 +148,14 @@ limiting is enabled) / `rate`+`window` (1s..1h) / `algorithm` (fixed, sliding)
 / `mode` (enforce, shadow) / `status` (429, 503) / `exclude` CIDRs. Reloads are debounced, mux-decoupled, all-or-nothing
 (last-good kept), and preserve live counters for limits whose shaping config
 didn't change. `/.well-known/acme-challenge` is never limited. Counters are
-per-pod; the edge proxy does not enforce these limits and edge cache hits
-bypass them entirely.
+per-pod. The edge proxy can opt in to enforcing the same global+zone sets
+(`EDGE_RATELIMIT_ENABLED` + `CP_RATELIMIT_ENABLED`, distributed via
+`GET /v1/ratelimit` like the WAF — see
+[EDGE.md](EDGE.md#rate-limiting-at-the-edge)): counters there are per edge
+(each layer counts what it sees; edge enforcement does not relieve the
+core's), zone binding is host-level and same-namespace only, and edge limits
+run after the edge WAF and **before** the edge cache — so cache hits are
+limited at the edge, while the core's own counters still never see them.
 
 ## Edge control plane (cert+key + WAF distribution)
 

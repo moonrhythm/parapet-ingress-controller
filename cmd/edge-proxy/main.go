@@ -95,6 +95,7 @@ func main() {
 		refreshInterval = 300 * time.Second
 	}
 	wafEnabled := envOr("EDGE_WAF_ENABLED", "false") == "true"
+	ratelimitEnabled := envOr("EDGE_RATELIMIT_ENABLED", "false") == "true"
 	disableLog := envOr("DISABLE_LOG", "false") == "true"
 	waitBeforeShutdown := time.Duration(envInt64("WAIT_BEFORE_SHUTDOWN", 30)) * time.Second
 	domains := splitDomains(os.Getenv("EDGE_DOMAINS"))
@@ -119,6 +120,7 @@ func main() {
 		"serve_all", serveAll,
 		"domains", len(domains),
 		"waf_enabled", wafEnabled,
+		"ratelimit_enabled", ratelimitEnabled,
 		"trust_proxy", trustProxySpec,
 		"refresh_interval", refreshInterval,
 	)
@@ -182,14 +184,29 @@ func main() {
 	// Optional edge WAF (early-drop; parapet stays authoritative). GeoIP/ASN are
 	// resolved from the client IP — the true peer when the edge is the first hop,
 	// or the inbound X-Forwarded-For client when TRUST_PROXY trusts the front proxy.
+	// The resolvers load when EITHER feature needs them (mirrors the controller):
+	// the WAF for request.country/request.asn, the rate limiter for its
+	// country/asn keys (SetLimits rejects geo-keyed limits when nil).
 	var ewaf *edge.EdgeWAF
 	var country func(*http.Request) string
 	var asn func(*http.Request) int64
-	if wafEnabled {
+	if wafEnabled || ratelimitEnabled {
 		country, asn = loadGeoResolvers()
+	}
+	if wafEnabled {
 		ewaf = edge.NewEdgeWAF(country, asn)
 		edge.RefreshWafOnce(cp, ewaf, remintCoord)
 		go edge.RunWafRefresh(ctx, cp, ewaf, refreshInterval, remintCoord)
+	}
+
+	// Optional edge rate limiting (ConfigMap-driven global + zone sets fetched
+	// from the control plane). Counters are per edge, exactly as the
+	// controller's are per pod; the core still enforces its own limits.
+	var erl *edge.EdgeRateLimit
+	if ratelimitEnabled {
+		erl = edge.NewEdgeRateLimit(country, asn)
+		edge.RefreshRateLimitOnce(cp, erl)
+		go edge.RunRateLimitRefresh(ctx, cp, erl, refreshInterval)
 	}
 
 	// Optional response cache (off by default), from parapet/pkg/cache. The
@@ -301,6 +318,14 @@ func main() {
 		// Past both rulesets: stamp the claim the core's WAF_VALIDATED_PROXY
 		// requires (only once a CP snapshot has landed — see ClaimStamp).
 		m.Use(ewaf.ClaimStamp())
+	}
+	if erl != nil {
+		// Rate limits run after the WAF — WAF-blocked traffic never burns rate
+		// budget, mirroring the controller's order — and BEFORE the response
+		// cache, so edge-enforced limits apply to cache hits too (the core's
+		// per-pod counters still never see edge cache hits).
+		m.Use(erl.Global())
+		m.Use(erl.Zone())
 	}
 	if country != nil || asn != nil {
 		m.Use(forwardGeoHeaders(country, asn))

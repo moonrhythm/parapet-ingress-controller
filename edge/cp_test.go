@@ -91,6 +91,37 @@ func TestCpClient_FetchWaf200ParsesPayload(t *testing.T) {
 	assert.Equal(t, `"w1"`, res.Etag)
 }
 
+func TestCpClient_FetchRateLimit200ParsesPayload(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/ratelimit", r.URL.Path)
+		w.Header().Set("ETag", `"r1"`)
+		_, _ = w.Write([]byte(`{"generation":4,"global_limits":["G1","G2"],"zones":{"ns/z":["Z"]},"host_zone_map":{"acme.com":"ns/z"},"hosts":["acme.com"]}`))
+	}))
+	defer srv.Close()
+	cp, _ := NewCpClient(srv.URL, "t", nil)
+	res, err := cp.FetchRateLimit("")
+	require.NoError(t, err)
+	assert.False(t, res.Unchanged)
+	assert.EqualValues(t, 4, res.Generation)
+	assert.Equal(t, []string{"G1", "G2"}, res.GlobalLimits)
+	assert.Equal(t, []string{"Z"}, res.Zones["ns/z"])
+	assert.Equal(t, "ns/z", res.HostZoneMap["acme.com"])
+	assert.Equal(t, []string{"acme.com"}, res.Hosts)
+	assert.Equal(t, `"r1"`, res.Etag)
+}
+
+func TestCpClient_FetchRateLimit304(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, `"r1"`, r.Header.Get("If-None-Match"))
+		w.WriteHeader(http.StatusNotModified)
+	}))
+	defer srv.Close()
+	cp, _ := NewCpClient(srv.URL, "t", nil)
+	res, err := cp.FetchRateLimit(`"r1"`)
+	require.NoError(t, err)
+	assert.True(t, res.Unchanged)
+}
+
 func TestCpClient_FetchWaf304(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, `"w1"`, r.Header.Get("If-None-Match"))

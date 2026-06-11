@@ -21,6 +21,10 @@ type Server struct {
 	authz *Authz
 	waf   *WafStore // optional (nil = WAF distribution disabled, /v1/waf → 404)
 
+	// ratelimit is the optional rate-limit distribution store (nil = disabled,
+	// /v1/ratelimit → 404). Same scoping/ETag model as the WAF endpoint.
+	ratelimit *RateLimitStore
+
 	// purge is the optional cache-purge journal (nil = purge distribution disabled,
 	// /v1/purges → 404). purgeAdminToken gates POST /v1/purges — a STRONGER credential
 	// than the per-edge read tokens (an edge can read its purges but not issue them).
@@ -106,6 +110,13 @@ func (s *Server) WithWAF(waf *WafStore) *Server {
 	return s
 }
 
+// WithRateLimit enables the rate-limit distribution endpoint
+// (GET /v1/ratelimit). Returns the server for chaining.
+func (s *Server) WithRateLimit(rl *RateLimitStore) *Server {
+	s.ratelimit = rl
+	return s
+}
+
 // WithPurge enables cache-purge distribution: GET /v1/purges (per-edge bearer,
 // scoped) and POST /v1/purges (gated by adminToken). An empty adminToken leaves
 // POST locked out (every issue attempt 401s) — read distribution still works.
@@ -180,6 +191,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/certs", s.handleCert)
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
+	mux.HandleFunc("GET /v1/ratelimit", s.handleRateLimit)
 	mux.HandleFunc("GET /v1/purges", s.handlePurges)
 	mux.HandleFunc("POST /v1/purges", s.handlePurgeAdmin)
 	mux.HandleFunc("POST /v1/edge-cert", s.handleEdgeCert)
@@ -312,6 +324,60 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// ETag over the scoped bytes (per-edge content differs, so per-edge etag).
+	etag := etagOfString(string(body))
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// rateLimitResponse is the GET /v1/ratelimit payload. Documents are arrays of
+// YAML strings (one per ConfigMap data value) — ratelimitrule.Parse takes one
+// document per string and does not split "---", so the WAF's
+// concatenated-string format would silently drop trailing documents.
+type rateLimitResponse struct {
+	Generation   uint64              `json:"generation"`
+	GlobalLimits []string            `json:"global_limits"`
+	Zones        map[string][]string `json:"zones"`
+	HostZoneMap  map[string]string   `json:"host_zone_map"`
+	// Hosts is every Ingress-declared host the edge may serve — the edge wires
+	// it as the Limiter's KnownHost so host-keyed buckets for undeclared hosts
+	// collapse into one (cardinality bound under a random-Host flood).
+	Hosts []string `json:"hosts"`
+}
+
+// handleRateLimit serves the rate-limit payload scoped to the edge's allowed
+// domains: the global baseline (identical for every edge) plus only the zones,
+// host→zone bindings, and known hosts for hosts this token may serve. ETag is
+// computed over the scoped payload, so revalidation is correct per edge —
+// the same model as handleWAF. No signer confirmer fields: /v1/certs (and
+// /v1/waf) already carry that signal.
+func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.ratelimit == nil {
+		http.Error(w, "ratelimit distribution disabled", http.StatusNotFound)
+		return
+	}
+	snap := s.ratelimit.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
+	resp := rateLimitResponse{
+		Generation:   snap.generation,
+		GlobalLimits: snap.global,
+		Zones:        snap.zones,
+		HostZoneMap:  snap.hostZone,
+		Hosts:        snap.hosts,
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
 	etag := etagOfString(string(body))
 	w.Header().Set("ETag", etag)
 	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {

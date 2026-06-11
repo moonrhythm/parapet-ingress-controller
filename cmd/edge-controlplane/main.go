@@ -97,6 +97,7 @@ func main() {
 	tokensJSON := os.Getenv("CP_TOKENS")                 // {"<token>":["acme.com",...]} or {"<token>":{"id","domains","disabled"}}
 	tokensFile := os.Getenv("CP_TOKENS_FILE")            // alternative: path to that JSON
 	wafEnabled := os.Getenv("CP_WAF_ENABLED") == "true"
+	ratelimitEnabled := os.Getenv("CP_RATELIMIT_ENABLED") == "true"
 	caCertPath := os.Getenv("EDGE_CA_CERT")                 // provided-mode edge CA cert (with EDGE_CA_KEY → enable issuance)
 	caKeyPath := os.Getenv("EDGE_CA_KEY")                   // provided-mode edge CA private key
 	caSecret := os.Getenv("EDGE_CA_SECRET")                 // managed-mode edge CA Secret in POD_NAMESPACE; "" + no provided files = issuance off
@@ -312,23 +313,39 @@ func main() {
 
 	// Phase 2/3: optionally distribute the WAF (GET /v1/waf): the global baseline
 	// (Phase 2) plus tenant zones + host→zone bindings derived from Ingresses
-	// (Phase 3), scoped per edge to its allowed domains.
+	// (Phase 3), scoped per edge to its allowed domains. Rate-limit distribution
+	// (GET /v1/ratelimit) follows the same model under its own label/annotation;
+	// both features share ONE Ingress watch — the reloader feeds whichever
+	// stores exist. Stores load synchronously before serving so the first edge
+	// fetch sees the full payload, not a half-populated store.
+	var wafStore *edgecp.WafStore
+	var rlStore *edgecp.RateLimitStore
 	if wafEnabled {
-		wafStore := edgecp.NewWafStore()
+		wafStore = edgecp.NewWafStore()
 		wafReloader := edgecp.NewWafReloader(wafStore, watchNamespace, podNamespace)
-		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace)
-		// Load synchronously before serving so the first edge fetch sees the full
-		// payload (global + zones + host→zone), not a half-populated store.
 		if err := wafReloader.LoadOnce(ctx); err != nil {
 			slog.Error("edgecp: initial waf load failed", "err", err)
 		}
+		go wafReloader.Watch(ctx)
+		server = server.WithWAF(wafStore)
+		slog.Info("edge control plane: WAF distribution enabled", "pod_namespace", podNamespace)
+	}
+	if ratelimitEnabled {
+		rlStore = edgecp.NewRateLimitStore()
+		rlReloader := edgecp.NewRateLimitReloader(rlStore, watchNamespace, podNamespace)
+		if err := rlReloader.LoadOnce(ctx); err != nil {
+			slog.Error("edgecp: initial ratelimit load failed", "err", err)
+		}
+		go rlReloader.Watch(ctx)
+		server = server.WithRateLimit(rlStore)
+		slog.Info("edge control plane: ratelimit distribution enabled", "pod_namespace", podNamespace)
+	}
+	if wafStore != nil || rlStore != nil {
+		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore)
 		if err := ingReloader.LoadOnce(ctx); err != nil {
 			slog.Error("edgecp: initial ingress load failed", "err", err)
 		}
-		go wafReloader.Watch(ctx)
 		go ingReloader.Watch(ctx)
-		server = server.WithWAF(wafStore)
-		slog.Info("edge control plane: WAF distribution enabled", "pod_namespace", podNamespace)
 	}
 
 	// Optional cache-purge distribution (GET/POST /v1/purges). The read side rides
@@ -376,7 +393,7 @@ func main() {
 	if tlsEnabled {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
-	slog.Info("edge control plane listening", "addr", addr, "tokens", len(tokens), "waf", wafEnabled, "tls", tlsEnabled)
+	slog.Info("edge control plane listening", "addr", addr, "tokens", len(tokens), "waf", wafEnabled, "ratelimit", ratelimitEnabled, "tls", tlsEnabled)
 
 	if tlsEnabled {
 		err = srv.ListenAndServeTLS(tlsCert, tlsKey)

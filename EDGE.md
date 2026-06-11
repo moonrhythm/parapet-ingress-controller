@@ -57,13 +57,16 @@ traffic); the cluster stays the source of truth:
 client ──TLS──► edge (Go/parapet, outside k8s)                            │
                   │ terminates public TLS *locally* (holds cert+key)      │
                   │ runs global + zone WAF (early drop)                   │
+                  │ optional global + zone rate limits (per-edge)         │
                   │ optional disk response cache                          │
                   │                                                       │
                   ├── HTTPS GET (bearer token) ─► controlplane :8443      │
                   │     GET /v1/certs?sni=… → cert+key+ETag (allowed SNI) │
                   │     GET /v1/waf         → rules for edge domains      │
+                  │     GET /v1/ratelimit   → limits for edge domains     │
                   │   authz: bearer token → allowed domains/zones         │
-                  │   reads: TLS Secrets, WAF ConfigMaps, Ingresses       │
+                  │   reads: TLS Secrets, WAF + ratelimit ConfigMaps,     │
+                  │          Ingresses                                    │
                   │   refreshed on a timer; cached in memory only         │
                   │                                                       │
                   └── data: HTTP/1.1 :80 / re-encrypt :443 ─► parapet ─► svc│
@@ -87,8 +90,9 @@ keys**, so it must never be on the public LoadBalancer. See
 
 - **`cmd/edge-controlplane/`** (Go) — in-cluster HTTPS REST server. Reuses the
   Go controller's k8s client (`k8s`), cert table (`cert`), WAF rule parser
-  (`wafrule`), and route/zone logic. Serves `GET /v1/certs?sni=…` (cert+key)
-  and `GET /v1/waf` (rules). Not on the request path.
+  (`wafrule`), and route/zone logic. Serves `GET /v1/certs?sni=…` (cert+key),
+  `GET /v1/waf` (rules), and `GET /v1/ratelimit` (limits). Not on the request
+  path.
 - **`cmd/edge-proxy/` + `edge/`** (Go) — a parapet-framework proxy. Reuses
   `cert.Table` for SNI resolution (plugged into `tls.Config.GetCertificate`,
   self-signed fallback on a miss), `wafrule` + `parapet/pkg/waf` for CEL
@@ -112,6 +116,7 @@ check gates both endpoints:
 
 - `GET /v1/certs/{sni}` → require `sni ∈ allowed(token)`.
 - `GET /v1/waf` → return only the zones / host-map entries for the token's domains.
+- `GET /v1/ratelimit` → same scoping (zones, host-map, known hosts) per token.
 
 Server-side TLS is mandatory here: it encrypts the token **and the returned
 private key** in flight and lets the edge authenticate the control plane. The
@@ -155,6 +160,21 @@ GET /v1/waf           Authorization: Bearer <token>   [If-None-Match: "<etag>"]
        zones         : zoneKey ("<ns>/<name>") → rules YAML, scoped to the edge's hosts
        host_zone_map : host → zoneKey, scoped to the edge's hosts
        (ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct)
+
+GET /v1/ratelimit     Authorization: Bearer <token>   [If-None-Match: "<etag>"]
+  200 {"generation": N, "global_limits":["…"], "zones":{"<ns>/<name>":["…"]},
+       "host_zone_map":{…}, "hosts":["…"]}
+       global_limits : the platform baseline limit DOCUMENTS (identical for every edge)
+       zones         : zoneKey → limit documents, scoped to the edge's hosts
+       host_zone_map : host → zoneKey (`ratelimit-zone`, same-namespace only), scoped
+       hosts         : every Ingress-declared host the edge may serve — wired as the
+                       Limiter's KnownHost so host-keyed buckets for undeclared hosts
+                       collapse into one (cardinality bound under a random-Host flood)
+       (documents are ARRAYS of YAML strings, one per ConfigMap data value —
+        ratelimitrule.Parse takes one document per string and does not split "---",
+        so the WAF's concatenated format would silently drop trailing documents;
+        ETag over the scoped payload, like /v1/waf)
+  401 (no/invalid token)   404 (ratelimit distribution disabled)
 
 GET /v1/purges?since=<seq>   Authorization: Bearer <token>
   200 {"entries":[{"seq":N,"scope":"url|host|prefix|tag|flush-all","host":"…","uri":"…","tag":"…"}],
@@ -386,6 +406,52 @@ shot. A malformed value fails fast at startup. Trust is **by source IP only** �
 it is no stronger than the front proxy's own ingress filtering, so an attacker who
 can reach the edge directly from a trusted CIDR can spoof `X-Forwarded-For`; keep
 the edge reachable only from the front proxy.
+
+## Rate limiting at the edge
+
+Opt-in (`EDGE_RATELIMIT_ENABLED=true` on the edge, `CP_RATELIMIT_ENABLED=true`
+on the control plane): the edge enforces the same ConfigMap-driven global +
+zone rate limits the controller does (see [RATELIMIT.md](RATELIMIT.md)),
+reusing `ratelimitrule` — the controller's own runtime — so a limit shapes
+traffic identically by construction (fixed/sliding strategies, shadow mode,
+exclude CIDRs, the ACME-challenge exemption, all-or-nothing `SetLimits` with
+per-limit counter carry-over).
+
+Distribution mirrors the WAF exactly: the CP watches the
+`parapet.moonrhythm.io/ratelimit` ConfigMaps (global honored only from
+`POD_NAMESPACE`; a ConfigMap also carrying the WAF label is refused — one
+ConfigMap per feature, like the controller) and derives `host → zoneKey` from
+the `ratelimit-zone` annotation on Ingresses — **same-namespace only**,
+mirroring `plugin.RateLimitZone` (zones carry shared counter state; a
+cross-namespace bind would be a cross-tenant DoS channel). Both features share
+one Ingress watch. The edge polls `GET /v1/ratelimit` on
+`EDGE_REFRESH_INTERVAL`, fail-static.
+
+Per-request order: **after the edge WAF** (WAF-blocked traffic never burns
+rate budget, the controller's own order) and **before the response cache** —
+edge-enforced limits apply to cache hits too (the core's per-pod counters
+still never see a cache hit, since hits never reach it).
+
+What to know before enabling:
+
+- **Counters are per edge**, exactly as the controller's are per pod: N edges
+  + M controller replicas admit up to (N+M)× `rate` fleet-wide. The edge
+  enforcing a limit does not relieve the core's own enforcement — each layer
+  counts the traffic it sees.
+- **Zone resolution is host-level** (`host_zone_map`), like the edge WAF;
+  parapet's per-ingress binding stays authoritative behind it.
+- **GeoIP parity**: `country`/`asn`-keyed limits need the IPLocate `.mmdb`s on
+  the edge (same `WAF_GEOIP_DB`/`WAF_ASN_DB` contract; the resolvers load when
+  the WAF **or** rate limiting is enabled). Without the DB, `SetLimits`
+  rejects the whole set (all-or-nothing) rather than silently bucketing
+  everyone together — the edge then keeps last-good (possibly empty) limits.
+- **Host-key cardinality**: the payload's `hosts` list (every Ingress-declared
+  host, scoped per edge) is wired as the Limiter's `KnownHost`, so host-keyed
+  buckets for undeclared hosts collapse into one — a random-Host flood can't
+  mint unbounded keys, mirroring the controller's `IsKnownHost`.
+- Decisions count in `parapet_ratelimit_total{name,result}` on the edge's
+  `:9187`, same names as the controller (`global:<id>` / `zone:<ns>/<name>:<id>`)
+  on a different scrape target.
 
 ## Response cache at the edge
 
@@ -668,7 +734,9 @@ edge *can* be co-located, prefer keyless (recoverable in git history).
 |---|---|
 | `GET /v1/certs` unreachable | Edge keeps serving cached cert+key (**fail static**); retries with backoff. New handshakes unaffected. |
 | `GET /v1/waf` unreachable | Edge keeps last-good rules (**fail static**). Never "no WAF". |
+| `GET /v1/ratelimit` unreachable | Edge keeps last-good limits (**fail static**). Never "no limits". |
 | Bad rule snapshot | All-or-nothing compile rejects the batch; previous good ruleset stays live. |
+| Bad limit snapshot | All-or-nothing per set (SetLimits); previous good set — and its live counters — stays live. The etag is withheld, so the input is re-fetched, retried, and re-warned every poll rather than 304ing silently. |
 | Edge compromised | Leaks its allowlisted domains' keys → **reissue/revoke those certs**; revoke the edge's token. Other edges/domains unaffected. |
 | Cert rotation gap | Overlapping refresh + fail-static avoid a window where the edge has no usable cert. |
 | Cache read IO error | Degrades to a cache miss (**fail static**) → served from parapet. Never errors the client request. |
@@ -743,3 +811,8 @@ repo entirely; it is recoverable from git history.
    path-only), whole-host, tag (surrogate keys from the origin's `Cache-Tag` header,
    via parapet `Meta.Tags`, host-independent), flush-all. **(done)** See
    [Purge / invalidation](#purge--invalidation). Edge-only.
+6. **Rate limits at edge** — `/v1/ratelimit` (global + zone limit documents,
+   `host_zone_map` from `ratelimit-zone` same-namespace bindings, known-hosts
+   list), edge enforcement via the controller's own `ratelimitrule` runtime
+   (per-edge counters, after the WAF, before the cache), fails static.
+   **(done)** See [Rate limiting at the edge](#rate-limiting-at-the-edge).

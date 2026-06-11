@@ -179,6 +179,62 @@ func (c *CpClient) FetchWaf(currentEtag string) (WafFetch, error) {
 	}
 }
 
+// RateLimitFetch is the outcome of a rate-limit config fetch.
+type RateLimitFetch struct {
+	// Unchanged is true on a 304.
+	Unchanged bool
+	// On a 200: the generation, global limit documents, per-zone documents,
+	// host->zone bindings, known hosts, and the ETag. Documents are []string
+	// (one YAML document per ConfigMap data value — ratelimitrule.Parse's
+	// contract; never "---"-joined).
+	Generation   uint64
+	GlobalLimits []string
+	Zones        map[string][]string
+	HostZoneMap  map[string]string
+	Hosts        []string
+	Etag         string
+}
+
+type rateLimitBody struct {
+	Generation   uint64              `json:"generation"`
+	GlobalLimits []string            `json:"global_limits"`
+	Zones        map[string][]string `json:"zones"`
+	HostZoneMap  map[string]string   `json:"host_zone_map"`
+	Hosts        []string            `json:"hosts"`
+}
+
+// FetchRateLimit fetches the rate-limit payload (global documents + zones +
+// host->zone map + known hosts) scoped to the edge's token, with ETag
+// revalidation. A 404 ("ratelimit distribution disabled") is treated like any
+// other non-200/304: an error the caller handles fail-static (keeps last-good).
+func (c *CpClient) FetchRateLimit(currentEtag string) (RateLimitFetch, error) {
+	resp, err := c.do(c.base+"/v1/ratelimit", currentEtag)
+	if err != nil {
+		return RateLimitFetch{}, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return RateLimitFetch{Unchanged: true}, nil
+	case http.StatusOK:
+		var body rateLimitBody
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxWafBody)).Decode(&body); err != nil {
+			return RateLimitFetch{}, fmt.Errorf("decode: %w", err)
+		}
+		return RateLimitFetch{
+			Generation:   body.Generation,
+			GlobalLimits: body.GlobalLimits,
+			Zones:        body.Zones,
+			HostZoneMap:  body.HostZoneMap,
+			Hosts:        body.Hosts,
+			Etag:         resp.Header.Get("ETag"),
+		}, nil
+	default:
+		return RateLimitFetch{}, fmt.Errorf("control plane returned %d for /v1/ratelimit", resp.StatusCode)
+	}
+}
+
 // PurgeFetch is the outcome of a cache-purge poll.
 type PurgeFetch struct {
 	// Disabled is true on a 404 ("purge distribution disabled" at the CP): a clean,
