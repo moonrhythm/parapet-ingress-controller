@@ -35,23 +35,15 @@ func NewRateLimitReloader(store *RateLimitStore, watchNamespace, podNamespace st
 // edge fetch sees a populated store (same startup ordering as the WafReloader).
 func (r *RateLimitReloader) LoadOnce(ctx context.Context) error { return r.reload(ctx) }
 
-// Watch re-establishes the ConfigMap watch and reloads (debounced) on change.
-// Blocks until ctx is cancelled; run it in a goroutine after LoadOnce.
+// Watch relists on every (re)connect (see watchAndRelist) and reloads
+// (debounced) on change. Blocks until ctx is cancelled; run it in a goroutine
+// after LoadOnce.
 func (r *RateLimitReloader) Watch(ctx context.Context) {
-	for ctx.Err() == nil {
-		w, err := k8s.WatchConfigMaps(ctx, r.watchNamespace, RateLimitLabelKey)
-		if err != nil {
-			slog.Error("edgecp: watch ratelimit configmaps failed; retrying", "err", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Second):
-			}
-			continue
-		}
-		r.drain(ctx, w.ResultChan())
-		w.Stop()
-	}
+	watchAndRelist(ctx, "ratelimit configmaps",
+		func(ctx context.Context) (watch.Interface, error) {
+			return k8s.WatchConfigMaps(ctx, r.watchNamespace, RateLimitLabelKey)
+		},
+		r.reload, r.drain)
 }
 
 func (r *RateLimitReloader) drain(ctx context.Context, ch <-chan watch.Event) {

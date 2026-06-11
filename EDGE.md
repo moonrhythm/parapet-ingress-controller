@@ -356,6 +356,22 @@ CP knobs: `CP_EVENTS_MAX_SUBSCRIBERS` (default 1024) and
 each, so size it ≥ replicas-per-token); over-cap streams shed with 503 +
 `Retry-After: CP_EVENTS_RETRY_AFTER` (default 30s).
 
+**CP store freshness (relist on reconnect).** The version vector — and every
+fetch the edge makes — is only as fresh as the CP's own view of the cluster. The
+CP's reloaders (Secrets, WAF/ratelimit ConfigMaps, Ingresses, the CA Secret)
+watch with a bare k8s watch that carries no resourceVersion and never replays
+history, so a change landing in the gap between one watch closing (a server
+timeout, a 410 watch-cache compaction, a transient disconnect) and the next
+opening is never delivered as an event. Because each reload rebuilds the whole
+store and only fires on an event, such a change would otherwise persist until an
+unrelated later event or a CP restart — a replica serving stale content under an
+*honest* ETag, with `/v1/events` advertising a stale vector. The CP closes this
+by **relisting on every watch (re)connect** (`watchAndRelist`, mirroring the
+controller's `resyncStore`): the watch is established first, then the store is
+relisted, so anything missed while no watch was live is recovered and any change
+after that point is delivered on the live watch. Each store is content-gated, so
+a no-change relist neither bumps an ETag nor wakes the fleet over `/v1/events`.
+
 ## WAF at the edge
 
 Unchanged from the keyless design — the WAF half never depended on how TLS keys

@@ -45,22 +45,12 @@ func (r *IngressReloader) WithRateLimit(rl *RateLimitStore) *IngressReloader {
 // LoadOnce does a single synchronous load (call before serving — see WafReloader).
 func (r *IngressReloader) LoadOnce(ctx context.Context) error { return r.reload(ctx) }
 
-// Watch re-establishes the Ingress watch and reloads on change. Run after LoadOnce.
+// Watch relists on every (re)connect (see watchAndRelist) and reloads on change.
+// Run after LoadOnce.
 func (r *IngressReloader) Watch(ctx context.Context) {
-	for ctx.Err() == nil {
-		w, err := k8s.WatchIngresses(ctx, r.watchNamespace)
-		if err != nil {
-			slog.Error("edgecp: watch ingresses failed; retrying", "err", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Second):
-			}
-			continue
-		}
-		r.drain(ctx, w.ResultChan())
-		w.Stop()
-	}
+	watchAndRelist(ctx, "ingresses",
+		func(ctx context.Context) (watch.Interface, error) { return k8s.WatchIngresses(ctx, r.watchNamespace) },
+		r.reload, r.drain)
 }
 
 func (r *IngressReloader) drain(ctx context.Context, ch <-chan watch.Event) {
