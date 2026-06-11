@@ -303,6 +303,15 @@ Per request: **global WAF (always) → zone WAF (if bound and resolves).** Globa
 runs first and is authoritative — a platform `block` terminates before the zone
 is consulted, so a tenant can't override it. `allow` is per-ruleset (see above).
 
+One exception: when `WAF_VALIDATED_PROXY` matches the request's peer (the edge
+proxy, which already evaluated the same global+zone rules) **and** the request
+carries the `X-Parapet-Waf` claim the edge stamps after evaluating, both
+rulesets are skipped for that request and `parapet_waf_skips{scope}` counts it.
+Unvalidated claims are deleted before rules run, so `request.headers` never
+sees a spoofed one. See
+[EDGE.md](EDGE.md#skipping-the-core-re-run-waf_validated_proxy-opt-in) for when
+that opt-in is sound.
+
 ## The key property: WAF reload is decoupled from the router
 
 Binding is by **ID resolved at request time**, so rule lifecycle and routing
@@ -352,6 +361,7 @@ The engine is free (`pkg/waf`); the work is plumbing.
 | `WAF_COST_LIMIT` | `1000000` | CEL cost cap per rule |
 | `WAF_INSPECT_BODY` | `0` | Inspect up to N body bytes (0 = `request.body` is empty) |
 | `WAF_DISABLE_MACROS` | `false` | Refuse rules using `all`/`exists`/`map`/`filter` |
+| `WAF_VALIDATED_PROXY` | `""` | Skip evaluation for requests from hops that already ran the same rules (the edge): comma list of `edge-mtls` (peer client cert chains to the live edge CA) and/or CIDRs/named groups (immediate peer); also requires the edge's per-request `X-Parapet-Waf` claim. `true` refused; bad spec fatal at startup |
 
 ### RBAC
 

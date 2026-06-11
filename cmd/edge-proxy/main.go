@@ -291,9 +291,16 @@ func main() {
 	if !disableLog {
 		m.Use(logger.Stdout())
 	}
+	// Strip any client-supplied WAF-validated claim — unconditionally (even with
+	// EDGE_WAF_ENABLED=false) and before the WAF, so a client can never smuggle
+	// a claim through this edge to the core and rules never see a spoofed value.
+	m.Use(edge.StripWAFClaim())
 	if ewaf != nil {
 		m.Use(ewaf.Global())
 		m.Use(ewaf.Zone())
+		// Past both rulesets: stamp the claim the core's WAF_VALIDATED_PROXY
+		// requires (only once a CP snapshot has landed — see ClaimStamp).
+		m.Use(ewaf.ClaimStamp())
 	}
 	if country != nil || asn != nil {
 		m.Use(forwardGeoHeaders(country, asn))

@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 )
 
 const globalRulesYAML = `
@@ -85,17 +87,45 @@ func TestEdgeWAF_KeepLastGoodOnBadRuleset(t *testing.T) {
 	require.NoError(t, w.Update(1, globalRulesYAML, nil, nil, `"e1"`))
 
 	// A ruleset that fails to compile (non-bool expression) is rejected; the
-	// previous good global ruleset stays live.
+	// previous good global ruleset stays live, and the etag + generation are
+	// NOT advanced — the old etag means the bad input is re-fetched and retried
+	// on the next poll instead of 304ing forever, and the claim keeps carrying
+	// the last cleanly-applied generation.
 	err := w.Update(2, `rules:
   - id: bad
     expression: "1 + 1"
     action: block
 `, nil, nil, `"e2"`)
 	assert.Error(t, err)
+	assert.Equal(t, `"e1"`, w.Etag(), "etag must not advance on a failed apply")
 
 	h := w.Global().ServeHandler(passed())
 	blocked := run(h, "GET", "https://acme.com/blocked")
 	assert.Equal(t, 403, blocked.Code, "previous good ruleset still blocks")
+}
+
+func TestEdgeWAF_BadFirstSnapshotNeverClaims(t *testing.T) {
+	// An edge whose FIRST snapshot fails to compile keeps the empty boot
+	// ruleset — it must not claim WAF validation, or a WAF_VALIDATED_PROXY
+	// core would skip its own WAF for traffic that was screened by nothing.
+	w := NewEdgeWAF(nil, nil)
+	err := w.Update(1, `rules:
+  - id: bad
+    expression: "1 + 1"
+    action: block
+`, nil, nil, `"e1"`)
+	assert.Error(t, err)
+
+	var got string
+	h := w.ClaimStamp().ServeHandler(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(wafclaim.Header)
+		rw.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "https://acme.com/x", nil)
+	req.Header.Set(wafclaim.Header, "spoofed")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Empty(t, got, "no claim on the empty boot ruleset — and the inbound value is deleted even at generation 0")
+	assert.Equal(t, "", w.Etag(), "failed first apply keeps no etag, so the snapshot is retried")
 }
 
 func TestEdgeWAF_CountryResolverWired(t *testing.T) {
@@ -120,6 +150,43 @@ func TestEdgeWAF_EtagRoundtrips(t *testing.T) {
 	assert.Equal(t, "", w.Etag())
 	require.NoError(t, w.Update(3, globalRulesYAML, nil, nil, `"e9"`))
 	assert.Equal(t, `"e9"`, w.Etag())
+}
+
+func TestEdgeWAF_ClaimStamp(t *testing.T) {
+	w := NewEdgeWAF(nil, nil)
+
+	var got string
+	sentinel := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(wafclaim.Header)
+		rw.WriteHeader(http.StatusOK)
+	})
+	h := w.ClaimStamp().ServeHandler(sentinel)
+
+	// Before the first CP snapshot (generation 0) nothing is stamped — the
+	// empty boot ruleset must not claim validation, so the core's
+	// WAF_VALIDATED_PROXY keeps evaluating this edge's traffic.
+	run(h, "GET", "https://acme.com/x")
+	assert.Empty(t, got)
+
+	// Once a snapshot lands, the claim is the generation — Set overwrites any
+	// inbound value even without StripWAFClaim upstream.
+	require.NoError(t, w.Update(7, globalRulesYAML, nil, nil, `"e1"`))
+	req := httptest.NewRequest(http.MethodGet, "https://acme.com/x", nil)
+	req.Header.Set(wafclaim.Header, "spoofed")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Equal(t, "7", got)
+}
+
+func TestStripWAFClaim(t *testing.T) {
+	var got string
+	h := StripWAFClaim().ServeHandler(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(wafclaim.Header)
+		rw.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "https://acme.com/x", nil)
+	req.Header.Set(wafclaim.Header, "1")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+	assert.Empty(t, got, "client-supplied claim must never pass the edge")
 }
 
 func TestEdgeWAF_ZoneRemovedOnNextUpdateButKeptOnBadEdit(t *testing.T) {

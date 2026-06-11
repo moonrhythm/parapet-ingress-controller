@@ -73,7 +73,7 @@ func TestWAFZone(t *testing.T) {
 	t.Run("blocks matched request via resolved zone", func(t *testing.T) {
 		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/waf-zone": "acme"})
 		var gotKey string
-		WAFZone(func(key string) *waf.WAF { gotKey = key; return zone })(ctx)
+		WAFZone(func(key string) *waf.WAF { gotKey = key; return zone }, nil)(ctx)
 
 		w, called := serve(ctx, "/admin/users")
 		assert.Equal(t, "cust1/acme", gotKey)
@@ -83,7 +83,7 @@ func TestWAFZone(t *testing.T) {
 
 	t.Run("non-matching request passes through resolved zone", func(t *testing.T) {
 		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/waf-zone": "acme"})
-		WAFZone(func(string) *waf.WAF { return zone })(ctx)
+		WAFZone(func(string) *waf.WAF { return zone }, nil)(ctx)
 
 		w, called := serve(ctx, "/public")
 		assert.True(t, called)
@@ -92,7 +92,7 @@ func TestWAFZone(t *testing.T) {
 
 	t.Run("passes through when zone resolves to nil", func(t *testing.T) {
 		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/waf-zone": "acme"})
-		WAFZone(func(string) *waf.WAF { return nil })(ctx)
+		WAFZone(func(string) *waf.WAF { return nil }, nil)(ctx)
 
 		w, called := serve(ctx, "/admin/users")
 		assert.True(t, called)
@@ -102,11 +102,40 @@ func TestWAFZone(t *testing.T) {
 	t.Run("no annotation injects no middleware", func(t *testing.T) {
 		ctx := newCtx(nil)
 		var lookupCalled bool
-		WAFZone(func(string) *waf.WAF { lookupCalled = true; return zone })(ctx)
+		WAFZone(func(string) *waf.WAF { lookupCalled = true; return zone }, nil)(ctx)
 
 		w, called := serve(ctx, "/admin")
 		assert.True(t, called)
 		assert.False(t, lookupCalled)
 		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("skip bypasses the zone without resolving it", func(t *testing.T) {
+		// A request the skip predicate matches was already validated at the
+		// edge: the zone must not run (a blocking rule passes through) and the
+		// live lookup must not even happen.
+		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/waf-zone": "acme"})
+		var lookupCalled bool
+		WAFZone(
+			func(string) *waf.WAF { lookupCalled = true; return zone },
+			func(*http.Request) bool { return true },
+		)(ctx)
+
+		w, called := serve(ctx, "/admin/users")
+		assert.True(t, called)
+		assert.False(t, lookupCalled)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("non-matching skip still evaluates the zone", func(t *testing.T) {
+		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/waf-zone": "acme"})
+		WAFZone(
+			func(string) *waf.WAF { return zone },
+			func(*http.Request) bool { return false },
+		)(ctx)
+
+		w, called := serve(ctx, "/admin/users")
+		assert.False(t, called)
+		assert.Equal(t, http.StatusForbidden, w.Code)
 	})
 }

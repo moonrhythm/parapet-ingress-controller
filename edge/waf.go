@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/waf"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 	"github.com/moonrhythm/parapet-ingress-controller/wafrule"
 )
 
@@ -31,9 +33,12 @@ type EdgeWAF struct {
 
 	newZone func() *waf.WAF // factory wiring Country/ASN/Logger onto a fresh zone
 
-	mu         sync.Mutex
-	etag       string
-	generation uint64
+	// generation of the currently-loaded snapshot (0 until the first CP fetch
+	// applies). Atomic: ClaimStamp reads it per request.
+	generation atomic.Uint64
+
+	mu   sync.Mutex
+	etag string
 }
 
 // NewEdgeWAF builds an empty edge WAF. country/asn are the GeoIP resolvers
@@ -118,10 +123,20 @@ func (w *EdgeWAF) Update(generation uint64, globalYAML string, zonesYAML, hostZo
 	}
 	w.hostZone.Store(&hz)
 
-	w.mu.Lock()
-	w.etag = etag
-	w.generation = generation
-	w.mu.Unlock()
+	// Advance the etag + generation only on a CLEAN apply. Storing the etag on
+	// a failed compile would 304 every later poll and the bad input would never
+	// be retried (the core deliberately withholds its fingerprint on a rejected
+	// edit for the same reason); the cost is one re-fetch+recompile per poll
+	// until the input is fixed. Holding the generation back keeps the claim
+	// honest: at boot a bad FIRST snapshot leaves generation 0, so ClaimStamp
+	// never claims validation for the empty boot ruleset — and at steady state
+	// the claim keeps carrying the last cleanly-applied generation.
+	if firstErr == nil {
+		w.mu.Lock()
+		w.etag = etag
+		w.mu.Unlock()
+		w.generation.Store(generation)
+	}
 
 	return firstErr
 }
@@ -130,6 +145,48 @@ func (w *EdgeWAF) Update(generation uint64, globalYAML string, zonesYAML, hostZo
 // cheap pass-through until rules are loaded.
 func (w *EdgeWAF) Global() parapet.Middleware {
 	return w.global
+}
+
+// ClaimStamp returns middleware that stamps the WAF-validated claim
+// (wafclaim.Header) on requests forwarded to the core. Mount it AFTER Global()
+// and Zone(): a request reaching it has passed both rulesets, so the claim
+// asserts "this edge's WAF evaluated the request against a live snapshot". It
+// stamps only once a CP snapshot has applied CLEANLY (generation > 0; Update
+// holds the generation back on a compile failure) — an edge that booted while
+// the CP was unreachable, or whose first snapshot was rejected, is serving the
+// empty initial ruleset and must not claim validation, so the core keeps
+// evaluating its traffic (WAF_VALIDATED_PROXY requires the claim in addition
+// to peer trust). After a clean apply the claim reflects last-good fail-static
+// state, mirroring the core's own keep-last-good posture. Self-contained
+// either way: gen > 0 overwrites any inbound value (Set, not Add), gen == 0
+// deletes it — so even without StripWAFClaim mounted upstream a client value
+// never survives this middleware.
+func (w *EdgeWAF) ClaimStamp() parapet.Middleware {
+	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			if gen := w.generation.Load(); gen > 0 {
+				r.Header.Set(wafclaim.Header, strconv.FormatUint(gen, 10))
+			} else {
+				r.Header.Del(wafclaim.Header)
+			}
+			h.ServeHTTP(rw, r)
+		})
+	})
+}
+
+// StripWAFClaim returns middleware that removes any client-supplied
+// WAF-validated claim. Mounted UNCONDITIONALLY (even with
+// EDGE_WAF_ENABLED=false) and before the WAF, so a client can never smuggle a
+// claim through this edge to the core — a WAF-disabled edge forwards claimless
+// requests and the core evaluates them — and CEL rules never see a spoofed
+// value in request.headers.
+func StripWAFClaim() parapet.Middleware {
+	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+			r.Header.Del(wafclaim.Header)
+			h.ServeHTTP(rw, r)
+		})
+	})
 }
 
 // Zone returns middleware that resolves the request host to its bound zone

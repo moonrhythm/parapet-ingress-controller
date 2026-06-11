@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 )
 
 func newWAFController() *Controller {
@@ -59,6 +60,66 @@ rules:
 		w.WriteHeader(http.StatusOK)
 	})).ServeHTTP(w, r)
 	assert.Equal(t, http.StatusForbidden, w.Code, "request.country resolver blocks via the global WAF")
+}
+
+func TestGlobalWAFSkipValidated(t *testing.T) {
+	t.Parallel()
+
+	// A request the SkipValidated predicate matches (its WAF verdict was already
+	// decided at the edge) must bypass the global ruleset; everything else still
+	// evaluates. The predicate here keys off a test-local header — the real one
+	// is peer-based (edge client cert / peer CIDR), built in main.
+	ctrl := New("", proxy.New())
+	ctrl.PodNamespace = "ctrl-ns"
+	ctrl.WAFConfig = WAFConfig{
+		Enabled:       true,
+		SkipValidated: func(r *http.Request) bool { return r.Header.Get("X-Test-From-Edge") == "1" },
+	}
+	ctrl.InitWAF()
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
+rules:
+  - id: block-all
+    expression: "true"
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+
+	serve := func(fromEdge bool) (*httptest.ResponseRecorder, string) {
+		r := httptest.NewRequest(http.MethodGet, "http://app/", nil)
+		if fromEdge {
+			r.Header.Set("X-Test-From-Edge", "1")
+		}
+		// Every request arrives with a claim header; the wrapper must let it
+		// through only for validated requests and delete it otherwise.
+		r.Header.Set(wafclaim.Header, "7")
+		var claimSeen string
+		w := httptest.NewRecorder()
+		ctrl.GlobalWAF().ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claimSeen = r.Header.Get(wafclaim.Header)
+			w.WriteHeader(http.StatusOK)
+		})).ServeHTTP(w, r)
+		return w, claimSeen
+	}
+
+	rec, claim := serve(true)
+	assert.Equal(t, http.StatusOK, rec.Code, "validated-at-edge request bypasses the global WAF")
+	assert.Equal(t, "7", claim, "a validated claim is core-vouched and flows upstream")
+
+	rec, _ = serve(false)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "other traffic still evaluates")
+
+	// An unvalidated claim must be deleted before rules/zone/upstream see it —
+	// use a rule that passes so the inner handler can observe the headers.
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
+rules:
+  - id: block-nothing
+    expression: request.path == "/never"
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	rec, claim = serve(false)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, claim, "an unvalidated claim is stripped before the ruleset and upstream")
 }
 
 func TestReloadWAF(t *testing.T) {

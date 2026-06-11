@@ -18,6 +18,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 	"github.com/moonrhythm/parapet-ingress-controller/wafrule"
 )
 
@@ -48,6 +49,12 @@ type WAFConfig struct {
 	// ASN resolves the client's autonomous system number for request.asn.
 	// nil leaves request.asn 0. Set from WAF_ASN_DB in main.
 	ASN func(*http.Request) int64
+	// SkipValidated reports requests whose WAF validation already happened at a
+	// trusted upstream hop (the edge proxy runs the same global+zone rules) —
+	// the global and zone WAF skip evaluation for them. Built from
+	// WAF_VALIDATED_PROXY in main; nil (the default) evaluates every request
+	// here. Must be set before GlobalWAF() is mounted.
+	SkipValidated func(*http.Request) bool
 }
 
 // InitWAF builds the global WAF instance and the (empty) zone registry. Call
@@ -64,12 +71,31 @@ func (ctrl *Controller) InitWAF() {
 
 // GlobalWAF returns the global WAF middleware to mount in the server chain, or
 // nil when the WAF is disabled. An enabled WAF with no rules loaded is a cheap
-// pass-through.
+// pass-through. When WAFConfig.SkipValidated is set, requests it matches bypass
+// the ruleset entirely (their WAF verdict was already decided at the edge).
 func (ctrl *Controller) GlobalWAF() parapet.Middleware {
 	if ctrl.globalWAF == nil {
 		return nil
 	}
-	return ctrl.globalWAF
+	skip := ctrl.WAFConfig.SkipValidated
+	if skip == nil {
+		return ctrl.globalWAF
+	}
+	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		wafH := ctrl.globalWAF.ServeHandler(h)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if skip(r) {
+				metric.WAFSkip(roleGlobal)
+				h.ServeHTTP(w, r)
+				return
+			}
+			// Not validated: drop any claim header so it can't reach the CEL
+			// rules below (request.headers), the zone-WAF skip downstream, or
+			// the upstream backend. A validated request keeps it — core-vouched.
+			r.Header.Del(wafclaim.Header)
+			wafH.ServeHTTP(w, r)
+		})
+	})
 }
 
 // LookupZone returns the compiled WAF for a zone registry key
