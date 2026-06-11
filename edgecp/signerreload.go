@@ -54,23 +54,14 @@ func NewSignerReloader(server *Server, namespace, caSecret string, ttl, skew tim
 // until the bootstrap Job lands.
 func (r *SignerReloader) LoadOnce(ctx context.Context) error { return r.reload(ctx) }
 
-// Watch re-establishes a Secret watch and reloads (debounced) on every event that
-// touches the CA Secret. Blocks until ctx is cancelled; run it in a goroutine.
+// Watch relists on every (re)connect (see watchAndRelist) and reloads (debounced)
+// on every event that touches the CA Secret. The reconnect relist is tuple-gated
+// in reload (ca_id, active-fp), so it never churns the generation on a no-op.
+// Blocks until ctx is cancelled; run it in a goroutine.
 func (r *SignerReloader) Watch(ctx context.Context) {
-	for ctx.Err() == nil {
-		w, err := k8s.WatchSecrets(ctx, r.namespace)
-		if err != nil {
-			slog.Error("edgecp: signer watch secrets failed; retrying", "err", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Second):
-			}
-			continue
-		}
-		r.drain(ctx, w.ResultChan())
-		w.Stop()
-	}
+	watchAndRelist(ctx, "signer secrets",
+		func(ctx context.Context) (watch.Interface, error) { return k8s.WatchSecrets(ctx, r.namespace) },
+		r.reload, r.drain)
 }
 
 // isCASecret reports whether a watch event concerns the CA Secret by name (so

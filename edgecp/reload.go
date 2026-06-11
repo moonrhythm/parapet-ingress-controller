@@ -29,16 +29,51 @@ func NewReloader(store *CertStore, namespace, skipSecret string) *Reloader {
 	return &Reloader{store: store, namespace: namespace, skipSecret: skipSecret, debounce: 300 * time.Millisecond}
 }
 
-// Start does the initial load and then watches Secrets, reloading on change.
+// Start watches Secrets, relisting on every (re)connect and on change.
 // Blocks until ctx is cancelled; run it in a goroutine.
 func (r *Reloader) Start(ctx context.Context) {
-	if err := r.reload(ctx); err != nil {
-		slog.Error("edgecp: initial secret load failed", "err", err)
-	}
+	watchAndRelist(ctx, "secrets",
+		func(ctx context.Context) (watch.Interface, error) { return k8s.WatchSecrets(ctx, r.namespace) },
+		r.reload, r.drain)
+}
+
+// watchAndRelist is the relist-on-(re)connect watch loop every edgecp reloader
+// shares. On each iteration it (re)establishes the watch, RELISTS once via
+// reload, then drains events (each triggers a debounced reload) until the watch
+// closes — then reconnects.
+//
+// The relist is the fix for a silent-staleness bug: the bare k8s Watch carries
+// no resourceVersion and never replays history, so a change that lands in the
+// gap between one watch closing and the next opening is never delivered. Because
+// every reload is a full rebuild triggered only by a watch event, that missed
+// change would otherwise persist until some unrelated later event — or a process
+// restart (the "edge keeps stale config until restart" incident). Relisting once
+// the watch is live closes the gap: anything that changed while no watch was
+// established is captured by the list, and any change from this point on is
+// delivered as an event on w. This mirrors the controller's resyncStore
+// (controller.go), but is simpler here because each reload already rebuilds the
+// whole store, so events only need to act as a trigger — not be replayed in
+// order. Establishing the watch BEFORE the relist (rather than after, as the
+// controller does) leaves no residual gap: a change racing the relist still
+// delivers an event on the now-live watch.
+//
+// Every edgecp store is content-gated (cert version, WAF/ratelimit recompute,
+// the signer's ca_id/active-fp tuple), so a no-change relist is a true no-op —
+// no etag bump and no /v1/events wake of the edge fleet.
+//
+// drain blocks until the watch channel closes (so the loop reconnects) or ctx is
+// done; label names the resource in logs.
+func watchAndRelist(
+	ctx context.Context,
+	label string,
+	watchFn func(ctx context.Context) (watch.Interface, error),
+	reload func(ctx context.Context) error,
+	drain func(ctx context.Context, ch <-chan watch.Event),
+) {
 	for ctx.Err() == nil {
-		w, err := k8s.WatchSecrets(ctx, r.namespace)
+		w, err := watchFn(ctx)
 		if err != nil {
-			slog.Error("edgecp: watch secrets failed; retrying", "err", err)
+			slog.Error("edgecp: watch "+label+" failed; retrying", "err", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -46,7 +81,10 @@ func (r *Reloader) Start(ctx context.Context) {
 			}
 			continue
 		}
-		r.drain(ctx, w.ResultChan())
+		if err := reload(ctx); err != nil {
+			slog.Error("edgecp: "+label+" relist on watch (re)connect failed; keeping last-good", "err", err)
+		}
+		drain(ctx, w.ResultChan())
 		w.Stop()
 	}
 }
