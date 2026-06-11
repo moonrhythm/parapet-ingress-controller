@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 )
 
 func TestBuildWAFValidatedProxy(t *testing.T) {
@@ -19,9 +21,15 @@ func TestBuildWAFValidatedProxy(t *testing.T) {
 		r.TLS = cs
 		return r
 	}
+	// claimed marks the request as edge-validated (the header the edge's
+	// ClaimStamp sets); the predicate requires it in addition to peer trust.
+	claimed := func(r *http.Request) *http.Request {
+		r.Header.Set(wafclaim.Header, "1")
+		return r
+	}
 
 	t.Run("empty and false disable the skip", func(t *testing.T) {
-		for _, spec := range []string{"", "false", "  "} {
+		for _, spec := range []string{"", "false", "  ", ","} {
 			pred, err := buildWAFValidatedProxy(spec, nil)
 			require.NoError(t, err, "spec=%q", spec)
 			assert.Nil(t, pred, "spec=%q", spec)
@@ -61,18 +69,18 @@ func TestBuildWAFValidatedProxy(t *testing.T) {
 		require.NotNil(t, pred)
 
 		cs := &tls.ConnectionState{}
-		assert.True(t, pred(reqFrom("192.168.1.1:1234", cs)))
+		assert.True(t, pred(claimed(reqFrom("192.168.1.1:1234", cs))))
 		assert.Same(t, cs, got)
 		verdict = false
-		assert.False(t, pred(reqFrom("192.168.1.1:1234", cs)))
+		assert.False(t, pred(claimed(reqFrom("192.168.1.1:1234", cs))))
 	})
 
 	t.Run("cidr matches the immediate peer", func(t *testing.T) {
 		pred, err := buildWAFValidatedProxy("10.0.0.0/8", nil)
 		require.NoError(t, err)
 		require.NotNil(t, pred)
-		assert.True(t, pred(reqFrom("10.1.2.3:5555", nil)))
-		assert.False(t, pred(reqFrom("192.168.1.1:5555", nil)))
+		assert.True(t, pred(claimed(reqFrom("10.1.2.3:5555", nil))))
+		assert.False(t, pred(claimed(reqFrom("192.168.1.1:5555", nil))))
 	})
 
 	t.Run("cidr leg ignores forwarded headers", func(t *testing.T) {
@@ -81,7 +89,7 @@ func TestBuildWAFValidatedProxy(t *testing.T) {
 		// must never grant the skip, or the WAF becomes client-bypassable.
 		pred, err := buildWAFValidatedProxy("10.0.0.0/8", nil)
 		require.NoError(t, err)
-		r := reqFrom("192.168.1.1:5555", nil)
+		r := claimed(reqFrom("192.168.1.1:5555", nil))
 		r.Header.Set("X-Forwarded-For", "10.1.2.3")
 		r.Header.Set("X-Real-Ip", "10.1.2.3")
 		assert.False(t, pred(r))
@@ -93,9 +101,24 @@ func TestBuildWAFValidatedProxy(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.NotNil(t, pred)
-		assert.True(t, pred(reqFrom("192.168.1.1:1", &tls.ConnectionState{})), "mtls leg")
-		assert.True(t, pred(reqFrom("10.9.9.9:1", nil)), "cidr leg")
-		assert.False(t, pred(reqFrom("192.168.1.1:1", nil)), "neither leg")
+		assert.True(t, pred(claimed(reqFrom("192.168.1.1:1", &tls.ConnectionState{}))), "mtls leg")
+		assert.True(t, pred(claimed(reqFrom("10.9.9.9:1", nil))), "cidr leg")
+		assert.False(t, pred(claimed(reqFrom("192.168.1.1:1", nil))), "neither leg")
+	})
+
+	t.Run("peer trust without the edge claim never skips", func(t *testing.T) {
+		// The claim is what tells a WAF-running edge apart from one with
+		// EDGE_WAF_ENABLED=false or one still on its empty boot ruleset: a
+		// trusted peer alone must not skip. The claim miss also short-circuits
+		// before the cert verifier — it must not even be consulted.
+		verifierCalled := false
+		pred, err := buildWAFValidatedProxy("edge-mtls, 10.0.0.0/8", func(*tls.ConnectionState) bool {
+			verifierCalled = true
+			return true
+		})
+		require.NoError(t, err)
+		assert.False(t, pred(reqFrom("10.1.2.3:1", &tls.ConnectionState{})), "both legs match but no claim")
+		assert.False(t, verifierCalled, "claim miss short-circuits before the cert verify")
 	})
 
 	t.Run("invalid cidr fails fast", func(t *testing.T) {

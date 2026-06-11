@@ -62,10 +62,10 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 3. routing → per-route: `allow-remote` → **zone WAF** → `redirect-https` → **zone rate limits** → annotation rate limits → body limit → basic-auth → forward-auth
 4. upstream proxy (with retry on connection failure + bad-addr skip)
 
-When `WAF_VALIDATED_PROXY` matches the request's peer (the edge proxy, which
-already ran the same rules), the **global WAF** and **zone WAF** steps are
-skipped for that request — counted as `parapet_waf_skips{scope}`; every other
-step is unchanged.
+When `WAF_VALIDATED_PROXY` matches the request's peer **and** the request
+carries the edge's `X-Parapet-Waf` claim (stamped after the edge's WAF
+evaluated it), the **global WAF** and **zone WAF** steps are skipped for that
+request — counted as `parapet_waf_skips{scope}`; every other step is unchanged.
 
 ### Request header normalization
 
@@ -93,13 +93,23 @@ The supported rule-authoring surface is pinned by the
 change what a rule matches.
 
 **Skipping re-validation behind the edge** (`WAF_VALIDATED_PROXY`, default off):
-requests whose peer matches the spec — `edge-mtls` (a TLS client cert chaining
-to the live edge CA; requires edge auto-trust) and/or CIDRs/named groups (the
-immediate TCP peer, for the plaintext edge→core hop) — skip the global and zone
-WAF at the core, because the edge already evaluated the same rules. Everything
-else (rate limits, auth, routing, geo headers) is unchanged, and non-matching
-traffic still gets the full WAF. `true` is refused, and a bad spec (malformed
-CIDR, `edge-mtls` without `EDGE_TRUST_CP_ENDPOINT`) is fatal at startup. See
+a request skips the global and zone WAF at the core when **both** hold — its
+peer matches the spec (`edge-mtls`: a TLS client cert chaining to the live edge
+CA, requires edge auto-trust; and/or CIDRs/named groups: the immediate TCP
+peer, for the plaintext edge→core hop) **and** it carries the `X-Parapet-Waf`
+claim the edge stamps after its WAF evaluated the request. The claim is stamped
+only once a CP rules snapshot has landed, so an edge on its empty boot ruleset
+— or one with `EDGE_WAF_ENABLED=false` — forwards claimless requests that get
+the full core WAF. The edge strips client-supplied claims unconditionally; the
+core deletes the claim from any request it did not skip, so an unvalidated
+claim never reaches CEL rules, the zone WAF, or the upstream (a skipped
+request's claim flows upstream, core-vouched). Everything else (rate limits,
+auth, routing, geo headers) is unchanged, and non-matching traffic still gets
+the full WAF. `true` is refused, and a bad spec (malformed CIDR, `edge-mtls`
+without `EDGE_TRUST_CP_ENDPOINT`) is fatal at startup. Edge images that predate
+the claim never stamp it — but they don't strip client-supplied claims either,
+so with a mixed fleet a client could smuggle a claim through an old edge;
+upgrade every edge before opting in (see the trade-offs in EDGE.md). See
 [EDGE.md](EDGE.md#skipping-the-core-re-run-waf_validated_proxy-opt-in) for the
 trade-offs this opt-in accepts.
 
@@ -236,7 +246,7 @@ invariants:
 | `TR_MAX_CONNS_PER_HOST` | stdlib | Max conns per host |
 | `PROFILER` / `PROFILER_NAME` | `false` | Cloud Profiler |
 | `WAF_COST_LIMIT` / `WAF_INSPECT_BODY` / `WAF_DISABLE_MACROS` | — | CEL cost cap / body-bytes inspection / macro kill-switch (see WAF.md) |
-| `WAF_VALIDATED_PROXY` | `""` | Skip the core's global+zone WAF for requests whose peer already ran the same rules (the edge proxy). Comma list of `edge-mtls` (peer client cert chains to the live edge CA; requires `EDGE_TRUST_CP_ENDPOINT`) and/or CIDRs/named groups (immediate TCP peer). `true` is refused; a bad spec is fatal at startup. Skips counted in `parapet_waf_skips{scope}`. See [EDGE.md](EDGE.md#skipping-the-core-re-run-waf_validated_proxy-opt-in) |
+| `WAF_VALIDATED_PROXY` | `""` | Skip the core's global+zone WAF for requests whose peer already ran the same rules (the edge proxy). Comma list of `edge-mtls` (peer client cert chains to the live edge CA; requires `EDGE_TRUST_CP_ENDPOINT`) and/or CIDRs/named groups (immediate TCP peer). Also requires the per-request `X-Parapet-Waf` claim the edge stamps after evaluating. `true` is refused; a bad spec is fatal at startup. Skips counted in `parapet_waf_skips{scope}`. See [EDGE.md](EDGE.md#skipping-the-core-re-run-waf_validated_proxy-opt-in) |
 | `UPSTREAM_AUTO_H2C` | `false` | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The verdict (h2c or HTTP/1.1-only) is cached per-Service with a TTL and re-probed on expiry; concurrent probes for a cold/expired upstream are single-flighted so they can't stampede failed connections. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
 | `UPSTREAM_AUTO_H2C_TTL` | `10m` | How long a cached auto-h2c verdict is trusted before the upstream is re-probed (only when `UPSTREAM_AUTO_H2C` is on) |
 

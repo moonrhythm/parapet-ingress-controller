@@ -18,6 +18,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 	"github.com/moonrhythm/parapet-ingress-controller/wafrule"
 )
 
@@ -88,6 +89,10 @@ func (ctrl *Controller) GlobalWAF() parapet.Middleware {
 				h.ServeHTTP(w, r)
 				return
 			}
+			// Not validated: drop any claim header so it can't reach the CEL
+			// rules below (request.headers), the zone-WAF skip downstream, or
+			// the upstream backend. A validated request keeps it — core-vouched.
+			r.Header.Del(wafclaim.Header)
 			wafH.ServeHTTP(w, r)
 		})
 	})

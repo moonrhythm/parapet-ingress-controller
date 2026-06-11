@@ -86,8 +86,10 @@ tenant **zones** (`GET /v1/waf`) and run them at the edge as an early-drop layer
 By default parapet still re-runs the full WAF authoritatively — the edge is the
 lower trust tier, so a stale/disabled edge never means an unprotected origin —
 unless the core opts out for strongly-identified edge hops via
-`WAF_VALIDATED_PROXY` (see EDGE.md for the trade-offs that opt-in accepts). The
-edge reuses
+`WAF_VALIDATED_PROXY` — which also requires the per-request `X-Parapet-Waf`
+claim this edge stamps after evaluating, so a WAF-disabled edge's traffic is
+still evaluated at the core (see EDGE.md for the trade-offs that opt-in
+accepts). The edge reuses
 the same CEL engine as parapet (`parapet/pkg/waf`, conformance-guarded), so rules
 block identically. Zone resolution at the edge is host-level (the control plane
 derives `host → zoneKey` from Ingress objects, scoped to the edge's domains);

@@ -12,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 )
 
 func newWAFController() *Controller {
@@ -83,20 +84,42 @@ rules:
 `))
 	ctrl.reloadWAFDebounced()
 
-	serve := func(fromEdge bool) *httptest.ResponseRecorder {
+	serve := func(fromEdge bool) (*httptest.ResponseRecorder, string) {
 		r := httptest.NewRequest(http.MethodGet, "http://app/", nil)
 		if fromEdge {
 			r.Header.Set("X-Test-From-Edge", "1")
 		}
+		// Every request arrives with a claim header; the wrapper must let it
+		// through only for validated requests and delete it otherwise.
+		r.Header.Set(wafclaim.Header, "7")
+		var claimSeen string
 		w := httptest.NewRecorder()
-		ctrl.GlobalWAF().ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ctrl.GlobalWAF().ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claimSeen = r.Header.Get(wafclaim.Header)
 			w.WriteHeader(http.StatusOK)
 		})).ServeHTTP(w, r)
-		return w
+		return w, claimSeen
 	}
 
-	assert.Equal(t, http.StatusOK, serve(true).Code, "validated-at-edge request bypasses the global WAF")
-	assert.Equal(t, http.StatusForbidden, serve(false).Code, "other traffic still evaluates")
+	rec, claim := serve(true)
+	assert.Equal(t, http.StatusOK, rec.Code, "validated-at-edge request bypasses the global WAF")
+	assert.Equal(t, "7", claim, "a validated claim is core-vouched and flows upstream")
+
+	rec, _ = serve(false)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "other traffic still evaluates")
+
+	// An unvalidated claim must be deleted before rules/zone/upstream see it —
+	// use a rule that passes so the inner handler can observe the headers.
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
+rules:
+  - id: block-nothing
+    expression: request.path == "/never"
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+	rec, claim = serve(false)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Empty(t, claim, "an unvalidated claim is stripped before the ruleset and upstream")
 }
 
 func TestReloadWAF(t *testing.T) {

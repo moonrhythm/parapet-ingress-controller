@@ -8,12 +8,15 @@ import (
 	"strings"
 
 	"github.com/moonrhythm/parapet-ingress-controller/trustcidr"
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 )
 
 // buildWAFValidatedProxy resolves the WAF_VALIDATED_PROXY spec into the
 // WAFConfig.SkipValidated predicate: requests it matches arrive from a hop that
 // already ran the same global+zone WAF (the edge proxy), so the core skips
-// re-evaluating them. The spec is a comma-separated list of:
+// re-evaluating them. Matching requires BOTH the per-request claim header the
+// edge stamps after evaluating (wafclaim.Header) AND the peer matching the
+// spec — a comma-separated list of:
 //
 //	edge-mtls     the peer presented a client cert chaining to the live edge CA
 //	              (requires edge auto-trust, EDGE_TRUST_CP_ENDPOINT) — the
@@ -65,16 +68,29 @@ func buildWAFValidatedProxy(spec string, verifyEdgeCert func(*tls.ConnectionStat
 	}
 
 	cidrMatch := trustcidr.Parse(strings.Join(cidrs, ","))
+	var peer func(*http.Request) bool
 	switch {
 	case useMTLS && cidrMatch != nil:
-		return func(r *http.Request) bool {
+		peer = func(r *http.Request) bool {
 			return verifyEdgeCert(r.TLS) || cidrMatch(r)
-		}, nil
+		}
 	case useMTLS:
-		return func(r *http.Request) bool {
+		peer = func(r *http.Request) bool {
 			return verifyEdgeCert(r.TLS)
-		}, nil
+		}
+	case cidrMatch != nil:
+		peer = cidrMatch
 	default:
-		return cidrMatch, nil
+		return nil, nil // separator-only spec: zero tokens, same as ""
 	}
+	// Peer trust alone is not enough: the edge must also have CLAIMED the
+	// validation per request (wafclaim.Header, stamped after its WAF evaluated
+	// the request, only once a CP snapshot landed). This is what lets the core
+	// tell apart an edge with EDGE_WAF_ENABLED=false, or one still on its empty
+	// boot ruleset — their requests carry no claim and get the full WAF here.
+	// Claim first: a cheap header miss short-circuits before the cert verify
+	// for all non-edge traffic.
+	return func(r *http.Request) bool {
+		return r.Header.Get(wafclaim.Header) != "" && peer(r)
+	}, nil
 }

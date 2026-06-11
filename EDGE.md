@@ -309,6 +309,20 @@ comma-separated list of
   strong as network reachability into those ranges (anything that can source
   from them — e.g. any pod in a flat cluster network — bypasses the core WAF).
 
+Peer trust alone is not enough: the core also requires the per-request
+**`X-Parapet-Waf` claim** the edge stamps after its WAF layer evaluated the
+request (`EdgeWAF.ClaimStamp`, mounted after the global+zone rulesets; value =
+the live snapshot's generation, checked by presence). The claim is stamped only
+once a CP snapshot has landed, and the edge strips any client-supplied claim
+unconditionally — even with `EDGE_WAF_ENABLED=false` (`edge.StripWAFClaim`,
+mounted before the WAF so CEL rules never see a spoofed value either). On the
+core side, the claim is deleted from every request that is *not* skipped, so an
+unvalidated claim never reaches CEL rules, the zone WAF, or the backend; a
+skipped request's claim flows upstream, core-vouched. The claim is what lets
+the core tell edges apart **per request**: a WAF-disabled edge, or one still on
+its empty boot ruleset (booted while the CP was unreachable), forwards
+claimless requests — which simply get the full core WAF.
+
 Matching requests skip the core's global **and** zone WAF, counted as
 `parapet_waf_skips{scope}`; rate limits, auth, routing, and geo headers are
 unchanged, and non-matching traffic (direct, LB, another front proxy) still
@@ -319,14 +333,20 @@ did **not** run your WAF.
 This makes the edge's WAF — and its `host_zone_map` zone resolution —
 authoritative for matching traffic. The trade-offs you accept:
 
-- the core trusts the *hop*, not a per-request claim: it cannot tell a
-  `EDGE_WAF_ENABLED=false` edge apart, so every edge must run the WAF with the
-  same rule source;
+- the claim is the edge's **self-report**, made trustworthy by the verified
+  peer identity — so it requires every edge image to be at least the version
+  that stamps *and strips* the claim. An older binary never stamps (its
+  traffic is simply evaluated at the core — safe), but it does not strip
+  either, so a client could smuggle a claim through an old edge; keep the
+  fleet current before opting in;
 - zone-resolution drift is no longer corrected by the core for that traffic;
-- an edge that boots while the CP is unreachable serves with an **empty
-  ruleset** until its first snapshot lands (fail-static protects against later
-  fetch failures, not the first) — with the skip on, that window reaches the
-  origin unscreened;
+- the claim reflects **fail-static last-good** state: once a first snapshot
+  has applied cleanly, an edge keeps claiming on its last-good rules through
+  later fetch failures or a bad ruleset edit — mirroring the core's own
+  keep-last-good posture. A snapshot that fails to compile never advances the
+  claim generation or the etag, so a bad FIRST snapshot keeps the edge
+  claimless (its traffic gets the full core WAF) and the input is re-fetched
+  and retried every poll rather than 304ing forever;
 - keep `WAF_INSPECT_BODY` / fail-mode parity between edge and core, or the
   edge's verdict is weaker than the one it replaces — and GeoIP/ASN-DB parity
   too: on a DB-less edge `request.country`/`request.asn` rules never match, and
