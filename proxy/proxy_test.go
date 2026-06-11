@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 )
 
 func TestProxy(t *testing.T) {
@@ -30,6 +32,33 @@ func TestProxy(t *testing.T) {
 		assert.True(t, called)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, "OK", w.Body.String())
+	})
+
+	t.Run("strips the WAF claim header upstream", func(t *testing.T) {
+		t.Parallel()
+
+		// The claim header is the edge→core wire contract: the core consumes it
+		// in-process (the WAF_VALIDATED_PROXY skip) and must never forward it to
+		// a backend — validated or not, WAF on or off.
+		var claimSeen, otherSeen string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			claimSeen = r.Header.Get(wafclaim.Header)
+			otherSeen = r.Header.Get("X-Other")
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer ts.Close()
+
+		proxy := New()
+		r := httptest.NewRequest(http.MethodGet, ts.URL, nil)
+		r.Header.Set(wafclaim.Header, "7")
+		r.Header.Set("X-Other", "kept")
+		w := httptest.NewRecorder()
+		proxy.ServeHTTP(w, r)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Empty(t, claimSeen, "the claim header must not reach the upstream backend")
+		assert.Equal(t, "kept", otherSeen, "other headers pass through")
+		assert.Equal(t, "7", r.Header.Get(wafclaim.Header),
+			"the in-chain request is untouched (Director mutates the outbound clone)")
 	})
 
 	t.Run("upstream 5xx passes through unchanged", func(t *testing.T) {

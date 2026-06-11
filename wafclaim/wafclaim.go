@@ -13,8 +13,9 @@ package wafclaim
 // peer the core verified (edge client cert / listed CIDR); the edge strips
 // client-supplied values unconditionally, and a core with the skip enabled
 // (WAF_ENABLED + WAF_VALIDATED_PROXY) drops the header from any request it
-// did not skip, so an unvalidated claim never reaches CEL rules, the zone
-// WAF, or the upstream backend there. A core with the skip DISABLED never
-// reads nor strips it (disabled features do no per-request work) — backends
-// must not trust the header unless the core in front of them has it enabled.
+// did not skip, so an unvalidated claim never reaches CEL rules or the zone
+// WAF there. The header is a core↔edge wire contract, never the backend's:
+// the core's proxy deletes it from every upstream request (proxy.New's
+// Director), regardless of WAF config — backends behind a current core never
+// see it and must not trust it.
 const Header = "X-Parapet-Waf"

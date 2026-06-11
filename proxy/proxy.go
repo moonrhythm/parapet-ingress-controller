@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"time"
+
+	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 )
 
 type Proxy struct {
@@ -31,7 +33,14 @@ func New() *Proxy {
 		H2C:     p.h2cTransport,
 	}
 	p.reverseProxy = httputil.ReverseProxy{
-		Director:   func(_ *http.Request) {},
+		// The edge→core WAF claim is consumed in-process (GlobalWAF / WAFZone
+		// read it for the WAF_VALIDATED_PROXY skip); it is never the backend's
+		// business, so it is dropped here at the upstream boundary regardless of
+		// WAF config. ReverseProxy clones the request before calling Director,
+		// so the in-chain request — including the retry path — is untouched.
+		Director: func(r *http.Request) {
+			r.Header.Del(wafclaim.Header)
+		},
 		BufferPool: newBufferPool(),
 		Transport:  p.gw,
 		// No ModifyResponse: an upstream that responded — including with 502/503 —
