@@ -27,6 +27,7 @@ import (
 type IngressReloader struct {
 	store          *WafStore       // optional (nil = WAF host→zone derivation off)
 	rl             *RateLimitStore // optional (nil = rate-limit derivation off)
+	hosts          *HostsStore     // optional (nil = /v1/hosts distribution off)
 	watchNamespace string
 	debounce       time.Duration
 }
@@ -39,6 +40,14 @@ func NewIngressReloader(store *WafStore, watchNamespace string) *IngressReloader
 // its host→zone binding and known-host list. Returns the reloader for chaining.
 func (r *IngressReloader) WithRateLimit(rl *RateLimitStore) *IngressReloader {
 	r.rl = rl
+	return r
+}
+
+// WithHosts wires the standalone known-host store (served at /v1/hosts) so the
+// same Ingress reload also feeds the edge request metric's host oracle. Returns
+// the reloader for chaining.
+func (r *IngressReloader) WithHosts(hosts *HostsStore) *IngressReloader {
+	r.hosts = hosts
 	return r
 }
 
@@ -99,6 +108,9 @@ func (r *IngressReloader) reload(ctx context.Context) error {
 	}
 	if r.rl != nil {
 		r.rl.SetIngressDerived(buildRateLimitHostZone(ings), buildZoneRoutes(ings, RateLimitZoneAnnotation, true), collectIngressHosts(ings))
+	}
+	if r.hosts != nil {
+		r.hosts.SetHosts(collectIngressHosts(ings))
 	}
 	return nil
 }
