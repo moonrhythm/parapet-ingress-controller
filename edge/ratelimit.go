@@ -22,14 +22,16 @@ import (
 // each layer counts what it sees.
 //
 // Eval order mirrors the controller: global first, then the zone bound to the
-// request host (host-level resolution, same map model as the edge WAF; parapet
-// does path-precise resolution upstream). Mounted AFTER the edge WAF so
-// WAF-blocked traffic never burns rate budget, and BEFORE the response cache
-// so edge-enforced limits apply to cache hits too.
+// request route. Zone resolution is PATH-AWARE (same zoneMatcher as the edge
+// WAF: the controller's own route patterns on a real http.ServeMux), so two
+// ingresses sharing a host with different paths and different zones resolve
+// exactly as they do at the core. Mounted AFTER the edge WAF so WAF-blocked
+// traffic never burns rate budget, and BEFORE the response cache so
+// edge-enforced limits apply to cache hits too.
 type EdgeRateLimit struct {
 	global     *ratelimitrule.Limiter
 	zones      atomic.Pointer[map[string]*ratelimitrule.Limiter] // zoneKey -> compiled zone
-	hostZone   atomic.Pointer[map[string]string]                 // host -> zoneKey
+	matcher    atomic.Pointer[zoneMatcher]                       // host+path -> zoneKey (core ServeMux semantics)
 	knownHosts atomic.Pointer[map[string]struct{}]               // Ingress-declared hosts (host-key collapse)
 
 	newZone func(key string) *ratelimitrule.Limiter
@@ -74,8 +76,7 @@ func NewEdgeRateLimit(country func(*http.Request) string, asn func(*http.Request
 	e.newZone = func(key string) *ratelimitrule.Limiter { return newLimiter("zone:" + key) }
 	empty := map[string]*ratelimitrule.Limiter{}
 	e.zones.Store(&empty)
-	emptyHZ := map[string]string{}
-	e.hostZone.Store(&emptyHZ)
+	e.matcher.Store(newZoneMatcher(nil, nil))
 	emptyHosts := map[string]struct{}{}
 	e.knownHosts.Store(&emptyHosts)
 	return e
@@ -89,14 +90,17 @@ func (e *EdgeRateLimit) Etag() string {
 }
 
 // Update compiles and installs a fetched payload: the global limit set, the
-// zones, the host->zone bindings, and the known-host list. All-or-nothing PER
-// set (SetLimits keeps the last-good set on any invalid limit); the zones map,
-// host->zone map, and known-host set are swapped wholesale. An existing zone
-// instance is reused when present so its counters survive the swap (SetLimits
-// additionally carries strategies over for limits whose shaping config didn't
-// change — the same counter-preservation the controller's reload has). Returns
-// the first error encountered (the rest still apply — fail-static per set).
-func (e *EdgeRateLimit) Update(generation uint64, globalDocs []string, zoneDocs map[string][]string, hostZone map[string]string, hosts []string, etag string) error {
+// zones, the zone bindings, and the known-host list. routeZone is the
+// path-aware binding (route pattern -> zoneKey); hostZone is the legacy
+// host-level binding an older CP serves, used only when routeZone is empty
+// (see newZoneMatcher). All-or-nothing PER set (SetLimits keeps the last-good
+// set on any invalid limit); the zones map, the matcher, and the known-host set
+// are swapped wholesale. An existing zone instance is reused when present so
+// its counters survive the swap (SetLimits additionally carries strategies over
+// for limits whose shaping config didn't change — the same counter-preservation
+// the controller's reload has). Returns the first error encountered (the rest
+// still apply — fail-static per set).
+func (e *EdgeRateLimit) Update(generation uint64, globalDocs []string, zoneDocs map[string][]string, routeZone, hostZone map[string]string, hosts []string, etag string) error {
 	var firstErr error
 	note := func(err error) {
 		if firstErr == nil {
@@ -138,11 +142,7 @@ func (e *EdgeRateLimit) Update(generation uint64, globalDocs []string, zoneDocs 
 	}
 	e.zones.Store(&newZones)
 
-	hz := make(map[string]string, len(hostZone))
-	for h, k := range hostZone {
-		hz[h] = k
-	}
-	e.hostZone.Store(&hz)
+	e.matcher.Store(newZoneMatcher(routeZone, hostZone))
 
 	// Advance the etag + generation only on a CLEAN apply. Storing the etag on
 	// a failed apply would 304 every later poll: the rejection would be warned
@@ -168,15 +168,16 @@ func (e *EdgeRateLimit) Global() parapet.Middleware {
 	return e.global
 }
 
-// Zone returns middleware that resolves the request host to its bound
-// rate-limit zone (host -> zoneKey -> Limiter) and runs that zone's limits. A
-// host with no zone, or a zone with no limits, passes through. Host must
-// already be normalized (host.StripPort + host.ToLower upstream).
+// Zone returns middleware that resolves the request to its bound rate-limit
+// zone (host+path -> zoneKey -> Limiter, core ServeMux semantics) and runs that
+// zone's limits. A route with no zone, or a zone with no limits, passes
+// through. Host must already be normalized (host.StripPort + host.ToLower
+// upstream).
 func (e *EdgeRateLimit) Zone() parapet.Middleware {
 	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-			if hz := e.hostZone.Load(); hz != nil {
-				if key, ok := (*hz)[r.Host]; ok {
+			if m := e.matcher.Load(); m != nil {
+				if key, ok := m.resolve(r); ok {
 					if zs := e.zones.Load(); zs != nil {
 						if z := (*zs)[key]; z != nil {
 							z.Serve(rw, r, h)

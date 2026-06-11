@@ -22,9 +22,10 @@ const (
 
 // RateLimitStore holds everything the edge needs to enforce ConfigMap-driven
 // rate limits: the global limit documents (platform baseline, identical for
-// every edge), tenant zone documents (keyed "<ns>/<name>"), the host→zoneKey
-// binding derived from Ingresses (ratelimit-zone annotation, same-namespace
-// only), and the known-host list (every Ingress rule host) the edge wires as
+// every edge), tenant zone documents (keyed "<ns>/<name>"), the zone bindings
+// derived from Ingresses (ratelimit-zone annotation, same-namespace only — the
+// path-aware routeZone map plus the legacy host→zoneKey map older edges still
+// consume), and the known-host list (every Ingress rule host) the edge wires as
 // the Limiter's host-key collapser. Unlike the WafStore, documents stay
 // []string end to end: ratelimitrule.Parse treats each ConfigMap data value as
 // ONE YAML document and does not split "---", so the WAF's concatenated-string
@@ -34,13 +35,14 @@ const (
 // as WafStore: lock-free reads via atomic pointers, mu held by writers and by
 // scoped() for a consistent snapshot.
 type RateLimitStore struct {
-	mu       sync.RWMutex
-	global   atomic.Pointer[[]string]
-	zones    atomic.Pointer[map[string][]string] // zoneKey -> limit documents
-	hostZone atomic.Pointer[map[string]string]   // lowercased host -> zoneKey
-	hosts    atomic.Pointer[[]string]            // sorted known hosts (host-key collapse)
-	gen      atomic.Uint64
-	curEtag  atomic.Pointer[string]
+	mu        sync.RWMutex
+	global    atomic.Pointer[[]string]
+	zones     atomic.Pointer[map[string][]string] // zoneKey -> limit documents
+	hostZone  atomic.Pointer[map[string]string]   // lowercased host -> zoneKey (legacy, pre-path-aware edges)
+	routeZone atomic.Pointer[map[string]string]   // route pattern ("host/path[/]") -> zoneKey
+	hosts     atomic.Pointer[[]string]            // sorted known hosts (host-key collapse)
+	gen       atomic.Uint64
+	curEtag   atomic.Pointer[string]
 }
 
 func NewRateLimitStore() *RateLimitStore {
@@ -48,10 +50,12 @@ func NewRateLimitStore() *RateLimitStore {
 	var g []string
 	z := map[string][]string{}
 	h := map[string]string{}
+	rz := map[string]string{}
 	var hosts []string
 	s.global.Store(&g)
 	s.zones.Store(&z)
 	s.hostZone.Store(&h)
+	s.routeZone.Store(&rz)
 	s.hosts.Store(&hosts)
 	et := etagOfString("")
 	s.curEtag.Store(&et)
@@ -75,13 +79,14 @@ func (s *RateLimitStore) SetZones(zones map[string][]string) {
 	s.recompute()
 }
 
-// SetIngressDerived replaces both Ingress-derived inputs — the host→zoneKey
-// binding and the known-host list — in one recompute, so a single Ingress
-// reload can't be observed half-applied.
-func (s *RateLimitStore) SetIngressDerived(hostZone map[string]string, hosts []string) {
+// SetIngressDerived replaces all Ingress-derived inputs — the legacy host→
+// zoneKey binding, the path-aware routeZone binding, and the known-host list —
+// in one recompute, so a single Ingress reload can't be observed half-applied.
+func (s *RateLimitStore) SetIngressDerived(hostZone, routeZone map[string]string, hosts []string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hostZone.Store(&hostZone)
+	s.routeZone.Store(&routeZone)
 	s.hosts.Store(&hosts)
 	s.recompute()
 }
@@ -126,6 +131,8 @@ func (s *RateLimitStore) fingerprint() string {
 	b.WriteByte(0)
 	writeSortedMap(&b, *s.hostZone.Load())
 	b.WriteByte(0)
+	writeSortedMap(&b, *s.routeZone.Load())
+	b.WriteByte(0)
 	for _, h := range *s.hosts.Load() {
 		b.WriteString(h)
 		b.WriteByte(1)
@@ -140,6 +147,7 @@ type rlScopedSnapshot struct {
 	global     []string
 	zones      map[string][]string
 	hostZone   map[string]string
+	routeZone  map[string]string
 	hosts      []string
 }
 
@@ -151,6 +159,7 @@ func (s *RateLimitStore) scoped(allow func(host string) bool) rlScopedSnapshot {
 
 	allZones := *s.zones.Load()
 	allHostZone := *s.hostZone.Load()
+	allRouteZone := *s.routeZone.Load()
 	allHosts := *s.hosts.Load()
 
 	hostZone := map[string]string{}
@@ -160,6 +169,16 @@ func (s *RateLimitStore) scoped(allow func(host string) bool) rlScopedSnapshot {
 			continue
 		}
 		hostZone[host] = zoneKey
+		if docs, ok := allZones[zoneKey]; ok {
+			zones[zoneKey] = docs
+		}
+	}
+	routeZone := map[string]string{}
+	for pattern, zoneKey := range allRouteZone {
+		if !allow(patternHost(pattern)) {
+			continue
+		}
+		routeZone[pattern] = zoneKey
 		if docs, ok := allZones[zoneKey]; ok {
 			zones[zoneKey] = docs
 		}
@@ -175,6 +194,7 @@ func (s *RateLimitStore) scoped(allow func(host string) bool) rlScopedSnapshot {
 		global:     *s.global.Load(),
 		zones:      zones,
 		hostZone:   hostZone,
+		routeZone:  routeZone,
 		hosts:      hosts,
 	}
 }

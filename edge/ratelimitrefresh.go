@@ -19,7 +19,7 @@ func RefreshRateLimitOnce(cp *CpClient, e *EdgeRateLimit) {
 	case res.Unchanged:
 		// 304: cached config is current.
 	default:
-		if err := e.Update(res.Generation, res.GlobalLimits, res.Zones, res.HostZoneMap, res.Hosts, res.Etag); err != nil {
+		if err := e.Update(res.Generation, res.GlobalLimits, res.Zones, res.RouteZoneMap, res.HostZoneMap, res.Hosts, res.Etag); err != nil {
 			slog.Warn("edge: a rate-limit set was rejected; kept last-good (per set)", "error", err)
 		} else {
 			slog.Info("edge: rate limits updated", "generation", res.Generation)

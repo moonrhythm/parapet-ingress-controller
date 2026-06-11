@@ -20,17 +20,20 @@ const (
 
 // WafStore holds everything the edge needs to run the WAF: the global baseline
 // (same for every edge), the tenant zone rulesets (keyed "<ns>/<name>"), and the
-// host→zoneKey binding derived from Ingresses. Responses are scoped per edge by
-// the caller (only the edge's allowed hosts/zones), so this store keeps the full
+// zone bindings derived from Ingresses — the path-aware routeZone map (route
+// pattern → zoneKey, the controller's own route keys) plus the legacy host→
+// zoneKey map older edges still consume. Responses are scoped per edge by the
+// caller (only the edge's allowed hosts/zones), so this store keeps the full
 // set and `scoped()` filters it. Lock-free reads via atomic pointers; the three
 // inputs (global ConfigMaps, zone ConfigMaps, Ingresses) update independently.
 type WafStore struct {
-	mu       sync.RWMutex // write-held by Set*/recompute; read-held by scoped for a consistent snapshot
-	global   atomic.Pointer[string]
-	zones    atomic.Pointer[map[string]string] // zoneKey -> rules YAML
-	hostZone atomic.Pointer[map[string]string] // lowercased host -> zoneKey
-	gen      atomic.Uint64
-	curEtag  atomic.Pointer[string] // etag over (global+zones+hostZone), bumps on change
+	mu        sync.RWMutex // write-held by Set*/recompute; read-held by scoped for a consistent snapshot
+	global    atomic.Pointer[string]
+	zones     atomic.Pointer[map[string]string] // zoneKey -> rules YAML
+	hostZone  atomic.Pointer[map[string]string] // lowercased host -> zoneKey (legacy, pre-path-aware edges)
+	routeZone atomic.Pointer[map[string]string] // route pattern ("host/path[/]") -> zoneKey
+	gen       atomic.Uint64
+	curEtag   atomic.Pointer[string] // etag over the full content, bumps on change
 }
 
 func NewWafStore() *WafStore {
@@ -38,9 +41,11 @@ func NewWafStore() *WafStore {
 	empty := ""
 	z := map[string]string{}
 	h := map[string]string{}
+	rz := map[string]string{}
 	s.global.Store(&empty)
 	s.zones.Store(&z)
 	s.hostZone.Store(&h)
+	s.routeZone.Store(&rz)
 	et := etagOfString("")
 	s.curEtag.Store(&et)
 	return s
@@ -62,11 +67,14 @@ func (s *WafStore) SetZones(zones map[string]string) {
 	s.recompute()
 }
 
-// SetHostZone replaces the host→zoneKey binding derived from Ingresses.
-func (s *WafStore) SetHostZone(hz map[string]string) {
+// SetIngressDerived replaces both Ingress-derived bindings — the legacy
+// host→zoneKey map and the path-aware routeZone map — in one recompute, so a
+// single Ingress reload can't be observed half-applied.
+func (s *WafStore) SetIngressDerived(hz, rz map[string]string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hostZone.Store(&hz)
+	s.routeZone.Store(&rz)
 	s.recompute()
 }
 
@@ -90,6 +98,8 @@ func (s *WafStore) fingerprint() string {
 	writeSortedMap(&b, *s.zones.Load())
 	b.WriteByte(0)
 	writeSortedMap(&b, *s.hostZone.Load())
+	b.WriteByte(0)
+	writeSortedMap(&b, *s.routeZone.Load())
 	return b.String()
 }
 
@@ -100,6 +110,7 @@ type scopedSnapshot struct {
 	global     string
 	zones      map[string]string
 	hostZone   map[string]string
+	routeZone  map[string]string
 }
 
 // scoped builds the response for an edge, including only host→zone entries whose
@@ -120,6 +131,7 @@ func (s *WafStore) scoped(allow func(host string) bool) scopedSnapshot {
 
 	allZones := *s.zones.Load()
 	allHostZone := *s.hostZone.Load()
+	allRouteZone := *s.routeZone.Load()
 
 	hostZone := map[string]string{}
 	zones := map[string]string{}
@@ -132,12 +144,32 @@ func (s *WafStore) scoped(allow func(host string) bool) scopedSnapshot {
 			zones[zoneKey] = rules
 		}
 	}
+	routeZone := map[string]string{}
+	for pattern, zoneKey := range allRouteZone {
+		if !allow(patternHost(pattern)) {
+			continue
+		}
+		routeZone[pattern] = zoneKey
+		if rules, ok := allZones[zoneKey]; ok {
+			zones[zoneKey] = rules
+		}
+	}
 	return scopedSnapshot{
 		generation: s.gen.Load(),
 		global:     *s.global.Load(),
 		zones:      zones,
 		hostZone:   hostZone,
+		routeZone:  routeZone,
 	}
+}
+
+// patternHost extracts the host part of a route pattern ("host/path…" — the
+// path always starts with "/", so the first slash delimits the host).
+func patternHost(pattern string) string {
+	if i := strings.IndexByte(pattern, '/'); i >= 0 {
+		return pattern[:i]
+	}
+	return pattern
 }
 
 // concatGlobalRules collects the global ruleset from the given ConfigMaps: only

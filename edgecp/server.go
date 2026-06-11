@@ -299,10 +299,15 @@ func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
 type wafResponse struct {
 	Generation  uint64            `json:"generation"`
 	GlobalRules string            `json:"global_rules"`
-	Zones       map[string]string `json:"zones"`                     // zoneKey -> rules YAML
-	HostZoneMap map[string]string `json:"host_zone_map"`             // host -> zoneKey
-	CAID        string            `json:"ca_id,omitempty"`           // signer target ca_id (best-effort SECONDARY force-re-mint confirmer)
-	SigningFP   string            `json:"signing_cert_fp,omitempty"` // active signing fp (the tuple's other half)
+	Zones       map[string]string `json:"zones"` // zoneKey -> rules YAML
+	// RouteZoneMap is the path-aware zone binding: route pattern (the
+	// controller's own route keys, "host/path[/]") -> zoneKey. HostZoneMap is
+	// the legacy host-level binding kept for pre-path-aware edges; a current
+	// edge prefers RouteZoneMap.
+	RouteZoneMap map[string]string `json:"route_zone_map"`
+	HostZoneMap  map[string]string `json:"host_zone_map"`             // host -> zoneKey (legacy)
+	CAID         string            `json:"ca_id,omitempty"`           // signer target ca_id (best-effort SECONDARY force-re-mint confirmer)
+	SigningFP    string            `json:"signing_cert_fp,omitempty"` // active signing fp (the tuple's other half)
 }
 
 // handleWAF serves the WAF payload scoped to the edge's allowed domains: the
@@ -322,10 +327,11 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 	snap := s.waf.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
 	caID, activeFP := s.currentSignerKey()
 	resp := wafResponse{
-		Generation:  snap.generation,
-		GlobalRules: snap.global,
-		Zones:       snap.zones,
-		HostZoneMap: snap.hostZone,
+		Generation:   snap.generation,
+		GlobalRules:  snap.global,
+		Zones:        snap.zones,
+		RouteZoneMap: snap.routeZone,
+		HostZoneMap:  snap.hostZone,
 		// In-body ca_id + signing fp bust the ETag on the 200 arm for free (the WAF
 		// snapshot is signer-independent). The steady-state 304 arm carries NOTHING, so
 		// /v1/waf is only a SECONDARY confirmer; the /v1/certs headers are the guaranteed
@@ -357,7 +363,11 @@ type rateLimitResponse struct {
 	Generation   uint64              `json:"generation"`
 	GlobalLimits []string            `json:"global_limits"`
 	Zones        map[string][]string `json:"zones"`
-	HostZoneMap  map[string]string   `json:"host_zone_map"`
+	// RouteZoneMap is the path-aware zone binding (route pattern -> zoneKey);
+	// HostZoneMap is the legacy host-level binding kept for pre-path-aware
+	// edges. Same model as wafResponse.
+	RouteZoneMap map[string]string `json:"route_zone_map"`
+	HostZoneMap  map[string]string `json:"host_zone_map"`
 	// Hosts is every Ingress-declared host the edge may serve — the edge wires
 	// it as the Limiter's KnownHost so host-keyed buckets for undeclared hosts
 	// collapse into one (cardinality bound under a random-Host flood).
@@ -385,6 +395,7 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 		Generation:   snap.generation,
 		GlobalLimits: snap.global,
 		Zones:        snap.zones,
+		RouteZoneMap: snap.routeZone,
 		HostZoneMap:  snap.hostZone,
 		Hosts:        snap.hosts,
 	}

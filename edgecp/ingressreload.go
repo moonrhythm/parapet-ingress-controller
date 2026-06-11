@@ -13,15 +13,16 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 )
 
-// IngressReloader derives the host→zoneKey binding from Ingress objects: for each
-// Ingress carrying the `parapet.moonrhythm.io/waf-zone` annotation, every host in
-// its rules maps to the resolved zone key. This is host-level (not host/path) —
-// the edge applies a zone per host as an early-drop layer; parapet re-runs the
-// full WAF with path-precise zone resolution authoritatively (see EDGE.md).
+// IngressReloader derives the zone bindings from Ingress objects: for each
+// Ingress carrying the `parapet.moonrhythm.io/waf-zone` annotation, every route
+// pattern its rules register at the controller maps to the resolved zone key
+// (PATH-AWARE — see buildZoneRoutes; the legacy host→zoneKey map is still
+// derived for older edges). parapet re-runs the full WAF authoritatively
+// regardless (see EDGE.md).
 //
 // With WithRateLimit it additionally derives, from the SAME Ingress list, the
-// rate-limit host→zoneKey binding (`…/ratelimit-zone`, same-namespace only) and
-// the known-host list the edge wires as its host-key collapser. store may be
+// rate-limit bindings (`…/ratelimit-zone`, same-namespace only) and the
+// known-host list the edge wires as its host-key collapser. store may be
 // nil when only the rate-limit side is enabled.
 type IngressReloader struct {
 	store          *WafStore       // optional (nil = WAF host→zone derivation off)
@@ -104,10 +105,10 @@ func (r *IngressReloader) reload(ctx context.Context) error {
 		return err
 	}
 	if r.store != nil {
-		r.store.SetHostZone(buildHostZone(ings))
+		r.store.SetIngressDerived(buildHostZone(ings), buildZoneRoutes(ings, WAFZoneAnnotation, false))
 	}
 	if r.rl != nil {
-		r.rl.SetIngressDerived(buildRateLimitHostZone(ings), collectIngressHosts(ings))
+		r.rl.SetIngressDerived(buildRateLimitHostZone(ings), buildZoneRoutes(ings, RateLimitZoneAnnotation, true), collectIngressHosts(ings))
 	}
 	return nil
 }
@@ -187,6 +188,90 @@ func collectIngressHosts(ings []networking.Ingress) []string {
 	}
 	sort.Strings(hosts)
 	return hosts
+}
+
+// buildZoneRoutes maps each route pattern of a zone-bound Ingress to its
+// resolved zone key. Patterns are byte-identical to the route keys the
+// controller registers on its mux (Prefix → "host/path" + "host/path/", Exact →
+// trailing slash stripped, ImplementationSpecific → as-is), so the edge — which
+// loads them into a real http.ServeMux — resolves a request's zone exactly as
+// the core does, including two ingresses sharing a host with different paths
+// and different zones. Divergences from the controller's registration are
+// deliberate: the CP doesn't watch Services, so routes the controller skips for
+// a missing Service/port still get a binding here (the edge enforcing a zone on
+// a route the core 404s is conservative); a host-less rule is skipped (it can't
+// be scoped to an edge; the core remains authoritative for it); and an
+// HTTP-less rule (host only, e.g. TLS-only) is skipped because the controller
+// registers no route for it — the core never zone-evaluates that host, so
+// binding it at the edge (as the legacy host-level map did) was
+// over-enforcement, not parity.
+//
+// sameNamespaceOnly enforces the rate-limit zone posture (a zone carries shared
+// counter state — see buildRateLimitHostZone); the WAF allows cross-namespace
+// references, mirroring plugin.WAFZone.
+//
+// Identical patterns from different ingresses collide last-writer-wins, the
+// same arbitrary resolution the controller's own routes map has — but unlike
+// the host-level maps the collision surface is an exact host+path duplicate,
+// not a whole host.
+func buildZoneRoutes(ings []networking.Ingress, annotation string, sameNamespaceOnly bool) map[string]string {
+	rz := map[string]string{}
+	for i := range ings {
+		ing := &ings[i]
+		key, ok := zoneKeyOf(ing.Namespace, ing.Annotations[annotation])
+		if !ok {
+			continue
+		}
+		if sameNamespaceOnly && !strings.HasPrefix(key, ing.Namespace+"/") {
+			// already warned by the host-level builder
+			continue
+		}
+		for _, rule := range ing.Spec.Rules {
+			host := strings.ToLower(strings.TrimSpace(rule.Host))
+			if host == "" || rule.HTTP == nil {
+				continue
+			}
+			for _, httpPath := range rule.HTTP.Paths {
+				for _, pattern := range routePatterns(host, httpPath) {
+					rz[pattern] = key
+				}
+			}
+		}
+	}
+	return rz
+}
+
+// routePatterns mirrors the controller's route registration (controller.go,
+// reloadDebounced's path switch) for one Ingress HTTP path.
+func routePatterns(host string, httpPath networking.HTTPIngressPath) []string {
+	path := httpPath.Path
+	if path == "" { // path can not be empty
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") { // path must start with /
+		path = "/" + path
+	}
+	pathType := networking.PathTypeImplementationSpecific
+	if httpPath.PathType != nil {
+		pathType = *httpPath.PathType
+	}
+	switch pathType {
+	case networking.PathTypePrefix:
+		src := host + strings.TrimSuffix(path, "/")
+		var out []string
+		if path != "/" {
+			out = append(out, src)
+		}
+		return append(out, src+"/")
+	case networking.PathTypeExact:
+		src := host + strings.TrimSuffix(path, "/")
+		if path == "/" { // exact root is registered as prefix by the controller
+			src = host + path
+		}
+		return []string{src}
+	default: // ImplementationSpecific
+		return []string{host + path}
+	}
 }
 
 // zoneKeyOf mirrors the controller's plugin.ZoneKey / resolve_zone_key: a bare id

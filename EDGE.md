@@ -155,21 +155,33 @@ GET /v1/certs?sni=<host>   Authorization: Bearer <token>   [If-None-Match: "<eta
   400 (missing sni)  401 (no/invalid token)  403 (sni ∉ allowed(token))  404 (no cert for sni)
 
 GET /v1/waf           Authorization: Bearer <token>   [If-None-Match: "<etag>"]
-  200 {"generation": N, "global_rules":"…", "zones":{…}, "host_zone_map":{…}}
-       global_rules  : the platform baseline YAML (identical for every edge)
-       zones         : zoneKey ("<ns>/<name>") → rules YAML, scoped to the edge's hosts
-       host_zone_map : host → zoneKey, scoped to the edge's hosts
+  200 {"generation": N, "global_rules":"…", "zones":{…}, "route_zone_map":{…},
+       "host_zone_map":{…}}
+       global_rules   : the platform baseline YAML (identical for every edge)
+       zones          : zoneKey ("<ns>/<name>") → rules YAML, scoped to the edge's hosts
+       route_zone_map : route pattern → zoneKey — PATH-AWARE binding. Patterns are
+                        byte-identical to the controller's route keys (Prefix →
+                        "host/path" + "host/path/", Exact → trailing slash stripped,
+                        ImplementationSpecific → as-is); the edge loads them into a
+                        real http.ServeMux, so zone resolution matches the core
+                        exactly (incl. two ingresses sharing a host with different
+                        paths and different zones). Scoped to the edge's hosts.
+       host_zone_map  : host → zoneKey — LEGACY host-level binding, kept for
+                        pre-path-aware edges; a current edge uses it only when
+                        route_zone_map is absent (older CP), as whole-host patterns.
        (ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct)
 
 GET /v1/ratelimit     Authorization: Bearer <token>   [If-None-Match: "<etag>"]
   200 {"generation": N, "global_limits":["…"], "zones":{"<ns>/<name>":["…"]},
-       "host_zone_map":{…}, "hosts":["…"]}
-       global_limits : the platform baseline limit DOCUMENTS (identical for every edge)
-       zones         : zoneKey → limit documents, scoped to the edge's hosts
-       host_zone_map : host → zoneKey (`ratelimit-zone`, same-namespace only), scoped
-       hosts         : every Ingress-declared host the edge may serve — wired as the
-                       Limiter's KnownHost so host-keyed buckets for undeclared hosts
-                       collapse into one (cardinality bound under a random-Host flood)
+       "route_zone_map":{…}, "host_zone_map":{…}, "hosts":["…"]}
+       global_limits  : the platform baseline limit DOCUMENTS (identical for every edge)
+       zones          : zoneKey → limit documents, scoped to the edge's hosts
+       route_zone_map : route pattern → zoneKey (`ratelimit-zone`, same-namespace
+                        only) — same path-aware model as /v1/waf
+       host_zone_map  : host → zoneKey (legacy, as in /v1/waf), scoped
+       hosts          : every Ingress-declared host the edge may serve — wired as the
+                        Limiter's KnownHost so host-keyed buckets for undeclared hosts
+                        collapse into one (cardinality bound under a random-Host flood)
        (documents are ARRAYS of YAML strings, one per ConfigMap data value —
         ratelimitrule.Parse takes one document per string and does not split "---",
         so the WAF's concatenated format would silently drop trailing documents;
@@ -296,7 +308,9 @@ are handled. The edge runs **global + zone** WAF as a first layer:
    authoritatively (unless the core skips the re-run via `WAF_VALIDATED_PROXY`,
    which is why that opt-in requires GeoIP/ASN-DB parity — see its section below).
 2. **Global WAF** (always) → block early on match.
-3. Resolve the zone from the `host_zone_map` → **zone WAF** → block on match.
+3. Resolve the zone from the `route_zone_map` (host+path, the controller's own
+   ServeMux semantics; falls back to the legacy `host_zone_map` against an older
+   CP) → **zone WAF** → block on match.
 4. If not blocked, forward to parapet with `X-Forwarded-For/-Proto/-Country/-ASN`.
 
 Rule snapshots apply with the same **all-or-nothing compile + atomic swap +
@@ -362,7 +376,7 @@ gets the full core WAF. `WAF_VALIDATED_PROXY` is deliberately separate from
 `TRUST_PROXY`: a front proxy you trust for `X-Forwarded-*` (e.g. Cloudflare)
 did **not** run your WAF.
 
-This makes the edge's WAF — and its `host_zone_map` zone resolution —
+This makes the edge's WAF — and its `route_zone_map` zone resolution —
 authoritative for matching traffic. The trade-offs you accept:
 
 - the claim is the edge's **self-report**, made trustworthy by the verified
@@ -382,7 +396,15 @@ authoritative for matching traffic. The trade-offs you accept:
 - keep `WAF_INSPECT_BODY` / fail-mode parity between edge and core, or the
   edge's verdict is weaker than the one it replaces — and GeoIP/ASN-DB parity
   too: on a DB-less edge `request.country`/`request.asn` rules never match, and
-  with the skip on nobody re-runs them.
+  with the skip on nobody re-runs them;
+- **upgrade the control plane before (or with) the edges.** A path-aware edge
+  against an older CP (no `route_zone_map`) silently runs the legacy
+  host-level fallback bindings — and **still stamps the claim** (the claim
+  asserts "this edge's WAF evaluated the request", not which binding model it
+  used). For a host shared by ingresses with different paths and different
+  zones, that fallback resolves one zone for the whole host, and the skip
+  means the core never corrects it. The path-aware soundness of the skip only
+  holds once the CP serves `route_zone_map`.
 
 Fail-fast guards: `WAF_VALIDATED_PROXY=true` is refused (that's
 `WAF_ENABLED=false` with extra steps), `edge-mtls` without auto-trust and
@@ -450,8 +472,11 @@ What to know before enabling:
   + M controller replicas admit up to (N+M)× `rate` fleet-wide. The edge
   enforcing a limit does not relieve the core's own enforcement — each layer
   counts the traffic it sees.
-- **Zone resolution is host-level** (`host_zone_map`), like the edge WAF;
-  parapet's per-ingress binding stays authoritative behind it.
+- **Zone resolution is path-aware** (`route_zone_map`), like the edge WAF: the
+  controller's own route keys on a real `http.ServeMux`, so a host shared by
+  two ingresses with different paths and different zones burns each zone's
+  budget on its own paths only. parapet's per-ingress binding stays
+  authoritative behind it.
 - **GeoIP parity**: `country`/`asn`-keyed limits need the IPLocate `.mmdb`s on
   the edge (same `WAF_GEOIP_DB`/`WAF_ASN_DB` contract; the resolvers load when
   the WAF **or** rate limiting is enabled). Without the DB, `SetLimits`
@@ -851,14 +876,21 @@ repo entirely; it is recoverable from git history.
    **(done)**
 2. **WAF distribution + edge global eval** — `/v1/waf` (global ruleset,
    `generation`), edge consumes + evaluates global, fails static. **(done)**
-3. **Zones at edge** — host→zone map derivation + per-edge zone scoping + edge
+3. **Zones at edge** — zone-binding derivation + per-edge zone scoping + edge
    zone evaluation, with the parapet-authoritative backstop. **(done)** Zone
-   resolution at the edge is **host-level** (an Ingress binds a zone and lists
-   hosts; the control plane derives `host → zoneKey` from Ingress objects and
-   ships it scoped to the edge's allowed hosts, alongside the zone rulesets).
-   Path-precise zone resolution stays parapet's authoritative job — if the edge's
-   host-level binding ever diverges, parapet corrects it on its re-run (not for
-   traffic the core skips via `WAF_VALIDATED_PROXY`, which accepts that drift).
+   resolution at the edge is **path-aware** (`route_zone_map`): the control
+   plane derives the controller's own route keys from Ingress objects (host +
+   path per PathType) and ships them scoped to the edge's allowed hosts,
+   alongside the zone rulesets; the edge matches them on a real
+   `http.ServeMux`, so resolution behaves exactly like the core — including a
+   host shared by two ingresses with different paths bound to different zones
+   (which the earlier host-level `host_zone_map`, still shipped for old edges,
+   could not represent: one zone silently won the whole host). parapet still
+   re-runs zone resolution authoritatively on its per-ingress binding (not for
+   traffic the core skips via `WAF_VALIDATED_PROXY`, which accepts the edge's
+   resolution — path-awareness is what makes that acceptance sound, and only
+   once the CP actually serves `route_zone_map`: see the upgrade-ordering
+   trade-off in the `WAF_VALIDATED_PROXY` section).
 4. **Response cache** — optional disk-backed HTTP cache (`EDGE_CACHE_*`),
    honor-origin policy, LRU-bounded, restart-persistent, fail-static. **(done)**
    See [Response cache at the edge](#response-cache-at-the-edge). Edge-only (no
@@ -873,7 +905,8 @@ repo entirely; it is recoverable from git history.
    via parapet `Meta.Tags`, host-independent), flush-all. **(done)** See
    [Purge / invalidation](#purge--invalidation). Edge-only.
 6. **Rate limits at edge** — `/v1/ratelimit` (global + zone limit documents,
-   `host_zone_map` from `ratelimit-zone` same-namespace bindings, known-hosts
+   `route_zone_map` from `ratelimit-zone` same-namespace bindings (path-aware,
+   as in phase 3; legacy `host_zone_map` still shipped), known-hosts
    list), edge enforcement via the controller's own `ratelimitrule` runtime
    (per-edge counters, after the WAF, before the cache), fails static.
    **(done)** See [Rate limiting at the edge](#rate-limiting-at-the-edge).
