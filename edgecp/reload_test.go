@@ -11,6 +11,23 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 )
 
+// drainUntilClosedOrDone mirrors the real reloader drains: it returns when the
+// watch channel closes (so the loop reconnects) OR when ctx is cancelled (so the
+// helper goroutine shuts down cleanly at test end instead of parking on a
+// watcher nobody stops).
+func drainUntilClosedOrDone(ctx context.Context, ch <-chan watch.Event) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case _, ok := <-ch:
+			if !ok {
+				return
+			}
+		}
+	}
+}
+
 // watchAndRelist must relist via reload on EVERY watch (re)connect — including
 // reconnects that deliver zero events. This is the fix for the silent-staleness
 // bug: a change that lands in the gap between one watch closing and the next
@@ -33,13 +50,8 @@ func TestWatchAndRelistRelistsOnEveryReconnect(t *testing.T) {
 		relists.Add(1)
 		return nil
 	}
-	// drain mirrors the real reloaders: return when the watch channel closes.
-	drain := func(_ context.Context, ch <-chan watch.Event) {
-		for range ch {
-		}
-	}
 
-	go watchAndRelist(ctx, "test", watchFn, reload, drain)
+	go watchAndRelist(ctx, "test", watchFn, reload, drainUntilClosedOrDone)
 
 	waitRelists := func(want int32) {
 		t.Helper()
@@ -85,12 +97,8 @@ func TestWatchAndRelistRetriesWatchErrorThenRelists(t *testing.T) {
 		relists.Add(1)
 		return nil
 	}
-	drain := func(_ context.Context, ch <-chan watch.Event) {
-		for range ch {
-		}
-	}
 
-	go watchAndRelist(ctx, "test", watchFn, reload, drain)
+	go watchAndRelist(ctx, "test", watchFn, reload, drainUntilClosedOrDone)
 
 	// The first attempt errored (no relist); the retry establishes and relists.
 	w := <-established
