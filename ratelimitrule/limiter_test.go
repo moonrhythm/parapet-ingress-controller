@@ -759,3 +759,51 @@ func TestLimiter_RetryAfterOnEpochGridForOddWindows(t *testing.T) {
 	}
 	t.Fatal("could not get a clean two-request window after 5 attempts")
 }
+
+func TestLimiter_IPKeyParityEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	// Pins netip-migration parity with the old net.ParseIP behavior.
+	l := &ratelimitrule.Limiter{}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{limit("a", 1, "1h")}))
+
+	take := func(ip string) bool {
+		_, called := serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": ip})
+		return called
+	}
+
+	// A 4-in-6 mapped address shares the plain IPv4 bucket (old: To4; new: Unmap).
+	assert.True(t, take("1.2.3.4"))
+	assert.False(t, take("::ffff:1.2.3.4"), "4-in-6 folds onto the IPv4 bucket")
+
+	// A zoned IPv6 address is unparsable to net.ParseIP; netip would parse it,
+	// so the migration explicitly keeps it on the raw-string fallback bucket.
+	assert.True(t, take("fe80::1%eth0"))
+	assert.False(t, take("fe80::1%eth0"), "zoned addresses bucket by raw string")
+	assert.True(t, take("fe80::1%eth1"), "a different zone is a different raw-string bucket")
+}
+
+func TestLimiter_ExcludeParityEdgeCases(t *testing.T) {
+	t.Parallel()
+
+	l := &ratelimitrule.Limiter{}
+	lim := limit("a", 1, "1h")
+	// Non-canonical prefix spelling: net.ParseCIDR masked it; netip.Prefix
+	// .Contains masks both sides, so it must keep matching the /8.
+	lim.Exclude = []string{"10.1.2.3/8"}
+	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{lim}))
+
+	take := func(ip string) bool {
+		_, called := serve(l, http.MethodGet, "/", map[string]string{"X-Real-Ip": ip})
+		return called
+	}
+
+	for i := 0; i < 3; i++ {
+		assert.True(t, take("10.200.0.9"), "non-canonical /8 spelling still excludes the whole /8")
+	}
+	for i := 0; i < 3; i++ {
+		assert.True(t, take("::ffff:10.0.0.7"), "4-in-6 client matches a v4 exclude prefix")
+	}
+	assert.True(t, take("11.0.0.1"))
+	assert.False(t, take("11.0.0.1"), "outside the /8: limited as usual")
+}
