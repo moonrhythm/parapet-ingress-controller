@@ -7,10 +7,15 @@ import (
 
 // slidingWindowStrategy implements the sliding-window-counter algorithm with
 // the same admit/After math as parapet's ratelimit.SlidingWindowStrategy (keep
-// the two in semantic lockstep), but with different storage built for hot
-// reload: parapet's strategy starts a cleanup goroutine on first Take that can
-// never be stopped, so every SetLimits rebuild would leak one goroutine plus
-// its map for the process lifetime. This one has NO background goroutine.
+// the two in semantic lockstep), but with different storage. It originally
+// existed because parapet's janitor goroutine could never be stopped and would
+// leak per SetLimits rebuild — fixed upstream in v0.18.1 (parapet#243). The
+// fork is RETAINED for what remains deliberately different here: NO background
+// goroutine at all, O(1) whole-generation eviction instead of per-entry sweeps
+// under the lock, and the stricter backward-clock semantics below (parapet's
+// roll still regresses the per-item window index). Dropping the fork for
+// parapet's strategy is possible but would trade those away — see
+// RATELIMIT.md.
 //
 // Storage is two whole-window generations: cur counts the current fixed window,
 // prev the one before it. Crossing a boundary retires a full generation at once

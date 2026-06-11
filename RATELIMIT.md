@@ -74,11 +74,15 @@ limits:
     Cheapest; admits up to 2× `rate` across a window boundary.
   - `sliding` — sliding-window counter: the previous window's count fades out
     linearly, smoothing the boundary burst. Same admit/`After` math as
-    parapet's `SlidingWindowStrategy`, reimplemented goroutine-free in
-    `ratelimitrule` so hot reloads can't leak janitor goroutines (storage is
-    two whole-window generations, retired wholesale at each boundary).
-    It is an approximation (assumes uniform arrival in the previous window;
-    error typically under ~1% of `rate`).
+    parapet's `SlidingWindowStrategy`, kept as a local reimplementation in
+    `ratelimitrule`: storage is two whole-window generations retired wholesale
+    at each boundary — no background goroutine, no per-entry sweeps under the
+    lock — and a backward clock step never forgets counts (parapet's per-item
+    roll does, over-admitting on recovery). The original motivation (parapet's
+    janitor leaked per hot reload) was fixed upstream in v0.18.1; the fork
+    stays for the stricter semantics above. It is an approximation (assumes
+    uniform arrival in the previous window; error typically under ~1% of
+    `rate`).
 - **`mode: shadow`** takes and **counts** every decision
   (`parapet_ratelimit_total{result="limited"}`) but never rejects — ship
   shadow, watch the metric, then flip to `enforce` (the same rollout story as

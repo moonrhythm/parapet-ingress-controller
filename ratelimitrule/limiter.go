@@ -348,7 +348,12 @@ func (l *Limiter) compileLimit(lim Limit) (compiledLimit, Limit, error) {
 	if lim.Algorithm == "sliding" {
 		c.strategy = newSlidingWindow(lim.Rate, window)
 	} else {
-		c.strategy = newFixedWindow(lim.Rate, window)
+		// Requires parapet >= v0.18.1: older FixedWindowStrategy.After computed
+		// the reset on time.Truncate's zero-time grid while Take buckets on the
+		// epoch grid, under-reporting Retry-After for windows that don't divide
+		// the year-1->epoch offset (fixed upstream, parapet#244). The epoch-grid
+		// canary test in limiter_test.go pins this floor.
+		c.strategy = &ratelimit.FixedWindowStrategy{Max: lim.Rate, Size: window}
 	}
 	if l.Observe != nil {
 		c.observe = l.Observe(l.NamePrefix + ":" + lim.ID)

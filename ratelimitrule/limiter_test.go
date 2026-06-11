@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"github.com/stretchr/testify/assert"
@@ -717,4 +719,43 @@ func TestLimiter_KeyNormalizationCarriesCountersOver(t *testing.T) {
 	require.NoError(t, l.SetLimits([]ratelimitrule.Limit{hlLower}))
 	_, called = serve(l, http.MethodGet, "/", map[string]string{"X-Api-Key": "k"})
 	assert.False(t, called, "header-name case is normalized: counters carried over")
+}
+
+func TestLimiter_RetryAfterOnEpochGridForOddWindows(t *testing.T) {
+	t.Parallel()
+
+	// Dependency-floor canary (parapet >= v0.18.1, parapet#244): for a window
+	// that doesn't divide the year-1->epoch offset (7s: offset mod 7 = 4s),
+	// FixedWindowStrategy.After before the fix reported the reset on the wrong
+	// grid — up to 4s short. The serve path's Retry-After must land on the
+	// epoch grid Take buckets on. This test FAILS against parapet v0.18.0, so
+	// the removed local wrapper can't silently un-couple from the bump.
+	const size = int64(7 * time.Second)
+	ceilSec := func(ns int64) int64 { return (ns + int64(time.Second) - 1) / int64(time.Second) }
+
+	hdr := map[string]string{"X-Real-Ip": "1.2.3.4"}
+	for attempt := 0; attempt < 5; attempt++ {
+		l := &ratelimitrule.Limiter{}
+		require.NoError(t, l.SetLimits([]ratelimitrule.Limit{limit("a", 1, "7s")}))
+		if _, called := serve(l, http.MethodGet, "/", hdr); !called {
+			continue // landed at a window edge; retry
+		}
+		before := time.Now().UnixNano()
+		w, called := serve(l, http.MethodGet, "/", hdr)
+		after := time.Now().UnixNano()
+		if called || before/size != after/size {
+			continue // a boundary fell between/within the measurement; retry
+		}
+		ra, err := strconv.ParseInt(w.Header().Get("Retry-After"), 10, 64)
+		require.NoError(t, err)
+		// The true epoch-grid wait at any instant t in [before, after] is
+		// (t/size+1)*size - t; the header must be its ceil. The zero-grid bug
+		// lands 3-4s outside these bounds, so this discriminates.
+		lo := ceilSec((after/size+1)*size - after)
+		hi := ceilSec((before/size+1)*size - before)
+		assert.GreaterOrEqual(t, ra, lo, "Retry-After must not undershoot the epoch-grid reset")
+		assert.LessOrEqual(t, ra, hi, "Retry-After must not overshoot the epoch-grid reset")
+		return
+	}
+	t.Fatal("could not get a clean two-request window after 5 attempts")
 }
