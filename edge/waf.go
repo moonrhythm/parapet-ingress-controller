@@ -30,9 +30,9 @@ import (
 // a host with different paths and different zones resolve exactly as they do at
 // the core.
 type EdgeWAF struct {
-	global  *waf.WAF
-	zones   atomic.Pointer[map[string]*waf.WAF] // zoneKey -> compiled zone
-	matcher atomic.Pointer[zoneMatcher]         // host+path -> zoneKey (core ServeMux semantics)
+	global *waf.WAF
+	zones  atomic.Pointer[map[string]*waf.WAF] // zoneKey -> compiled zone
+	topo   *EdgeTopology                       // shared: host+path -> zoneKey (from /v1/topology)
 
 	newZone func() *waf.WAF // factory wiring Country/ASN/Logger onto a fresh zone
 
@@ -48,7 +48,7 @@ type EdgeWAF struct {
 // (nil = request.country empty / request.asn 0); they are wired onto the global
 // ruleset and every zone, so the edge — the first hop — resolves both from the
 // true client IP.
-func NewEdgeWAF(country func(*http.Request) string, asn func(*http.Request) int64) *EdgeWAF {
+func NewEdgeWAF(country func(*http.Request) string, asn func(*http.Request) int64, topo *EdgeTopology) *EdgeWAF {
 	newWAF := func(scope string) *waf.WAF {
 		w := waf.New()
 		w.Country = country
@@ -65,11 +65,10 @@ func NewEdgeWAF(country func(*http.Request) string, asn func(*http.Request) int6
 		w.Observe = observe.WAFEval(scope)
 		return w
 	}
-	w := &EdgeWAF{newZone: func() *waf.WAF { return newWAF("zone") }}
+	w := &EdgeWAF{newZone: func() *waf.WAF { return newWAF("zone") }, topo: topo}
 	w.global = newWAF("global")
 	empty := map[string]*waf.WAF{}
 	w.zones.Store(&empty)
-	w.matcher.Store(newZoneMatcher(nil, nil))
 	return w
 }
 
@@ -80,16 +79,15 @@ func (w *EdgeWAF) Etag() string {
 	return w.etag
 }
 
-// Update compiles and installs a fetched payload: the global ruleset, the
-// zones, and the zone bindings. routeZone is the path-aware binding (route
-// pattern -> zoneKey); hostZone is the legacy host-level binding an older CP
-// serves, used only when routeZone is empty (see newZoneMatcher). All-or-nothing
-// PER ruleset (parapet's SetRules keeps the last-good ruleset on a compile
-// error); the zones map and the matcher are swapped wholesale. An existing zone
-// instance is reused when present so a bad zone edit keeps its last-good rules
-// (mirrors the controller). Returns the first compile error encountered (the
-// rest still apply — fail-static per ruleset).
-func (w *EdgeWAF) Update(generation uint64, globalYAML string, zonesYAML, routeZone, hostZone map[string]string, etag string) error {
+// Update compiles and installs a fetched payload: the global ruleset and the
+// zone rulesets. The zone BINDINGS (which route resolves to which zone) come
+// from EdgeTopology now, not from this payload. All-or-nothing PER ruleset
+// (parapet's SetRules keeps the last-good ruleset on a compile error); the zones
+// map is swapped wholesale. An existing zone instance is reused when present so
+// a bad zone edit keeps its last-good rules (mirrors the controller). Returns
+// the first compile error encountered (the rest still apply — fail-static per
+// ruleset).
+func (w *EdgeWAF) Update(generation uint64, globalYAML string, zonesYAML map[string]string, etag string) error {
 	var firstErr error
 	note := func(err error) {
 		if firstErr == nil {
@@ -120,8 +118,6 @@ func (w *EdgeWAF) Update(generation uint64, globalYAML string, zonesYAML, routeZ
 		newZones[key] = z
 	}
 	w.zones.Store(&newZones)
-
-	w.matcher.Store(newZoneMatcher(routeZone, hostZone))
 
 	// Advance the etag + generation only on a CLEAN apply. Storing the etag on
 	// a failed compile would 304 every later poll and the bad input would never
@@ -196,13 +192,11 @@ func StripWAFClaim() parapet.Middleware {
 func (w *EdgeWAF) Zone() parapet.Middleware {
 	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-			if m := w.matcher.Load(); m != nil {
-				if key, ok := m.resolve(r); ok {
-					if zs := w.zones.Load(); zs != nil {
-						if z := (*zs)[key]; z != nil {
-							z.ServeHandler(h).ServeHTTP(rw, r)
-							return
-						}
+			if key, ok := w.topo.resolveWAFZone(r); ok {
+				if zs := w.zones.Load(); zs != nil {
+					if z := (*zs)[key]; z != nil {
+						z.ServeHandler(h).ServeHTTP(rw, r)
+						return
 					}
 				}
 			}

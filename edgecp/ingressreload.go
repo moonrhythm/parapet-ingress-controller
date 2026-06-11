@@ -27,6 +27,7 @@ import (
 type IngressReloader struct {
 	store          *WafStore       // optional (nil = WAF host→zone derivation off)
 	rl             *RateLimitStore // optional (nil = rate-limit derivation off)
+	topo           *TopologyStore  // optional (nil = unified topology distribution off)
 	watchNamespace string
 	debounce       time.Duration
 }
@@ -39,6 +40,14 @@ func NewIngressReloader(store *WafStore, watchNamespace string) *IngressReloader
 // its host→zone binding and known-host list. Returns the reloader for chaining.
 func (r *IngressReloader) WithRateLimit(rl *RateLimitStore) *IngressReloader {
 	r.rl = rl
+	return r
+}
+
+// WithTopology wires the unified topology store (served at /v1/topology) so the
+// same Ingress reload also feeds the single binding+host distribution the edge
+// consumes. Returns the reloader for chaining.
+func (r *IngressReloader) WithTopology(topo *TopologyStore) *IngressReloader {
+	r.topo = topo
 	return r
 }
 
@@ -94,11 +103,24 @@ func (r *IngressReloader) reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Derive every binding/host input once from this one Ingress snapshot, then
+	// fan out to the WAF store + rate-limit store (which keep their own copy to
+	// scope which zone rulesets a token receives) and the topology store (the
+	// single wire home for the bindings + hosts). One snapshot ⇒ the three never
+	// diverge mid-update.
+	wafHostZone := buildHostZone(ings)
+	wafRouteZone := buildZoneRoutes(ings, WAFZoneAnnotation, false)
+	rlHostZone := buildRateLimitHostZone(ings)
+	rlRouteZone := buildZoneRoutes(ings, RateLimitZoneAnnotation, true)
+	hosts := collectIngressHosts(ings)
 	if r.store != nil {
-		r.store.SetIngressDerived(buildHostZone(ings), buildZoneRoutes(ings, WAFZoneAnnotation, false))
+		r.store.SetIngressDerived(wafHostZone, wafRouteZone)
 	}
 	if r.rl != nil {
-		r.rl.SetIngressDerived(buildRateLimitHostZone(ings), buildZoneRoutes(ings, RateLimitZoneAnnotation, true), collectIngressHosts(ings))
+		r.rl.SetIngressDerived(rlHostZone, rlRouteZone, hosts)
+	}
+	if r.topo != nil {
+		r.topo.SetIngressDerived(wafHostZone, wafRouteZone, rlHostZone, rlRouteZone, hosts)
 	}
 	return nil
 }

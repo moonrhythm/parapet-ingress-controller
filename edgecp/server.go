@@ -27,6 +27,12 @@ type Server struct {
 	// /v1/ratelimit → 404). Same scoping/ETag model as the WAF endpoint.
 	ratelimit *RateLimitStore
 
+	// topology is the optional unified zone-binding + known-host distribution store
+	// (nil = /v1/topology → 404). It carries the bindings + hosts that /v1/waf and
+	// /v1/ratelimit no longer embed; the edge consumes it for its WAF matcher,
+	// rate-limit matcher, and request-metric host bound. Same scoping/ETag model.
+	topology *TopologyStore
+
 	// purge is the optional cache-purge journal (nil = purge distribution disabled,
 	// /v1/purges → 404). purgeAdminToken gates POST /v1/purges — a STRONGER credential
 	// than the per-edge read tokens (an edge can read its purges but not issue them).
@@ -137,6 +143,13 @@ func (s *Server) WithRateLimit(rl *RateLimitStore) *Server {
 	return s
 }
 
+// WithTopology enables the unified zone-binding + known-host endpoint
+// (GET /v1/topology). Returns the server for chaining.
+func (s *Server) WithTopology(topo *TopologyStore) *Server {
+	s.topology = topo
+	return s
+}
+
 // WithEvents enables the change-notification stream (GET /v1/events). Returns
 // the server for chaining; the caller runs hub.Run in its own goroutine.
 func (s *Server) WithEvents(hub *EventsHub) *Server {
@@ -219,6 +232,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/certs", s.handleCert)
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
 	mux.HandleFunc("GET /v1/ratelimit", s.handleRateLimit)
+	mux.HandleFunc("GET /v1/topology", s.handleTopology)
 	mux.HandleFunc("GET /v1/purges", s.handlePurges)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/purges", s.handlePurgeAdmin)
@@ -313,21 +327,16 @@ func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
 type wafResponse struct {
 	Generation  uint64            `json:"generation"`
 	GlobalRules string            `json:"global_rules"`
-	Zones       map[string]string `json:"zones"` // zoneKey -> rules YAML
-	// RouteZoneMap is the path-aware zone binding: route pattern (the
-	// controller's own route keys, "host/path[/]") -> zoneKey. HostZoneMap is
-	// the legacy host-level binding kept for pre-path-aware edges; a current
-	// edge prefers RouteZoneMap.
-	RouteZoneMap map[string]string `json:"route_zone_map"`
-	HostZoneMap  map[string]string `json:"host_zone_map"`             // host -> zoneKey (legacy)
-	CAID         string            `json:"ca_id,omitempty"`           // signer target ca_id (best-effort SECONDARY force-re-mint confirmer)
-	SigningFP    string            `json:"signing_cert_fp,omitempty"` // active signing fp (the tuple's other half)
+	Zones       map[string]string `json:"zones"`                     // zoneKey -> rules YAML
+	CAID        string            `json:"ca_id,omitempty"`           // signer target ca_id (best-effort SECONDARY force-re-mint confirmer)
+	SigningFP   string            `json:"signing_cert_fp,omitempty"` // active signing fp (the tuple's other half)
 }
 
-// handleWAF serves the WAF payload scoped to the edge's allowed domains: the
-// global baseline (identical for every edge) plus only the zones and host→zone
-// bindings for hosts this token may serve. ETag is computed over the *scoped*
-// payload, so revalidation is correct per edge.
+// handleWAF serves the WAF RULESET payload scoped to the edge's allowed domains:
+// the global baseline (identical for every edge) plus only the zone rulesets for
+// hosts this token may serve. The zone BINDINGS that select those zones now ship
+// from /v1/topology (the store still keeps its own copy to scope here). ETag is
+// computed over the *scoped* payload, so revalidation is correct per edge.
 func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 	token, ok := bearer(r)
 	if !ok || !s.authz.Known(token) {
@@ -341,11 +350,9 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 	snap := s.waf.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
 	caID, activeFP := s.currentSignerKey()
 	resp := wafResponse{
-		Generation:   snap.generation,
-		GlobalRules:  snap.global,
-		Zones:        snap.zones,
-		RouteZoneMap: snap.routeZone,
-		HostZoneMap:  snap.hostZone,
+		Generation:  snap.generation,
+		GlobalRules: snap.global,
+		Zones:       snap.zones,
 		// In-body ca_id + signing fp bust the ETag on the 200 arm for free (the WAF
 		// snapshot is signer-independent). The steady-state 304 arm carries NOTHING, so
 		// /v1/waf is only a SECONDARY confirmer; the /v1/certs headers are the guaranteed
@@ -390,23 +397,14 @@ type rateLimitResponse struct {
 	Generation   uint64              `json:"generation"`
 	GlobalLimits []string            `json:"global_limits"`
 	Zones        map[string][]string `json:"zones"`
-	// RouteZoneMap is the path-aware zone binding (route pattern -> zoneKey);
-	// HostZoneMap is the legacy host-level binding kept for pre-path-aware
-	// edges. Same model as wafResponse.
-	RouteZoneMap map[string]string `json:"route_zone_map"`
-	HostZoneMap  map[string]string `json:"host_zone_map"`
-	// Hosts is every Ingress-declared host the edge may serve — the edge wires
-	// it as the Limiter's KnownHost so host-keyed buckets for undeclared hosts
-	// collapse into one (cardinality bound under a random-Host flood).
-	Hosts []string `json:"hosts"`
 }
 
-// handleRateLimit serves the rate-limit payload scoped to the edge's allowed
-// domains: the global baseline (identical for every edge) plus only the zones,
-// host→zone bindings, and known hosts for hosts this token may serve. ETag is
-// computed over the scoped payload, so revalidation is correct per edge —
-// the same model as handleWAF. No signer confirmer fields: /v1/certs (and
-// /v1/waf) already carry that signal.
+// handleRateLimit serves the rate-limit LIMIT-SET payload scoped to the edge's
+// allowed domains: the global baseline (identical for every edge) plus only the
+// zone limit sets for hosts this token may serve. The zone bindings that select
+// those zones and the known-host list now ship from /v1/topology (the store
+// still keeps its own copy to scope here). ETag is computed over the scoped
+// payload, so revalidation is correct per edge — the same model as handleWAF.
 func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 	token, ok := bearer(r)
 	if !ok || !s.authz.Known(token) {
@@ -422,9 +420,6 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 		Generation:   snap.generation,
 		GlobalLimits: snap.global,
 		Zones:        snap.zones,
-		RouteZoneMap: snap.routeZone,
-		HostZoneMap:  snap.hostZone,
-		Hosts:        snap.hosts,
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {
@@ -433,6 +428,63 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 	}
 	// Generation zeroed in the validator for the same reason as handleWAF:
 	// process-local counters must not defeat 304 revalidation across replicas.
+	etagResp := resp
+	etagResp.Generation = 0
+	etagBody, err := json.Marshal(etagResp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	etag := etagOfString(string(etagBody))
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// topologyResponse is the GET /v1/topology payload: the WAF + rate-limit zone
+// bindings (path-aware route maps plus legacy host maps) and the known-host
+// list, scoped per edge. It is the single wire home for what /v1/waf and
+// /v1/ratelimit used to embed.
+type topologyResponse struct {
+	Generation   uint64            `json:"generation"`
+	WAFRouteZone map[string]string `json:"waf_route_zone"`
+	WAFHostZone  map[string]string `json:"waf_host_zone"`
+	RLRouteZone  map[string]string `json:"rl_route_zone"`
+	RLHostZone   map[string]string `json:"rl_host_zone"`
+	Hosts        []string          `json:"hosts"`
+}
+
+// handleTopology serves the unified zone-binding + known-host topology scoped to
+// the edge's allowed domains. ETag is computed over the scoped payload (with the
+// generation zeroed for cross-replica 304s), the same model as handleWAF.
+func (s *Server) handleTopology(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.topology == nil {
+		http.Error(w, "topology distribution disabled", http.StatusNotFound)
+		return
+	}
+	snap := s.topology.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
+	resp := topologyResponse{
+		Generation:   snap.generation,
+		WAFRouteZone: snap.wafRouteZone,
+		WAFHostZone:  snap.wafHostZone,
+		RLRouteZone:  snap.rlRouteZone,
+		RLHostZone:   snap.rlHostZone,
+		Hosts:        snap.hosts,
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
 	etagResp := resp
 	etagResp.Generation = 0
 	etagBody, err := json.Marshal(etagResp)

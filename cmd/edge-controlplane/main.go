@@ -318,6 +318,7 @@ func main() {
 	// fetch sees the full payload, not a half-populated store.
 	var wafStore *edgecp.WafStore
 	var rlStore *edgecp.RateLimitStore
+	var topoStore *edgecp.TopologyStore
 	if wafEnabled {
 		wafStore = edgecp.NewWafStore()
 		wafReloader := edgecp.NewWafReloader(wafStore, watchNamespace, podNamespace)
@@ -339,11 +340,16 @@ func main() {
 		slog.Info("edge control plane: ratelimit distribution enabled", "pod_namespace", podNamespace)
 	}
 	if wafStore != nil || rlStore != nil {
-		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore)
+		// Topology distribution rides the same Ingress watch: one reload feeds the
+		// WAF store, the rate-limit store, and the unified /v1/topology store.
+		topoStore = edgecp.NewTopologyStore()
+		server = server.WithTopology(topoStore)
+		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore).WithTopology(topoStore)
 		if err := ingReloader.LoadOnce(ctx); err != nil {
 			slog.Error("edgecp: initial ingress load failed", "err", err)
 		}
 		go ingReloader.Watch(ctx)
+		slog.Info("edge control plane: topology distribution enabled")
 	}
 
 	// Optional cache-purge distribution (GET/POST /v1/purges). The read side rides
@@ -376,6 +382,9 @@ func main() {
 			snap.Certs = store.Version()
 			if wafStore != nil {
 				snap.WAF = wafStore.Version()
+			}
+			if topoStore != nil {
+				snap.Topology = topoStore.Version()
 			}
 			if rlStore != nil {
 				snap.RateLimit = rlStore.Version()

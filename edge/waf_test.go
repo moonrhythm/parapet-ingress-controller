@@ -45,9 +45,17 @@ func passed() http.Handler {
 	})
 }
 
+// wafWithWAFZones builds an EdgeWAF whose shared topology binds the given WAF
+// route/host maps (the bindings now live in EdgeTopology, not the WAF payload).
+func wafWithWAFZones(routeZone, hostZone map[string]string) *EdgeWAF {
+	topo := NewEdgeTopology()
+	topo.Update(1, routeZone, hostZone, nil, nil, nil, `"t1"`)
+	return NewEdgeWAF(nil, nil, topo)
+}
+
 func TestEdgeWAF_GlobalBlocksMatchingPath(t *testing.T) {
-	w := NewEdgeWAF(nil, nil)
-	require.NoError(t, w.Update(1, globalRulesYAML, nil, nil, nil, `"e1"`))
+	w := NewEdgeWAF(nil, nil, NewEdgeTopology())
+	require.NoError(t, w.Update(1, globalRulesYAML, nil, `"e1"`))
 
 	h := w.Global().ServeHandler(passed())
 	blocked := run(h, "GET", "https://acme.com/blocked")
@@ -61,13 +69,10 @@ func TestEdgeWAF_GlobalBlocksMatchingPath(t *testing.T) {
 
 func TestEdgeWAF_ZoneBlocksWhenHostBound(t *testing.T) {
 	// Legacy host-level binding (route_zone_map absent — an older CP): the host
-	// map is synthesized into whole-host subtree patterns.
-	w := NewEdgeWAF(nil, nil)
-	require.NoError(t, w.Update(1, "",
-		map[string]string{"ns/z": zoneRulesYAML},
-		nil,
-		map[string]string{"acme.com": "ns/z"},
-		`"e1"`))
+	// map is synthesized into whole-host subtree patterns (in newZoneMatcher,
+	// which EdgeTopology builds the matcher with).
+	w := wafWithWAFZones(nil, map[string]string{"acme.com": "ns/z"})
+	require.NoError(t, w.Update(1, "", map[string]string{"ns/z": zoneRulesYAML}, `"e1"`))
 
 	h := w.Zone().ServeHandler(passed())
 
@@ -100,16 +105,14 @@ func TestEdgeWAF_ZonePathAware(t *testing.T) {
 	// request.path == "/zoneblocked"). Route patterns are the controller's
 	// route keys, so the edge resolves each path to its own zone — the case
 	// host-level binding could not represent.
-	w := NewEdgeWAF(nil, nil)
+	w := wafWithWAFZones(map[string]string{
+		"acme.com/api":  "ns/z2",
+		"acme.com/api/": "ns/z2",
+		"acme.com/web":  "ns/z1",
+		"acme.com/web/": "ns/z1",
+	}, nil)
 	require.NoError(t, w.Update(1, "",
-		map[string]string{"ns/z1": zoneRulesYAML, "ns/z2": blockAllZoneYAML},
-		map[string]string{
-			"acme.com/api":  "ns/z2",
-			"acme.com/api/": "ns/z2",
-			"acme.com/web":  "ns/z1",
-			"acme.com/web/": "ns/z1",
-		},
-		nil, `"e1"`))
+		map[string]string{"ns/z1": zoneRulesYAML, "ns/z2": blockAllZoneYAML}, `"e1"`))
 
 	h := w.Zone().ServeHandler(passed())
 
@@ -132,20 +135,16 @@ func TestEdgeWAF_ZonePathAware(t *testing.T) {
 func TestEdgeWAF_RouteZonePreferredOverHostZone(t *testing.T) {
 	// When the CP ships route_zone_map, the legacy host map is ignored — the
 	// edge must not blend the two models.
-	w := NewEdgeWAF(nil, nil)
-	require.NoError(t, w.Update(1, "",
-		map[string]string{"ns/z": zoneRulesYAML},
-		map[string]string{"acme.com/api/": "ns/z"},
-		map[string]string{"acme.com": "ns/z"},
-		`"e1"`))
+	w := wafWithWAFZones(map[string]string{"acme.com/api/": "ns/z"}, map[string]string{"acme.com": "ns/z"})
+	require.NoError(t, w.Update(1, "", map[string]string{"ns/z": zoneRulesYAML}, `"e1"`))
 
 	h := w.Zone().ServeHandler(passed())
 	assert.Equal(t, 200, run(h, "GET", "https://acme.com/zoneblocked").Code, "host-level binding ignored when route map present")
 }
 
 func TestEdgeWAF_KeepLastGoodOnBadRuleset(t *testing.T) {
-	w := NewEdgeWAF(nil, nil)
-	require.NoError(t, w.Update(1, globalRulesYAML, nil, nil, nil, `"e1"`))
+	w := NewEdgeWAF(nil, nil, NewEdgeTopology())
+	require.NoError(t, w.Update(1, globalRulesYAML, nil, `"e1"`))
 
 	// A ruleset that fails to compile (non-bool expression) is rejected; the
 	// previous good global ruleset stays live, and the etag + generation are
@@ -156,7 +155,7 @@ func TestEdgeWAF_KeepLastGoodOnBadRuleset(t *testing.T) {
   - id: bad
     expression: "1 + 1"
     action: block
-`, nil, nil, nil, `"e2"`)
+`, nil, `"e2"`)
 	assert.Error(t, err)
 	assert.Equal(t, `"e1"`, w.Etag(), "etag must not advance on a failed apply")
 
@@ -169,12 +168,12 @@ func TestEdgeWAF_BadFirstSnapshotNeverClaims(t *testing.T) {
 	// An edge whose FIRST snapshot fails to compile keeps the empty boot
 	// ruleset — it must not claim WAF validation, or a WAF_VALIDATED_PROXY
 	// core would skip its own WAF for traffic that was screened by nothing.
-	w := NewEdgeWAF(nil, nil)
+	w := NewEdgeWAF(nil, nil, NewEdgeTopology())
 	err := w.Update(1, `rules:
   - id: bad
     expression: "1 + 1"
     action: block
-`, nil, nil, nil, `"e1"`)
+`, nil, `"e1"`)
 	assert.Error(t, err)
 
 	var got string
@@ -191,14 +190,14 @@ func TestEdgeWAF_BadFirstSnapshotNeverClaims(t *testing.T) {
 
 func TestEdgeWAF_CountryResolverWired(t *testing.T) {
 	country := func(_ *http.Request) string { return "XX" }
-	w := NewEdgeWAF(country, nil)
+	w := NewEdgeWAF(country, nil, NewEdgeTopology())
 	require.NoError(t, w.Update(1, `rules:
   - id: geo
     expression: request.country == "XX"
     action: block
     status: 403
     message: blocked-by-geo
-`, nil, nil, nil, `"e1"`))
+`, nil, `"e1"`))
 
 	h := w.Global().ServeHandler(passed())
 	rec := run(h, "GET", "https://acme.com/anything")
@@ -207,14 +206,14 @@ func TestEdgeWAF_CountryResolverWired(t *testing.T) {
 }
 
 func TestEdgeWAF_EtagRoundtrips(t *testing.T) {
-	w := NewEdgeWAF(nil, nil)
+	w := NewEdgeWAF(nil, nil, NewEdgeTopology())
 	assert.Equal(t, "", w.Etag())
-	require.NoError(t, w.Update(3, globalRulesYAML, nil, nil, nil, `"e9"`))
+	require.NoError(t, w.Update(3, globalRulesYAML, nil, `"e9"`))
 	assert.Equal(t, `"e9"`, w.Etag())
 }
 
 func TestEdgeWAF_ClaimStamp(t *testing.T) {
-	w := NewEdgeWAF(nil, nil)
+	w := NewEdgeWAF(nil, nil, NewEdgeTopology())
 
 	var got string
 	sentinel := http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
@@ -231,7 +230,7 @@ func TestEdgeWAF_ClaimStamp(t *testing.T) {
 
 	// Once a snapshot lands, the claim is the generation — Set overwrites any
 	// inbound value even without StripWAFClaim upstream.
-	require.NoError(t, w.Update(7, globalRulesYAML, nil, nil, nil, `"e1"`))
+	require.NoError(t, w.Update(7, globalRulesYAML, nil, `"e1"`))
 	req := httptest.NewRequest(http.MethodGet, "https://acme.com/x", nil)
 	req.Header.Set(wafclaim.Header, "spoofed")
 	h.ServeHTTP(httptest.NewRecorder(), req)
@@ -251,20 +250,20 @@ func TestStripWAFClaim(t *testing.T) {
 }
 
 func TestEdgeWAF_ZoneRemovedOnNextUpdateButKeptOnBadEdit(t *testing.T) {
-	w := NewEdgeWAF(nil, nil)
-	require.NoError(t, w.Update(1, "",
-		map[string]string{"ns/z": zoneRulesYAML},
-		map[string]string{"acme.com/": "ns/z"}, nil, `"e1"`))
+	// Binding lives in the shared topology; the zone RULESETS come from the WAF
+	// payload. A dropped ruleset stops being evaluated even though the binding
+	// remains.
+	w := wafWithWAFZones(map[string]string{"acme.com/": "ns/z"}, nil)
+	require.NoError(t, w.Update(1, "", map[string]string{"ns/z": zoneRulesYAML}, `"e1"`))
 
 	// A bad edit to the zone keeps its last-good rules.
 	_ = w.Update(2, "",
-		map[string]string{"ns/z": "rules:\n  - id: bad\n    expression: \"1+1\"\n    action: block\n"},
-		map[string]string{"acme.com/": "ns/z"}, nil, `"e2"`)
+		map[string]string{"ns/z": "rules:\n  - id: bad\n    expression: \"1+1\"\n    action: block\n"}, `"e2"`)
 	h := w.Zone().ServeHandler(passed())
 	assert.Equal(t, 403, run(h, "GET", "https://acme.com/zoneblocked").Code, "bad zone edit keeps last-good")
 
 	// A zone absent from the next payload is dropped.
-	require.NoError(t, w.Update(3, "", nil, nil, nil, `"e3"`))
+	require.NoError(t, w.Update(3, "", nil, `"e3"`))
 	h2 := w.Zone().ServeHandler(passed())
 	assert.Equal(t, 200, run(h2, "GET", "https://acme.com/zoneblocked").Code, "dropped zone no longer evaluated")
 }

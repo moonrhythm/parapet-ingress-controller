@@ -17,6 +17,11 @@ type EventsSnapshot struct {
 	// WAF/RateLimit are the stores' content etags ("" when distribution is off).
 	WAF       string `json:"waf,omitempty"`
 	RateLimit string `json:"ratelimit,omitempty"`
+	// Topology is the topology store's content etag ("" when off). A binding/host
+	// change bumps it; the edge re-fetches /v1/topology (and, since a binding
+	// change can alter which zone rulesets a token receives, also /v1/waf and
+	// /v1/ratelimit — those are cheap 304s when their own content is unchanged).
+	Topology string `json:"topology,omitempty"`
 	// Certs is a fingerprint over the cert store's full (name, etag) index.
 	Certs string `json:"certs,omitempty"`
 	// Purges is the purge journal's last issued seq (0 = none/off).

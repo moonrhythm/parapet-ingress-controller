@@ -17,6 +17,7 @@ import (
 type eventsSnapshot struct {
 	WAF       string `json:"waf"`
 	RateLimit string `json:"ratelimit"`
+	Topology  string `json:"topology"`
 	Certs     string `json:"certs"`
 	Purges    uint64 `json:"purges"`
 }
@@ -28,6 +29,7 @@ type eventsSnapshot struct {
 type EventPokes struct {
 	WAF       chan<- struct{}
 	RateLimit chan<- struct{}
+	Topology  chan<- struct{}
 	Certs     chan<- struct{}
 	Purges    chan<- struct{}
 }
@@ -48,6 +50,7 @@ func (p EventPokes) poke(ch chan<- struct{}) {
 func (p EventPokes) pokeAll() {
 	p.poke(p.WAF)
 	p.poke(p.RateLimit)
+	p.poke(p.Topology)
 	p.poke(p.Certs)
 	p.poke(p.Purges)
 }
@@ -179,6 +182,14 @@ func runEventsOnce(ctx context.Context, cp *CpClient, pokes EventPokes) (deliver
 						pokes.poke(pokes.WAF)
 					}
 					if snap.RateLimit != last.RateLimit {
+						pokes.poke(pokes.RateLimit)
+					}
+					if snap.Topology != last.Topology {
+						pokes.poke(pokes.Topology)
+						// A binding change can alter which zone rulesets/limit sets a
+						// token receives, so also re-fetch WAF + rate-limit — cheap 304s
+						// when their own content is unchanged.
+						pokes.poke(pokes.WAF)
 						pokes.poke(pokes.RateLimit)
 					}
 					if snap.Certs != last.Certs {

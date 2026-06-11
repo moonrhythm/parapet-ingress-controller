@@ -142,7 +142,7 @@ func main() {
 	// refreshes single-flight per resource.
 	eventsEnabled := envOr("EDGE_EVENTS_ENABLED", "true") == "true"
 	var pokes edge.EventPokes
-	var certPoke, wafPoke, rlPoke, purgePoke chan struct{}
+	var certPoke, wafPoke, rlPoke, topoPoke, purgePoke chan struct{}
 	if eventsEnabled {
 		certPoke = make(chan struct{}, 1)
 		pokes.Certs = certPoke
@@ -207,8 +207,23 @@ func main() {
 	if wafEnabled || ratelimitEnabled {
 		country, asn = loadGeoResolvers()
 	}
+
+	// Unified zone-binding + known-host topology (GET /v1/topology), shared by the
+	// edge WAF matcher and the rate-limit matcher (and the request-metric host
+	// bound). Fetched whenever either feature is on; fail-static like the others.
+	var topo *edge.EdgeTopology
+	if wafEnabled || ratelimitEnabled {
+		topo = edge.NewEdgeTopology()
+		edge.RefreshTopologyOnce(cp, topo)
+		if eventsEnabled {
+			topoPoke = make(chan struct{}, 1)
+			pokes.Topology = topoPoke
+		}
+		go edge.RunTopologyRefresh(ctx, cp, topo, refreshInterval, topoPoke)
+	}
+
 	if wafEnabled {
-		ewaf = edge.NewEdgeWAF(country, asn)
+		ewaf = edge.NewEdgeWAF(country, asn, topo)
 		edge.RefreshWafOnce(cp, ewaf, remintCoord)
 		if eventsEnabled {
 			wafPoke = make(chan struct{}, 1)
@@ -222,7 +237,7 @@ func main() {
 	// controller's are per pod; the core still enforces its own limits.
 	var erl *edge.EdgeRateLimit
 	if ratelimitEnabled {
-		erl = edge.NewEdgeRateLimit(country, asn)
+		erl = edge.NewEdgeRateLimit(country, asn, topo)
 		edge.RefreshRateLimitOnce(cp, erl)
 		if eventsEnabled {
 			rlPoke = make(chan struct{}, 1)

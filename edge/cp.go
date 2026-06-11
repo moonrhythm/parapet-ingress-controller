@@ -152,34 +152,29 @@ func (c *CpClient) FetchCert(sni, currentEtag string) (CertFetch, error) {
 	}
 }
 
-// WafFetch is the outcome of a WAF ruleset fetch.
+// WafFetch is the outcome of a WAF ruleset fetch. Zone BINDINGS now ride
+// /v1/topology (see FetchTopology), not this payload.
 type WafFetch struct {
 	// Unchanged is true on a 304.
 	Unchanged bool
-	// On a 200: the generation, global YAML, per-zone YAML, zone bindings
-	// (path-aware route patterns, plus the legacy host map an older CP serves),
-	// and the ETag.
-	Generation   uint64
-	GlobalRules  string
-	Zones        map[string]string
-	RouteZoneMap map[string]string
-	HostZoneMap  map[string]string
-	Etag         string
-	CAID         string // signer target ca_id (secondary force-re-mint confirmer; 200 only)
-	SignerFP     string // active signing fp (200 only)
+	// On a 200: the generation, global YAML, per-zone YAML, and the ETag.
+	Generation  uint64
+	GlobalRules string
+	Zones       map[string]string
+	Etag        string
+	CAID        string // signer target ca_id (secondary force-re-mint confirmer; 200 only)
+	SignerFP    string // active signing fp (200 only)
 }
 
 type wafBody struct {
-	Generation   uint64            `json:"generation"`
-	GlobalRules  string            `json:"global_rules"`
-	Zones        map[string]string `json:"zones"`
-	RouteZoneMap map[string]string `json:"route_zone_map"`
-	HostZoneMap  map[string]string `json:"host_zone_map"`
-	CAID         string            `json:"ca_id"`
-	SigningFP    string            `json:"signing_cert_fp"`
+	Generation  uint64            `json:"generation"`
+	GlobalRules string            `json:"global_rules"`
+	Zones       map[string]string `json:"zones"`
+	CAID        string            `json:"ca_id"`
+	SigningFP   string            `json:"signing_cert_fp"`
 }
 
-// FetchWaf fetches the WAF payload (global YAML + zones + host->zone map) scoped
+// FetchWaf fetches the WAF ruleset payload (global YAML + zone rulesets) scoped
 // to the edge's token, with ETag revalidation. A 404 ("waf distribution
 // disabled") is treated like any other non-200/304: an error the caller handles
 // fail-static (keeps last-good).
@@ -199,35 +194,29 @@ func (c *CpClient) FetchWaf(currentEtag string) (WafFetch, error) {
 			return WafFetch{}, fmt.Errorf("decode: %w", err)
 		}
 		return WafFetch{
-			Generation:   body.Generation,
-			GlobalRules:  body.GlobalRules,
-			Zones:        body.Zones,
-			RouteZoneMap: body.RouteZoneMap,
-			HostZoneMap:  body.HostZoneMap,
-			Etag:         resp.Header.Get("ETag"),
-			CAID:         body.CAID,
-			SignerFP:     body.SigningFP,
+			Generation:  body.Generation,
+			GlobalRules: body.GlobalRules,
+			Zones:       body.Zones,
+			Etag:        resp.Header.Get("ETag"),
+			CAID:        body.CAID,
+			SignerFP:    body.SigningFP,
 		}, nil
 	default:
 		return WafFetch{}, fmt.Errorf("control plane returned %d for /v1/waf", resp.StatusCode)
 	}
 }
 
-// RateLimitFetch is the outcome of a rate-limit config fetch.
+// RateLimitFetch is the outcome of a rate-limit config fetch. Zone BINDINGS and
+// the known-host list now ride /v1/topology (see FetchTopology), not this payload.
 type RateLimitFetch struct {
 	// Unchanged is true on a 304.
 	Unchanged bool
-	// On a 200: the generation, global limit documents, per-zone documents,
-	// zone bindings (path-aware route patterns, plus the legacy host map an
-	// older CP serves), known hosts, and the ETag. Documents are []string
-	// (one YAML document per ConfigMap data value — ratelimitrule.Parse's
-	// contract; never "---"-joined).
+	// On a 200: the generation, global limit documents, per-zone documents, and
+	// the ETag. Documents are []string (one YAML document per ConfigMap data
+	// value — ratelimitrule.Parse's contract; never "---"-joined).
 	Generation   uint64
 	GlobalLimits []string
 	Zones        map[string][]string
-	RouteZoneMap map[string]string
-	HostZoneMap  map[string]string
-	Hosts        []string
 	Etag         string
 }
 
@@ -235,15 +224,12 @@ type rateLimitBody struct {
 	Generation   uint64              `json:"generation"`
 	GlobalLimits []string            `json:"global_limits"`
 	Zones        map[string][]string `json:"zones"`
-	RouteZoneMap map[string]string   `json:"route_zone_map"`
-	HostZoneMap  map[string]string   `json:"host_zone_map"`
-	Hosts        []string            `json:"hosts"`
 }
 
-// FetchRateLimit fetches the rate-limit payload (global documents + zones +
-// host->zone map + known hosts) scoped to the edge's token, with ETag
-// revalidation. A 404 ("ratelimit distribution disabled") is treated like any
-// other non-200/304: an error the caller handles fail-static (keeps last-good).
+// FetchRateLimit fetches the rate-limit limit-set payload (global documents +
+// zone limit sets) scoped to the edge's token, with ETag revalidation. A 404
+// ("ratelimit distribution disabled") is treated like any other non-200/304: an
+// error the caller handles fail-static (keeps last-good).
 func (c *CpClient) FetchRateLimit(currentEtag string) (RateLimitFetch, error) {
 	resp, err := c.do(c.base+"/v1/ratelimit", currentEtag)
 	if err != nil {
@@ -263,13 +249,67 @@ func (c *CpClient) FetchRateLimit(currentEtag string) (RateLimitFetch, error) {
 			Generation:   body.Generation,
 			GlobalLimits: body.GlobalLimits,
 			Zones:        body.Zones,
-			RouteZoneMap: body.RouteZoneMap,
-			HostZoneMap:  body.HostZoneMap,
-			Hosts:        body.Hosts,
 			Etag:         resp.Header.Get("ETag"),
 		}, nil
 	default:
 		return RateLimitFetch{}, fmt.Errorf("control plane returned %d for /v1/ratelimit", resp.StatusCode)
+	}
+}
+
+// TopologyFetch is the outcome of a topology fetch: the unified WAF + rate-limit
+// zone bindings (path-aware route maps plus legacy host maps) and the known-host
+// list, scoped to the edge's token.
+type TopologyFetch struct {
+	// Unchanged is true on a 304.
+	Unchanged    bool
+	Generation   uint64
+	WAFRouteZone map[string]string
+	WAFHostZone  map[string]string
+	RLRouteZone  map[string]string
+	RLHostZone   map[string]string
+	Hosts        []string
+	Etag         string
+}
+
+type topologyBody struct {
+	Generation   uint64            `json:"generation"`
+	WAFRouteZone map[string]string `json:"waf_route_zone"`
+	WAFHostZone  map[string]string `json:"waf_host_zone"`
+	RLRouteZone  map[string]string `json:"rl_route_zone"`
+	RLHostZone   map[string]string `json:"rl_host_zone"`
+	Hosts        []string          `json:"hosts"`
+}
+
+// FetchTopology fetches the unified zone-binding + known-host topology scoped to
+// the edge's token, with ETag revalidation. A 404 ("topology distribution
+// disabled") is treated like any other non-200/304: an error the caller handles
+// fail-static (keeps last-good).
+func (c *CpClient) FetchTopology(currentEtag string) (TopologyFetch, error) {
+	resp, err := c.do(c.base+"/v1/topology", currentEtag)
+	if err != nil {
+		return TopologyFetch{}, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return TopologyFetch{Unchanged: true}, nil
+	case http.StatusOK:
+		var body topologyBody
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxWafBody)).Decode(&body); err != nil {
+			return TopologyFetch{}, fmt.Errorf("decode: %w", err)
+		}
+		return TopologyFetch{
+			Generation:   body.Generation,
+			WAFRouteZone: body.WAFRouteZone,
+			WAFHostZone:  body.WAFHostZone,
+			RLRouteZone:  body.RLRouteZone,
+			RLHostZone:   body.RLHostZone,
+			Hosts:        body.Hosts,
+			Etag:         resp.Header.Get("ETag"),
+		}, nil
+	default:
+		return TopologyFetch{}, fmt.Errorf("control plane returned %d for /v1/topology", resp.StatusCode)
 	}
 }
 

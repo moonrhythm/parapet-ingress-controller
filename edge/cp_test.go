@@ -77,7 +77,7 @@ func TestCpClient_FetchWaf200ParsesPayload(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/waf", r.URL.Path)
 		w.Header().Set("ETag", `"w1"`)
-		_, _ = w.Write([]byte(`{"generation":7,"global_rules":"G","zones":{"ns/z":"ZY"},"route_zone_map":{"acme.com/api/":"ns/z"},"host_zone_map":{"acme.com":"ns/z"}}`))
+		_, _ = w.Write([]byte(`{"generation":7,"global_rules":"G","zones":{"ns/z":"ZY"}}`))
 	}))
 	defer srv.Close()
 	cp, _ := NewCpClient(srv.URL, "t", nil)
@@ -87,8 +87,6 @@ func TestCpClient_FetchWaf200ParsesPayload(t *testing.T) {
 	assert.EqualValues(t, 7, res.Generation)
 	assert.Equal(t, "G", res.GlobalRules)
 	assert.Equal(t, "ZY", res.Zones["ns/z"])
-	assert.Equal(t, "ns/z", res.RouteZoneMap["acme.com/api/"])
-	assert.Equal(t, "ns/z", res.HostZoneMap["acme.com"])
 	assert.Equal(t, `"w1"`, res.Etag)
 }
 
@@ -96,7 +94,7 @@ func TestCpClient_FetchRateLimit200ParsesPayload(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/ratelimit", r.URL.Path)
 		w.Header().Set("ETag", `"r1"`)
-		_, _ = w.Write([]byte(`{"generation":4,"global_limits":["G1","G2"],"zones":{"ns/z":["Z"]},"route_zone_map":{"acme.com/":"ns/z"},"host_zone_map":{"acme.com":"ns/z"},"hosts":["acme.com"]}`))
+		_, _ = w.Write([]byte(`{"generation":4,"global_limits":["G1","G2"],"zones":{"ns/z":["Z"]}}`))
 	}))
 	defer srv.Close()
 	cp, _ := NewCpClient(srv.URL, "t", nil)
@@ -106,9 +104,6 @@ func TestCpClient_FetchRateLimit200ParsesPayload(t *testing.T) {
 	assert.EqualValues(t, 4, res.Generation)
 	assert.Equal(t, []string{"G1", "G2"}, res.GlobalLimits)
 	assert.Equal(t, []string{"Z"}, res.Zones["ns/z"])
-	assert.Equal(t, "ns/z", res.RouteZoneMap["acme.com/"])
-	assert.Equal(t, "ns/z", res.HostZoneMap["acme.com"])
-	assert.Equal(t, []string{"acme.com"}, res.Hosts)
 	assert.Equal(t, `"r1"`, res.Etag)
 }
 

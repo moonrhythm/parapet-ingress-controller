@@ -8,7 +8,11 @@ import (
 	"testing"
 )
 
-func TestServerWAFEndpointScopesBindings(t *testing.T) {
+// The WAF endpoint scopes the zone RULESETS to the zones the token's allowed
+// hosts bind to (the store still keeps its own copy of the bindings to do this).
+// The bindings themselves now ship from /v1/topology — see
+// TestServerTopologyEndpointScopesBindings.
+func TestServerWAFEndpointScopesZones(t *testing.T) {
 	store := NewWafStore()
 	store.SetGlobal("global-rules")
 	store.SetZones(map[string]string{"cust1/z": "zone-rules", "cust2/other": "other-rules"})
@@ -33,12 +37,6 @@ func TestServerWAFEndpointScopesBindings(t *testing.T) {
 	}
 	if resp.GlobalRules != "global-rules" {
 		t.Errorf("global always included: got %q", resp.GlobalRules)
-	}
-	if !reflect.DeepEqual(resp.RouteZoneMap, map[string]string{"acme.com/api/": "cust1/z"}) {
-		t.Errorf("route_zone_map must exclude evil.com: got %v", resp.RouteZoneMap)
-	}
-	if !reflect.DeepEqual(resp.HostZoneMap, map[string]string{"acme.com": "cust1/z"}) {
-		t.Errorf("host_zone_map must exclude evil.com: got %v", resp.HostZoneMap)
 	}
 	if !reflect.DeepEqual(resp.Zones, map[string]string{"cust1/z": "zone-rules"}) {
 		t.Errorf("zones must include only referenced+allowed: got %v", resp.Zones)

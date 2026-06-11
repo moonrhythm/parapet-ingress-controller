@@ -206,7 +206,7 @@ func TestRunWafRefreshPoke(t *testing.T) {
 	defer cancel()
 	// Interval far beyond the test deadline: any fetch can only come from the
 	// poke (honored even during the loop's initial jitter window).
-	go RunWafRefresh(ctx, cp, NewEdgeWAF(nil, nil), 10*time.Minute, nil, poke)
+	go RunWafRefresh(ctx, cp, NewEdgeWAF(nil, nil, NewEdgeTopology()), 10*time.Minute, nil, poke)
 	poke <- struct{}{}
 	select {
 	case <-hits:

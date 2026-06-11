@@ -151,15 +151,11 @@ func TestServerRateLimitEndpoint(t *testing.T) {
 	if !reflect.DeepEqual(resp.GlobalLimits, []string{"gdoc"}) {
 		t.Errorf("global: got %v", resp.GlobalLimits)
 	}
-	if !reflect.DeepEqual(resp.HostZoneMap, map[string]string{"acme.com": "cust1/basic"}) {
-		t.Errorf("host_zone_map must exclude evil.com: got %v", resp.HostZoneMap)
+	if !reflect.DeepEqual(resp.Zones, map[string][]string{"cust1/basic": {"zdoc"}}) {
+		t.Errorf("zones must include only referenced+allowed: got %v", resp.Zones)
 	}
-	if !reflect.DeepEqual(resp.RouteZoneMap, map[string]string{"acme.com/": "cust1/basic"}) {
-		t.Errorf("route_zone_map must exclude evil.com: got %v", resp.RouteZoneMap)
-	}
-	if !reflect.DeepEqual(resp.Hosts, []string{"acme.com"}) {
-		t.Errorf("hosts must be scoped: got %v", resp.Hosts)
-	}
+	// The zone bindings + known-host list now ship from /v1/topology — see
+	// TestServerTopologyEndpointScopesBindings.
 	etag := rec.Header().Get("ETag")
 	if etag == "" {
 		t.Fatal("missing ETag")

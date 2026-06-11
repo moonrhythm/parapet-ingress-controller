@@ -37,9 +37,18 @@ func rlServe(mw http.Handler, host, ip string) int {
 	return rec.Code
 }
 
+// rlWithRLZones builds an EdgeRateLimit whose shared topology binds the given
+// rate-limit route/host maps and known-host list (these now live in
+// EdgeTopology, not the rate-limit payload).
+func rlWithRLZones(routeZone, hostZone map[string]string, hosts []string) *EdgeRateLimit {
+	topo := NewEdgeTopology()
+	topo.Update(1, nil, nil, routeZone, hostZone, hosts, `"t1"`)
+	return NewEdgeRateLimit(nil, nil, topo)
+}
+
 func TestEdgeRateLimit_GlobalEnforces(t *testing.T) {
-	e := NewEdgeRateLimit(nil, nil)
-	require.NoError(t, e.Update(1, []string{ipLimitDoc}, nil, nil, nil, nil, `"e1"`))
+	e := NewEdgeRateLimit(nil, nil, NewEdgeTopology())
+	require.NoError(t, e.Update(1, []string{ipLimitDoc}, nil, `"e1"`))
 
 	h := e.Global().ServeHandler(passed())
 	assert.Equal(t, 200, rlServe(h, "acme.com", "10.1.1.1"), "first request within rate")
@@ -49,12 +58,8 @@ func TestEdgeRateLimit_GlobalEnforces(t *testing.T) {
 
 func TestEdgeRateLimit_ZoneBoundByHost(t *testing.T) {
 	// Legacy host-level binding (route_zone_map absent — an older CP).
-	e := NewEdgeRateLimit(nil, nil)
-	require.NoError(t, e.Update(1, nil,
-		map[string][]string{"cust1/basic": {ipLimitDoc}},
-		nil,
-		map[string]string{"acme.com": "cust1/basic"},
-		[]string{"acme.com"}, `"e1"`))
+	e := rlWithRLZones(nil, map[string]string{"acme.com": "cust1/basic"}, []string{"acme.com"})
+	require.NoError(t, e.Update(1, nil, map[string][]string{"cust1/basic": {ipLimitDoc}}, `"e1"`))
 
 	h := e.Zone().ServeHandler(passed())
 	assert.Equal(t, 200, rlServe(h, "acme.com", "10.2.2.2"))
@@ -76,17 +81,14 @@ func TestEdgeRateLimit_ZonePathAware(t *testing.T) {
 	// Two ingresses share a host with different paths and different zones: each
 	// path burns its OWN zone's budget, and an unbound path burns none — the
 	// resolution the controller's per-route binding gives.
-	e := NewEdgeRateLimit(nil, nil)
+	e := rlWithRLZones(map[string]string{
+		"acme.com/api":  "cust1/a",
+		"acme.com/api/": "cust1/a",
+		"acme.com/web":  "cust2/b",
+		"acme.com/web/": "cust2/b",
+	}, nil, []string{"acme.com"})
 	require.NoError(t, e.Update(1, nil,
-		map[string][]string{"cust1/a": {ipLimitDoc}, "cust2/b": {ipLimitDoc}},
-		map[string]string{
-			"acme.com/api":  "cust1/a",
-			"acme.com/api/": "cust1/a",
-			"acme.com/web":  "cust2/b",
-			"acme.com/web/": "cust2/b",
-		},
-		nil,
-		[]string{"acme.com"}, `"e1"`))
+		map[string][]string{"cust1/a": {ipLimitDoc}, "cust2/b": {ipLimitDoc}}, `"e1"`))
 
 	h := e.Zone().ServeHandler(passed())
 	assert.Equal(t, 200, rlServePath(h, "acme.com", "/api/x", "10.9.9.9"))
@@ -97,8 +99,8 @@ func TestEdgeRateLimit_ZonePathAware(t *testing.T) {
 }
 
 func TestEdgeRateLimit_KeepLastGoodAndCountersOnBadUpdate(t *testing.T) {
-	e := NewEdgeRateLimit(nil, nil)
-	require.NoError(t, e.Update(1, []string{ipLimitDoc}, nil, nil, nil, nil, `"e1"`))
+	e := NewEdgeRateLimit(nil, nil, NewEdgeTopology())
+	require.NoError(t, e.Update(1, []string{ipLimitDoc}, nil, `"e1"`))
 
 	h := e.Global().ServeHandler(passed())
 	assert.Equal(t, 200, rlServe(h, "acme.com", "10.3.3.3"))
@@ -107,30 +109,31 @@ func TestEdgeRateLimit_KeepLastGoodAndCountersOnBadUpdate(t *testing.T) {
 	// live counters — stay in force, and the etag is NOT advanced so the bad
 	// input is re-fetched and retried (re-warned) on the next poll instead of
 	// 304ing forever.
-	err := e.Update(2, []string{"limits:\n  - id: bad\n    key: ip\n    rate: -1\n    window: 1m\n"}, nil, nil, nil, nil, `"e2"`)
+	err := e.Update(2, []string{"limits:\n  - id: bad\n    key: ip\n    rate: -1\n    window: 1m\n"}, nil, `"e2"`)
 	assert.Error(t, err)
 	assert.Equal(t, `"e1"`, e.Etag(), "etag must not advance on a failed apply")
 	assert.Equal(t, 429, rlServe(h, "acme.com", "10.3.3.3"), "last-good set still enforcing with its counters")
 }
 
 func TestEdgeRateLimit_CountersSurviveUnchangedUpdate(t *testing.T) {
-	e := NewEdgeRateLimit(nil, nil)
+	e := NewEdgeRateLimit(nil, nil, NewEdgeTopology())
 	doc := "limits:\n  - id: ip-2\n    key: ip\n    rate: 2\n    window: 1m\n"
-	require.NoError(t, e.Update(1, []string{doc}, nil, nil, nil, nil, `"e1"`))
+	require.NoError(t, e.Update(1, []string{doc}, nil, `"e1"`))
 
 	h := e.Global().ServeHandler(passed())
 	assert.Equal(t, 200, rlServe(h, "acme.com", "10.4.4.4"))
 
 	// Re-applying an unchanged limit carries the strategy — and its counters —
 	// over (SetLimits' cfgKey match), so the budget is NOT reset by a refresh.
-	require.NoError(t, e.Update(2, []string{doc}, nil, nil, nil, nil, `"e2"`))
+	require.NoError(t, e.Update(2, []string{doc}, nil, `"e2"`))
 	assert.Equal(t, 200, rlServe(h, "acme.com", "10.4.4.4"), "2/2 after carry-over")
 	assert.Equal(t, 429, rlServe(h, "acme.com", "10.4.4.4"), "3rd request over the carried budget")
 }
 
 func TestEdgeRateLimit_KnownHostCollapse(t *testing.T) {
-	e := NewEdgeRateLimit(nil, nil)
-	require.NoError(t, e.Update(1, []string{hostLimitDoc}, nil, nil, nil, []string{"a.com"}, `"e1"`))
+	// The known-host set now comes from the shared topology.
+	e := rlWithRLZones(nil, nil, []string{"a.com"})
+	require.NoError(t, e.Update(1, []string{hostLimitDoc}, nil, `"e1"`))
 
 	h := e.Global().ServeHandler(passed())
 	// Hosts no Ingress declares collapse into ONE shared bucket: a random-Host
@@ -141,8 +144,8 @@ func TestEdgeRateLimit_KnownHostCollapse(t *testing.T) {
 }
 
 func TestEdgeRateLimit_EtagRoundtrips(t *testing.T) {
-	e := NewEdgeRateLimit(nil, nil)
+	e := NewEdgeRateLimit(nil, nil, NewEdgeTopology())
 	assert.Equal(t, "", e.Etag())
-	require.NoError(t, e.Update(3, nil, nil, nil, nil, nil, `"e9"`))
+	require.NoError(t, e.Update(3, nil, nil, `"e9"`))
 	assert.Equal(t, `"e9"`, e.Etag())
 }

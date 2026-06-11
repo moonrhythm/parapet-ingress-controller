@@ -29,10 +29,9 @@ import (
 // traffic never burns rate budget, and BEFORE the response cache so
 // edge-enforced limits apply to cache hits too.
 type EdgeRateLimit struct {
-	global     *ratelimitrule.Limiter
-	zones      atomic.Pointer[map[string]*ratelimitrule.Limiter] // zoneKey -> compiled zone
-	matcher    atomic.Pointer[zoneMatcher]                       // host+path -> zoneKey (core ServeMux semantics)
-	knownHosts atomic.Pointer[map[string]struct{}]               // Ingress-declared hosts (host-key collapse)
+	global *ratelimitrule.Limiter
+	zones  atomic.Pointer[map[string]*ratelimitrule.Limiter] // zoneKey -> compiled zone
+	topo   *EdgeTopology                                     // shared: host+path -> zoneKey + known-host set (from /v1/topology)
 
 	newZone func(key string) *ratelimitrule.Limiter
 
@@ -46,28 +45,19 @@ type EdgeRateLimit struct {
 // resolvers (the same ones the edge WAF uses); nil makes SetLimits reject
 // country/asn-keyed limits — all-or-nothing, so a geo-keyed limit set requires
 // the GeoIP databases at the edge (same parity note as the WAF, see EDGE.md).
-func NewEdgeRateLimit(country func(*http.Request) string, asn func(*http.Request) int64) *EdgeRateLimit {
-	e := &EdgeRateLimit{}
-	// knownHost reads the live Ingress-declared host set per request, so a host
-	// added by a later fetch is honored without recompiling limits. A host not
-	// in the set collapses (also before the first payload — there are no limits
-	// to evaluate then anyway), mirroring the controller's IsKnownHost.
-	knownHost := func(host string) bool {
-		m := e.knownHosts.Load()
-		if m == nil {
-			return false
-		}
-		_, ok := (*m)[host]
-		return ok
-	}
+func NewEdgeRateLimit(country func(*http.Request) string, asn func(*http.Request) int64, topo *EdgeTopology) *EdgeRateLimit {
+	e := &EdgeRateLimit{topo: topo}
 	newLimiter := func(namePrefix string) *ratelimitrule.Limiter {
 		return &ratelimitrule.Limiter{
 			NamePrefix: namePrefix,
 			// observe (not metric) keeps the controller's init-materialized
 			// core-trust series off the edge's /metrics — same boundary as the
 			// edge WAF's eval observer.
-			Observe:   observe.RateLimit,
-			KnownHost: knownHost,
+			Observe: observe.RateLimit,
+			// Host-key collapse reads the live Ingress-declared host set (shared
+			// EdgeTopology), so a host added by a later topology fetch is honored
+			// without recompiling limits, mirroring the controller's IsKnownHost.
+			KnownHost: topo.IsKnownHost,
 			Country:   country,
 			ASN:       asn,
 		}
@@ -76,9 +66,6 @@ func NewEdgeRateLimit(country func(*http.Request) string, asn func(*http.Request
 	e.newZone = func(key string) *ratelimitrule.Limiter { return newLimiter("zone:" + key) }
 	empty := map[string]*ratelimitrule.Limiter{}
 	e.zones.Store(&empty)
-	e.matcher.Store(newZoneMatcher(nil, nil))
-	emptyHosts := map[string]struct{}{}
-	e.knownHosts.Store(&emptyHosts)
 	return e
 }
 
@@ -89,33 +76,22 @@ func (e *EdgeRateLimit) Etag() string {
 	return e.etag
 }
 
-// Update compiles and installs a fetched payload: the global limit set, the
-// zones, the zone bindings, and the known-host list. routeZone is the
-// path-aware binding (route pattern -> zoneKey); hostZone is the legacy
-// host-level binding an older CP serves, used only when routeZone is empty
-// (see newZoneMatcher). All-or-nothing PER set (SetLimits keeps the last-good
-// set on any invalid limit); the zones map, the matcher, and the known-host set
-// are swapped wholesale. An existing zone instance is reused when present so
-// its counters survive the swap (SetLimits additionally carries strategies over
-// for limits whose shaping config didn't change — the same counter-preservation
-// the controller's reload has). Returns the first error encountered (the rest
-// still apply — fail-static per set).
-func (e *EdgeRateLimit) Update(generation uint64, globalDocs []string, zoneDocs map[string][]string, routeZone, hostZone map[string]string, hosts []string, etag string) error {
+// Update compiles and installs a fetched payload: the global limit set and the
+// zone limit sets. The zone BINDINGS and the known-host list come from
+// EdgeTopology now, not from this payload. All-or-nothing PER set (SetLimits
+// keeps the last-good set on any invalid limit); the zones map is swapped
+// wholesale. An existing zone instance is reused when present so its counters
+// survive the swap (SetLimits additionally carries strategies over for limits
+// whose shaping config didn't change — the same counter-preservation the
+// controller's reload has). Returns the first error encountered (the rest still
+// apply — fail-static per set).
+func (e *EdgeRateLimit) Update(generation uint64, globalDocs []string, zoneDocs map[string][]string, etag string) error {
 	var firstErr error
 	note := func(err error) {
 		if firstErr == nil {
 			firstErr = err
 		}
 	}
-
-	// Swap the known-host set BEFORE applying limits: SetLimits compiles
-	// against the live closure, and a request racing the swap just collapses
-	// (or not) against whichever set is current — both are sound snapshots.
-	hs := make(map[string]struct{}, len(hosts))
-	for _, h := range hosts {
-		hs[h] = struct{}{}
-	}
-	e.knownHosts.Store(&hs)
 
 	// global
 	if limits, err := ratelimitrule.Parse(globalDocs...); err != nil {
@@ -141,8 +117,6 @@ func (e *EdgeRateLimit) Update(generation uint64, globalDocs []string, zoneDocs 
 		newZones[key] = z
 	}
 	e.zones.Store(&newZones)
-
-	e.matcher.Store(newZoneMatcher(routeZone, hostZone))
 
 	// Advance the etag + generation only on a CLEAN apply. Storing the etag on
 	// a failed apply would 304 every later poll: the rejection would be warned
@@ -176,13 +150,11 @@ func (e *EdgeRateLimit) Global() parapet.Middleware {
 func (e *EdgeRateLimit) Zone() parapet.Middleware {
 	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-			if m := e.matcher.Load(); m != nil {
-				if key, ok := m.resolve(r); ok {
-					if zs := e.zones.Load(); zs != nil {
-						if z := (*zs)[key]; z != nil {
-							z.Serve(rw, r, h)
-							return
-						}
+			if key, ok := e.topo.resolveRLZone(r); ok {
+				if zs := e.zones.Load(); zs != nil {
+					if z := (*zs)[key]; z != nil {
+						z.Serve(rw, r, h)
+						return
 					}
 				}
 			}

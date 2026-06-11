@@ -64,6 +64,7 @@ client ──TLS──► edge (Go/parapet, outside k8s)                        
                   │     GET /v1/certs?sni=… → cert+key+ETag (allowed SNI) │
                   │     GET /v1/waf         → rules for edge domains      │
                   │     GET /v1/ratelimit   → limits for edge domains     │
+                  │     GET /v1/topology    → zone bindings + known hosts │
                   │   authz: bearer token → allowed domains/zones         │
                   │   reads: TLS Secrets, WAF + ratelimit ConfigMaps,     │
                   │          Ingresses                                    │
@@ -91,8 +92,8 @@ keys**, so it must never be on the public LoadBalancer. See
 - **`cmd/edge-controlplane/`** (Go) — in-cluster HTTPS REST server. Reuses the
   Go controller's k8s client (`k8s`), cert table (`cert`), WAF rule parser
   (`wafrule`), and route/zone logic. Serves `GET /v1/certs?sni=…` (cert+key),
-  `GET /v1/waf` (rules), and `GET /v1/ratelimit` (limits). Not on the request
-  path.
+  `GET /v1/waf` (rules), `GET /v1/ratelimit` (limits), and `GET /v1/topology`
+  (the unified zone bindings + known-host list). Not on the request path.
 - **`cmd/edge-proxy/` + `edge/`** (Go) — a parapet-framework proxy. Reuses
   `cert.Table` for SNI resolution (plugged into `tls.Config.GetCertificate`,
   self-signed fallback on a miss), `wafrule` + `parapet/pkg/waf` for CEL
@@ -115,8 +116,9 @@ catch-all entry in the domain list that authorizes the token for **every** host
 check gates both endpoints:
 
 - `GET /v1/certs/{sni}` → require `sni ∈ allowed(token)`.
-- `GET /v1/waf` → return only the zones / host-map entries for the token's domains.
-- `GET /v1/ratelimit` → same scoping (zones, host-map, known hosts) per token.
+- `GET /v1/waf` → return only the zone rulesets for the token's domains.
+- `GET /v1/ratelimit` → same scoping (zone limit sets) per token.
+- `GET /v1/topology` → only the WAF + rate-limit zone bindings and known hosts for the token's domains.
 
 Server-side TLS is mandatory here: it encrypts the token **and the returned
 private key** in flight and lets the edge authenticate the control plane. The
@@ -155,41 +157,55 @@ GET /v1/certs?sni=<host>   Authorization: Bearer <token>   [If-None-Match: "<eta
   400 (missing sni)  401 (no/invalid token)  403 (sni ∉ allowed(token))  404 (no cert for sni)
 
 GET /v1/waf           Authorization: Bearer <token>   [If-None-Match: "<etag>"]
-  200 {"generation": N, "global_rules":"…", "zones":{…}, "route_zone_map":{…},
-       "host_zone_map":{…}}
+  200 {"generation": N, "global_rules":"…", "zones":{…}}
        global_rules   : the platform baseline YAML (identical for every edge)
        zones          : zoneKey ("<ns>/<name>") → rules YAML, scoped to the edge's hosts
-       route_zone_map : route pattern → zoneKey — PATH-AWARE binding. Patterns are
-                        byte-identical to the controller's route keys (Prefix →
-                        "host/path" + "host/path/", Exact → trailing slash stripped,
-                        ImplementationSpecific → as-is); the edge loads them into a
-                        real http.ServeMux, so zone resolution matches the core
-                        exactly (incl. two ingresses sharing a host with different
-                        paths and different zones). Scoped to the edge's hosts.
-       host_zone_map  : host → zoneKey — LEGACY host-level binding, kept for
-                        pre-path-aware edges; a current edge uses it only when
-                        route_zone_map is absent (older CP), as whole-host patterns.
-       (ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct;
+                        (only the zones the edge's allowed hosts bind to — the CP
+                        intersects against the bindings it also holds)
+       (the zone BINDINGS that select these zones ship from /v1/topology, not here;
+        ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct;
         the generation is EXCLUDED from the validator — it is process-local, and
         CP replicas must mint identical validators for identical content or an
         edge rotating across replicas would never 304)
 
 GET /v1/ratelimit     Authorization: Bearer <token>   [If-None-Match: "<etag>"]
-  200 {"generation": N, "global_limits":["…"], "zones":{"<ns>/<name>":["…"]},
-       "route_zone_map":{…}, "host_zone_map":{…}, "hosts":["…"]}
+  200 {"generation": N, "global_limits":["…"], "zones":{"<ns>/<name>":["…"]}}
        global_limits  : the platform baseline limit DOCUMENTS (identical for every edge)
        zones          : zoneKey → limit documents, scoped to the edge's hosts
-       route_zone_map : route pattern → zoneKey (`ratelimit-zone`, same-namespace
-                        only) — same path-aware model as /v1/waf
-       host_zone_map  : host → zoneKey (legacy, as in /v1/waf), scoped
-       hosts          : every Ingress-declared host the edge may serve — wired as the
-                        Limiter's KnownHost so host-keyed buckets for undeclared hosts
-                        collapse into one (cardinality bound under a random-Host flood)
-       (documents are ARRAYS of YAML strings, one per ConfigMap data value —
+       (the zone bindings + known-host list ship from /v1/topology, not here;
+        documents are ARRAYS of YAML strings, one per ConfigMap data value —
         ratelimitrule.Parse takes one document per string and does not split "---",
         so the WAF's concatenated format would silently drop trailing documents;
         ETag over the scoped payload with the generation excluded, like /v1/waf)
   401 (no/invalid token)   404 (ratelimit distribution disabled)
+
+GET /v1/topology      Authorization: Bearer <token>   [If-None-Match: "<etag>"]
+  200 {"generation": N, "waf_route_zone":{…}, "waf_host_zone":{…},
+       "rl_route_zone":{…}, "rl_host_zone":{…}, "hosts":["…"]}
+       The UNIFIED Ingress-derived topology — the single home for the zone bindings
+       and the known-host list that /v1/waf and /v1/ratelimit used to embed. The
+       edge feeds it to its WAF matcher, its rate-limit matcher, and the request
+       metric's host-cardinality bound.
+       waf_route_zone : route pattern → WAF zoneKey — PATH-AWARE binding. Patterns are
+                        byte-identical to the controller's route keys (Prefix →
+                        "host/path" + "host/path/", Exact → trailing slash stripped,
+                        ImplementationSpecific → as-is); the edge loads them into a
+                        real http.ServeMux, so zone resolution matches the core
+                        exactly. Scoped to the edge's hosts.
+       waf_host_zone  : host → WAF zoneKey — LEGACY host-level binding, used only when
+                        waf_route_zone is absent, as whole-host subtree patterns.
+       rl_route_zone / rl_host_zone : the same, for `ratelimit-zone` bindings
+                        (same-namespace only). Independent of the WAF maps — a route
+                        can be in a WAF zone, a different rate-limit zone, or neither.
+       hosts          : every Ingress-declared host the edge may serve — the edge's
+                        IsKnownHost set (rate-limit host-key collapse + the request
+                        metric's host bound; undeclared hosts collapse to one bucket /
+                        the "other" label, a cardinality bound under a random-Host flood)
+       (ETag over the scoped payload with the generation excluded, like /v1/waf. A
+        binding change here bumps the topology version on /v1/events; the edge then
+        also re-fetches /v1/waf + /v1/ratelimit, since a binding change can alter
+        which zone rulesets/limit sets it should receive — cheap 304s when unchanged.)
+  401 (no/invalid token)   404 (topology distribution disabled)
 
 GET /v1/purges?since=<seq>   Authorization: Bearer <token>
   200 {"entries":[{"seq":N,"scope":"url|host|prefix|tag|flush-all","host":"…","uri":"…","tag":"…"}],
@@ -224,7 +240,7 @@ POST /v1/purges       Authorization: Bearer <ADMIN token>   ← stronger cred th
 GET /v1/events        Authorization: Bearer <token>   (SSE; long-lived)
   200 Content-Type: text/event-stream — change-notification stream. Each event:
        event: change
-       data: {"waf":"<etag>","ratelimit":"<etag>","certs":"<fp>","purges":<seq>}
+       data: {"waf":"<etag>","ratelimit":"<etag>","topology":"<etag>","certs":"<fp>","purges":<seq>}
        The payload is a VERSION VECTOR (opaque, CP-process-local) — a wake-up
        signal only, never content. The first event is the current vector (a
        reconnecting edge covers its disconnected window); after that, one event
