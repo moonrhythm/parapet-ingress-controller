@@ -18,7 +18,7 @@ func RefreshWafOnce(cp *CpClient, w *EdgeWAF, coord *RemintCoordinator) {
 	case res.Unchanged:
 		// 304: cached ruleset is current.
 	default:
-		if err := w.Update(res.Generation, res.GlobalRules, res.Zones, res.HostZoneMap, res.Etag); err != nil {
+		if err := w.Update(res.Generation, res.GlobalRules, res.Zones, res.RouteZoneMap, res.HostZoneMap, res.Etag); err != nil {
 			slog.Warn("edge: a WAF ruleset was rejected; kept last-good (per ruleset)", "error", err)
 		} else {
 			slog.Info("edge: WAF rulesets updated", "generation", res.Generation)

@@ -23,13 +23,16 @@ import (
 // identically at the edge and at parapet. parapet still re-runs the full WAF —
 // the edge is an early-drop layer, not the authority (see EDGE.md).
 //
-// Eval order mirrors the controller: global first (authoritative baseline), then
-// the zone bound to the request host (host-level resolution; parapet does
-// path-precise resolution upstream).
+// Eval order mirrors the controller: global first (authoritative baseline),
+// then the zone bound to the request route. Zone resolution is PATH-AWARE: the
+// CP ships the controller's own route patterns (host+path, per PathType), and
+// the matcher runs them through a real http.ServeMux — so two ingresses sharing
+// a host with different paths and different zones resolve exactly as they do at
+// the core.
 type EdgeWAF struct {
-	global   *waf.WAF
-	zones    atomic.Pointer[map[string]*waf.WAF] // zoneKey -> compiled zone
-	hostZone atomic.Pointer[map[string]string]   // host -> zoneKey
+	global  *waf.WAF
+	zones   atomic.Pointer[map[string]*waf.WAF] // zoneKey -> compiled zone
+	matcher atomic.Pointer[zoneMatcher]         // host+path -> zoneKey (core ServeMux semantics)
 
 	newZone func() *waf.WAF // factory wiring Country/ASN/Logger onto a fresh zone
 
@@ -66,8 +69,7 @@ func NewEdgeWAF(country func(*http.Request) string, asn func(*http.Request) int6
 	w.global = newWAF("global")
 	empty := map[string]*waf.WAF{}
 	w.zones.Store(&empty)
-	emptyHZ := map[string]string{}
-	w.hostZone.Store(&emptyHZ)
+	w.matcher.Store(newZoneMatcher(nil, nil))
 	return w
 }
 
@@ -78,14 +80,16 @@ func (w *EdgeWAF) Etag() string {
 	return w.etag
 }
 
-// Update compiles and installs a fetched payload: the global ruleset, the zones,
-// and the host->zone bindings. All-or-nothing PER ruleset (parapet's SetRules
-// keeps the last-good ruleset on a compile error); the zones map and host->zone
-// map are swapped wholesale. An existing zone instance is reused when present so
-// a bad zone edit keeps its last-good rules (mirrors the controller). Returns
-// the first compile error encountered (the rest still apply — fail-static per
-// ruleset).
-func (w *EdgeWAF) Update(generation uint64, globalYAML string, zonesYAML, hostZone map[string]string, etag string) error {
+// Update compiles and installs a fetched payload: the global ruleset, the
+// zones, and the zone bindings. routeZone is the path-aware binding (route
+// pattern -> zoneKey); hostZone is the legacy host-level binding an older CP
+// serves, used only when routeZone is empty (see newZoneMatcher). All-or-nothing
+// PER ruleset (parapet's SetRules keeps the last-good ruleset on a compile
+// error); the zones map and the matcher are swapped wholesale. An existing zone
+// instance is reused when present so a bad zone edit keeps its last-good rules
+// (mirrors the controller). Returns the first compile error encountered (the
+// rest still apply — fail-static per ruleset).
+func (w *EdgeWAF) Update(generation uint64, globalYAML string, zonesYAML, routeZone, hostZone map[string]string, etag string) error {
 	var firstErr error
 	note := func(err error) {
 		if firstErr == nil {
@@ -117,11 +121,7 @@ func (w *EdgeWAF) Update(generation uint64, globalYAML string, zonesYAML, hostZo
 	}
 	w.zones.Store(&newZones)
 
-	hz := make(map[string]string, len(hostZone))
-	for h, k := range hostZone {
-		hz[h] = k
-	}
-	w.hostZone.Store(&hz)
+	w.matcher.Store(newZoneMatcher(routeZone, hostZone))
 
 	// Advance the etag + generation only on a CLEAN apply. Storing the etag on
 	// a failed compile would 304 every later poll and the bad input would never
@@ -189,15 +189,15 @@ func StripWAFClaim() parapet.Middleware {
 	})
 }
 
-// Zone returns middleware that resolves the request host to its bound zone
-// (host -> zoneKey -> zone) and runs that zone's ruleset. A host with no zone, or
-// a zone with no rules, passes through. Host must already be normalized
-// (host.StripPort + host.ToLower upstream).
+// Zone returns middleware that resolves the request to its bound zone
+// (host+path -> zoneKey -> zone, core ServeMux semantics) and runs that zone's
+// ruleset. A route with no zone, or a zone with no rules, passes through. Host
+// must already be normalized (host.StripPort + host.ToLower upstream).
 func (w *EdgeWAF) Zone() parapet.Middleware {
 	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-			if hz := w.hostZone.Load(); hz != nil {
-				if key, ok := (*hz)[r.Host]; ok {
+			if m := w.matcher.Load(); m != nil {
+				if key, ok := m.resolve(r); ok {
 					if zs := w.zones.Load(); zs != nil {
 						if z := (*zs)[key]; z != nil {
 							z.ServeHandler(h).ServeHTTP(rw, r)

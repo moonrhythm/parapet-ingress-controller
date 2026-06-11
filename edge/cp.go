@@ -126,24 +126,27 @@ func (c *CpClient) FetchCert(sni, currentEtag string) (CertFetch, error) {
 type WafFetch struct {
 	// Unchanged is true on a 304.
 	Unchanged bool
-	// On a 200: the generation, global YAML, per-zone YAML, host->zone bindings,
+	// On a 200: the generation, global YAML, per-zone YAML, zone bindings
+	// (path-aware route patterns, plus the legacy host map an older CP serves),
 	// and the ETag.
-	Generation  uint64
-	GlobalRules string
-	Zones       map[string]string
-	HostZoneMap map[string]string
-	Etag        string
-	CAID        string // signer target ca_id (secondary force-re-mint confirmer; 200 only)
-	SignerFP    string // active signing fp (200 only)
+	Generation   uint64
+	GlobalRules  string
+	Zones        map[string]string
+	RouteZoneMap map[string]string
+	HostZoneMap  map[string]string
+	Etag         string
+	CAID         string // signer target ca_id (secondary force-re-mint confirmer; 200 only)
+	SignerFP     string // active signing fp (200 only)
 }
 
 type wafBody struct {
-	Generation  uint64            `json:"generation"`
-	GlobalRules string            `json:"global_rules"`
-	Zones       map[string]string `json:"zones"`
-	HostZoneMap map[string]string `json:"host_zone_map"`
-	CAID        string            `json:"ca_id"`
-	SigningFP   string            `json:"signing_cert_fp"`
+	Generation   uint64            `json:"generation"`
+	GlobalRules  string            `json:"global_rules"`
+	Zones        map[string]string `json:"zones"`
+	RouteZoneMap map[string]string `json:"route_zone_map"`
+	HostZoneMap  map[string]string `json:"host_zone_map"`
+	CAID         string            `json:"ca_id"`
+	SigningFP    string            `json:"signing_cert_fp"`
 }
 
 // FetchWaf fetches the WAF payload (global YAML + zones + host->zone map) scoped
@@ -166,13 +169,14 @@ func (c *CpClient) FetchWaf(currentEtag string) (WafFetch, error) {
 			return WafFetch{}, fmt.Errorf("decode: %w", err)
 		}
 		return WafFetch{
-			Generation:  body.Generation,
-			GlobalRules: body.GlobalRules,
-			Zones:       body.Zones,
-			HostZoneMap: body.HostZoneMap,
-			Etag:        resp.Header.Get("ETag"),
-			CAID:        body.CAID,
-			SignerFP:    body.SigningFP,
+			Generation:   body.Generation,
+			GlobalRules:  body.GlobalRules,
+			Zones:        body.Zones,
+			RouteZoneMap: body.RouteZoneMap,
+			HostZoneMap:  body.HostZoneMap,
+			Etag:         resp.Header.Get("ETag"),
+			CAID:         body.CAID,
+			SignerFP:     body.SigningFP,
 		}, nil
 	default:
 		return WafFetch{}, fmt.Errorf("control plane returned %d for /v1/waf", resp.StatusCode)
@@ -184,12 +188,14 @@ type RateLimitFetch struct {
 	// Unchanged is true on a 304.
 	Unchanged bool
 	// On a 200: the generation, global limit documents, per-zone documents,
-	// host->zone bindings, known hosts, and the ETag. Documents are []string
+	// zone bindings (path-aware route patterns, plus the legacy host map an
+	// older CP serves), known hosts, and the ETag. Documents are []string
 	// (one YAML document per ConfigMap data value — ratelimitrule.Parse's
 	// contract; never "---"-joined).
 	Generation   uint64
 	GlobalLimits []string
 	Zones        map[string][]string
+	RouteZoneMap map[string]string
 	HostZoneMap  map[string]string
 	Hosts        []string
 	Etag         string
@@ -199,6 +205,7 @@ type rateLimitBody struct {
 	Generation   uint64              `json:"generation"`
 	GlobalLimits []string            `json:"global_limits"`
 	Zones        map[string][]string `json:"zones"`
+	RouteZoneMap map[string]string   `json:"route_zone_map"`
 	HostZoneMap  map[string]string   `json:"host_zone_map"`
 	Hosts        []string            `json:"hosts"`
 }
@@ -226,6 +233,7 @@ func (c *CpClient) FetchRateLimit(currentEtag string) (RateLimitFetch, error) {
 			Generation:   body.Generation,
 			GlobalLimits: body.GlobalLimits,
 			Zones:        body.Zones,
+			RouteZoneMap: body.RouteZoneMap,
 			HostZoneMap:  body.HostZoneMap,
 			Hosts:        body.Hosts,
 			Etag:         resp.Header.Get("ETag"),

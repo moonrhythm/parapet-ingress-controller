@@ -91,6 +91,7 @@ func TestRateLimitStoreScopedAndGeneration(t *testing.T) {
 	s.SetZones(map[string][]string{"cust1/basic": {"zdoc"}, "cust2/other": {"odoc"}})
 	s.SetIngressDerived(
 		map[string]string{"a.example.com": "cust1/basic", "d.example.com": "cust2/other"},
+		map[string]string{"a.example.com/api/": "cust1/basic", "d.example.com/": "cust2/other"},
 		[]string{"a.example.com", "d.example.com", "plain.example.com"},
 	)
 	if s.gen.Load() == gen0 {
@@ -104,6 +105,9 @@ func TestRateLimitStoreScopedAndGeneration(t *testing.T) {
 	}
 	if !reflect.DeepEqual(snap.hostZone, map[string]string{"a.example.com": "cust1/basic"}) {
 		t.Errorf("hostZone not scoped: got %v", snap.hostZone)
+	}
+	if !reflect.DeepEqual(snap.routeZone, map[string]string{"a.example.com/api/": "cust1/basic"}) {
+		t.Errorf("routeZone not scoped by pattern host: got %v", snap.routeZone)
 	}
 	if !reflect.DeepEqual(snap.zones, map[string][]string{"cust1/basic": {"zdoc"}}) {
 		t.Errorf("zones must include only referenced+allowed: got %v", snap.zones)
@@ -124,7 +128,10 @@ func TestServerRateLimitEndpoint(t *testing.T) {
 	store := NewRateLimitStore()
 	store.SetGlobal([]string{"gdoc"})
 	store.SetZones(map[string][]string{"cust1/basic": {"zdoc"}})
-	store.SetIngressDerived(map[string]string{"acme.com": "cust1/basic", "evil.com": "cust1/basic"}, []string{"acme.com", "evil.com"})
+	store.SetIngressDerived(
+		map[string]string{"acme.com": "cust1/basic", "evil.com": "cust1/basic"},
+		map[string]string{"acme.com/": "cust1/basic", "evil.com/": "cust1/basic"},
+		[]string{"acme.com", "evil.com"})
 
 	authz := NewAuthz(map[string][]string{"tok": {"acme.com"}})
 	h := NewServer(NewCertStore(), authz).WithRateLimit(store).Handler()
@@ -146,6 +153,9 @@ func TestServerRateLimitEndpoint(t *testing.T) {
 	}
 	if !reflect.DeepEqual(resp.HostZoneMap, map[string]string{"acme.com": "cust1/basic"}) {
 		t.Errorf("host_zone_map must exclude evil.com: got %v", resp.HostZoneMap)
+	}
+	if !reflect.DeepEqual(resp.RouteZoneMap, map[string]string{"acme.com/": "cust1/basic"}) {
+		t.Errorf("route_zone_map must exclude evil.com: got %v", resp.RouteZoneMap)
 	}
 	if !reflect.DeepEqual(resp.Hosts, []string{"acme.com"}) {
 		t.Errorf("hosts must be scoped: got %v", resp.Hosts)
