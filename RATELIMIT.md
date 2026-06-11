@@ -9,8 +9,8 @@ runtime live in [`ratelimitrule/`](ratelimitrule/).
 > Status: **implemented** in the Go controller (`controller_ratelimit.go`,
 > `plugin/ratelimitzone.go`, `ratelimitrule/`), gated by `RATELIMIT_ENABLED`
 > (off by default — disabled means no ConfigMap watch, no mount, no per-request
-> work). **Go-only**: the frozen Rust port has no counterpart, and the edge
-> proxy does not run these limits (see [Scope](#scope-and-non-goals)).
+> work). Controller-only: the edge proxy does not run these limits (see
+> [Scope](#scope-and-non-goals)).
 
 This complements, not replaces, the existing limiters:
 

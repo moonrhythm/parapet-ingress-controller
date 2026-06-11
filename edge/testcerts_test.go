@@ -14,8 +14,7 @@ import (
 )
 
 // genCertPEM creates a self-signed cert+key PEM pair with the given SAN DNS
-// names (IPs are added as IP SANs), for cert-store tests. Mirrors the Rust
-// tests' rcgen helper.
+// names (IPs are added as IP SANs), for cert-store tests.
 func genCertPEM(t *testing.T, sans ...string) (chainPEM, keyPEM []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

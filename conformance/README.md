@@ -1,26 +1,29 @@
 # Conformance fixtures
 
-Language-neutral test cases that **both** implementations are expected to
-satisfy identically. This is the mechanism that keeps two co-maintained
-controllers honest about the shared [behavior contract](../SPEC.md): a behavior
-is specified once here, and each implementation's test suite asserts it.
+Implementation-neutral test cases that pin the [behavior contract](../SPEC.md):
+a behavior is specified once here, and the test suite asserts it. The fixtures
+predate the removal of the Rust port (they originally kept two co-maintained
+controllers in lock-step); they remain **normative** — they define the
+supported surface, not just whatever the code happens to do today.
 
 ## Status
 
-Seeded, growing. Today each implementation keeps its own assertions; these
+Seeded, growing. Today the Go test suite keeps its own assertions; these
 fixtures are the **canonical specification** they track, and the long-term goal
-is for both test suites to load directly from this directory so a contract
-change can't land in one implementation without the other.
+is for the test suite to load directly from this directory so a contract
+change can't land in code without the fixture being updated to match.
 
-| Fixture | Specifies | Go asserts in | Rust asserts in |
-|---|---|---|---|
-| [`waf-cel-corpus.md`](waf-cel-corpus.md) | CEL rule strings evaluate identically (cel-go ↔ cel-rust) | `wafrule/*_test.go` + parapet `pkg/waf` tests | `rust/controller/src/waf.rs` (`corpus_*` tests) |
-| _(routing, annotations — to add)_ | PathType registration, annotation→behavior | `controller_test.go`, `plugin/*_test.go` | `rust/controller/src/{router,config,proxy}.rs` |
+| Fixture | Specifies | Asserted in |
+|---|---|---|
+| [`waf-cel-corpus.md`](waf-cel-corpus.md) | CEL rule strings evaluate per the pinned semantics | `wafrule/*_test.go` + parapet `pkg/waf` tests |
+| _(routing, annotations — to add)_ | PathType registration, annotation→behavior | `controller_test.go`, `plugin/*_test.go` |
 
-## Why a shared CEL corpus matters most
+## Why the CEL corpus matters most
 
-The WAF lets operators author the *same* CEL rule string and run it under either
-controller. cel-go and cel-rust are different engines, so the corpus pins the
-cases where they must agree (custom functions, the `request` map, normalization).
-A divergence here means a rule that blocks under Go silently passes under Rust
-(or vice-versa) — the corpus is the regression guard against exactly that.
+WAF rules are operator-authored CEL strings that live in tenant ConfigMaps, not
+in this repo — they can't be recompiled or audited when the engine changes. The
+corpus pins the rule-authoring surface (custom functions, the `request` map,
+normalization) so an upgrade of cel-go / `parapet/pkg/waf` can't silently
+change what a rule matches. A divergence here means a rule that used to block
+silently passes (or vice-versa) — the corpus is the regression guard against
+exactly that.

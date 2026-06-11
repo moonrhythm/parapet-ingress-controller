@@ -25,8 +25,8 @@ const (
 
 // CpClient is the HTTPS client to the in-cluster control plane. It presents the
 // edge's bearer token and revalidates cert/WAF material with ETags. The token
-// and the returned private key only ever travel over this connection. Mirrors
-// the Rust edge's CpClient: GET /v1/certs?sni= and GET /v1/waf, fail-static.
+// and the returned private key only ever travel over this connection.
+// GET /v1/certs?sni= and GET /v1/waf, fail-static.
 type CpClient struct {
 	http  *http.Client
 	base  string

@@ -885,8 +885,7 @@ rotation test: an `OLD++NEW` overlap `ca_pem` verifies leaves under **both**; af
 OLD-CA leaf fails; the strict all-or-nothing parse rejects a truncated NEW block (keep
 last-good); (5) **ADD** a disabled-token test: a `disabled` entry is treated as UNKNOWN at
 `Known`/`Identity`/`Allowed` (no mint, no `/v1/certs`, no `/v1/waf`); (6) the two-goroutine
-concurrent-generate CAS test against client-go fake. The Rust implementation in
-[`rust/`](rust/) tracks the same contract or records a divergence.
+concurrent-generate CAS test against client-go fake.
 
 [TLS SNI fallback memory]: the proxy serves a self-signed fallback on an SNI miss when the
 live cert table loses `GetCertificate`; the `GetConfigForClient` self-test prevents

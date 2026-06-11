@@ -8,8 +8,8 @@ plane**. Design and contract: [`../../EDGE.md`](../../EDGE.md).
   ServiceAccount (needs `get/list/watch secrets`). **Distributes private keys** —
   ClusterIP only, locked to edge source IPs; never on the public LB.
 - `edge.yaml` — the Go edge proxy (`Deployment` + `LoadBalancer Service`).
-  Terminates public TLS; the public-facing tier. (Migrated off Rust/Pingora; the
-  image is now built from `Dockerfile.edge`.)
+  Terminates public TLS; the public-facing tier. Image built from
+  `Dockerfile.edge`.
 
 ## Required secrets
 

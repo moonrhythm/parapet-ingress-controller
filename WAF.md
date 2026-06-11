@@ -3,14 +3,11 @@
 A CEL-rule firewall in the request path, with a **global** baseline ruleset
 (platform-owned) plus opt-in **zones** (tenant-owned) that an ingress binds by
 reference. The engine is [`parapet/pkg/waf`](https://github.com/moonrhythm/parapet/tree/master/pkg/waf)
-reused verbatim in the Go controller, and reimplemented on
-[cel-rust](https://github.com/cel-rust/cel-rust) in the Rust port (`rust/`) for
-CEL-string parity.
+reused verbatim in the controller.
 
-> Status: **implemented** in both the Go controller (`controller_waf.go`,
-> `plugin/waf.go`, `wafrule/`) and the Rust port (`rust/controller/src/waf.rs`,
-> behind the `waf` feature), gated by `WAF_ENABLED` (off by default). Both
-> implementations are co-maintained; see [`CLAUDE.md`](CLAUDE.md) and [`SPEC.md`](SPEC.md).
+> Status: **implemented** in the controller (`controller_waf.go`,
+> `plugin/waf.go`, `wafrule/`), gated by `WAF_ENABLED` (off by default).
+> See [`CLAUDE.md`](CLAUDE.md) and [`SPEC.md`](SPEC.md).
 
 ## Why this shape
 
@@ -23,16 +20,17 @@ design goals, in order:
    and it lands on *all* their domains and *nobody else's*.
 3. **Rule edits decoupled from routing** — a rule change must not rebuild the
    router or churn every ingress.
-4. **One rule language across Go and Rust** — a rule authored once works in both
-   binaries while the migration runs.
+4. **A stable rule language** — rules are operator-authored strings that live
+   outside this repo, so the supported authoring surface is pinned by the
+   [conformance corpus](conformance/waf-cel-corpus.md) and must survive engine
+   upgrades unchanged.
 
 The Cloudflare "zone" model satisfies all four: rules live in ConfigMaps, an
 ingress references a zone by ID, and the global ruleset is always-on.
 
 ## Rule schema (the contract)
 
-Both delivery channels and both languages parse this YAML. It maps 1:1 onto
-`waf.Rule`.
+Both delivery channels parse this YAML. It maps 1:1 onto `waf.Rule`.
 
 ```yaml
 rules:
@@ -62,18 +60,18 @@ rules:
 ## CEL surface
 
 A rule `expression` is a [CEL](https://github.com/google/cel-spec) expression
-that **must evaluate to `bool`** (Go rejects a non-bool expression at compile
-time; Rust treats a non-bool result as a runtime error → fail-open). There is
-exactly **one variable** — `request` — no protobuf message types, and no other
-bindings. The engine is cel-go's standard library (via `parapet/pkg/waf`) in Go
-and [cel-rust](https://github.com/cel-rust/cel-rust) `0.13` in Rust. **A rule
-must compile and behave identically in both**, so author against the portable
-surface below; the [conformance corpus](conformance/waf-cel-corpus.md) guards it.
+that **must evaluate to `bool`** (a non-bool expression is rejected at compile
+time). There is exactly **one variable** — `request` — no protobuf message
+types, and no other bindings. The engine is cel-go's standard library (via
+`parapet/pkg/waf`). **The surface below is the supported rule-authoring
+contract** — author against it; the
+[conformance corpus](conformance/waf-cel-corpus.md) pins it so a cel-go /
+`parapet/pkg/waf` upgrade can't silently change what a rule matches.
 
 Not every function in the [CEL language definition](https://github.com/google/cel-spec/blob/master/doc/langdef.md)
-is available — the two list it spells out as *engine-specific* below, and CEL
-**extension libraries are off in both** (no string-ext `split`/`join`/`format`,
-no math/encoder/sets/lists ext). Use the custom functions for those needs.
+is available — see the unsupported list below, and CEL **extension libraries
+are off** (no string-ext `split`/`join`/`format`, no math/encoder/sets/lists
+ext). Use the custom functions for those needs.
 
 ### The `request` map (snake_case, ModSecurity-style)
 
@@ -90,8 +88,7 @@ request.method  host  path  query  uri  proto  scheme  remote_ip  country  asn
 
 ### Custom functions (the WAF primitives)
 
-Added by the WAF itself, identical names in both engines — these cover almost
-every rule you'll write:
+Added by the WAF itself — these cover almost every rule you'll write:
 
 | Function | Result | Notes |
 |---|---|---|
@@ -105,7 +102,7 @@ every rule you'll write:
 Query strings are **not** auto-decoded — apply `urlDecode` yourself so
 `?q=1+UNION+SELECT` is normalized before a regex sees it.
 
-### Standard CEL (portable — works in both engines)
+### Standard CEL (the supported surface)
 
 **Operators** — logical `!` `&&` `||` and the ternary `cond ? a : b`; comparison
 `==` `!=` `<` `<=` `>` `>=`; arithmetic `+` `-` `*` `/` `%` and unary `-`;
@@ -113,8 +110,8 @@ membership `x in list` / `x in map`; indexing `list[i]` / `map["key"]`.
 
 **Macros** — `has(request.headers.foo)`, plus the comprehensions
 `list.all(x, p)`, `list.exists(x, p)`, `list.exists_one(x, p)`,
-`list.map(x, e)`, `list.filter(x, p)`. **Go can switch these off** with
-`WAF_DISABLE_MACROS=true` (Rust cannot), so don't rely on a macro in a rule that
+`list.map(x, e)`, `list.filter(x, p)`. **Macros can be switched off** with
+`WAF_DISABLE_MACROS=true`, so don't rely on a macro in a rule that
 must keep working under a hardened global config.
 
 **Functions** —
@@ -132,15 +129,15 @@ must keep working under a hardened global config.
 The timestamp/duration helpers are listed for completeness; the `request` map has
 no time field, so rules rarely need them.
 
-### Not portable / not available
+### Not pinned / not available
 
-- **Go-only** (cel-rust lacks them — don't use in shared rules): the `bool()`,
+- **Available but unpinned** (cel-go has them, the corpus doesn't cover them —
+  avoid in rules that must survive engine upgrades): the `bool()`,
   `type()`, and `dyn()` conversions, and the timezone-string overload of the
-  timestamp accessors (e.g. `ts.getHours("America/New_York")`; cel-rust is
-  UTC-only).
-- **Rust-only** (cel-rust extras absent from cel-go's standard library): `max()`,
+  timestamp accessors (e.g. `ts.getHours("America/New_York")`).
+- **Unavailable** (not in cel-go's standard library): `max()`,
   `min()`, and the `optional.*` helpers (`optional.of`, `hasValue`, `orValue`, …).
-- **Off in both** — CEL extension libraries (string `split`/`join`/`format`/
+- **Off** — CEL extension libraries (string `split`/`join`/`format`/
   `replace`/`substring`/`indexOf`/`charAt`/`trim`/`lowerAscii`/`upperAscii`,
   and math/encoder/sets/lists ext), protobuf message construction / struct
   literals, and any variable other than `request`. Reach for the custom
@@ -181,23 +178,24 @@ left untouched.
 
 The DB is the [IPLocate ip-to-country](https://github.com/iplocate/ip-address-databases)
 MMDB. Its records are **flat** — `country_code` at the top level — unlike MaxMind
-GeoIP2, which nests it under `country.iso_code`; both implementations read the
+GeoIP2, which nests it under `country.iso_code`; the resolver reads the
 flat schema. Any standard `.mmdb` reader works on the file; only the record layout
 differs, so a MaxMind GeoLite2-Country `.mmdb` will **not** resolve here.
 
-**Implementation.** Go exposes it through the `parapet/pkg/waf` `Country`
-resolver hook, wired to a `maxminddb-golang` lookup; Rust uses the `maxminddb`
-crate. Both decode a flat `{ country_code }` record, load the DB once at startup,
-and treat a load failure as non-fatal (country stays `""`).
+**Implementation.** The controller exposes it through the `parapet/pkg/waf`
+`Country` resolver hook, wired to a `maxminddb-golang` lookup. It decodes a flat
+`{ country_code }` record, loads the DB once at startup,
+and treats a load failure as non-fatal (country stays `""`).
 
 **Providing the DB.** It exceeds a ConfigMap's 1 MB limit, so either:
 
-- **Bake at build time** (both Dockerfiles, the default). The IPLocate ip-to-country
+- **Bake at build time** (the controller and edge Dockerfiles, the default). The
+  IPLocate ip-to-country
   `.mmdb` is downloaded straight from GitHub — no account or license key — into the
   image at `/geoip/ip-to-country.mmdb`:
 
   ```bash
-  docker build -t img .     # or rust/  — bakes the DB by default
+  docker build -t img .     # bakes the DB by default
   # then run with: WAF_GEOIP_DB=/geoip/ip-to-country.mmdb
   ```
 
@@ -242,11 +240,12 @@ Whenever the DB is loaded, the resolved ASN is also forwarded **upstream** as th
 `X-Forwarded-ASN` header (overwriting any client-supplied value; `0` for an
 unplaceable IP). With ASN lookup off the header is left untouched.
 
-**Implementation.** Go exposes it through the `parapet/pkg/waf` `ASN` resolver
-hook (added in parapet v0.15.2); Rust builds `request.asn` directly. Both load the
-DB once at startup; a load failure is non-fatal (`request.asn` stays 0).
+**Implementation.** The controller exposes it through the `parapet/pkg/waf` `ASN`
+resolver hook (added in parapet v0.15.2). The DB is loaded
+once at startup; a load failure is non-fatal (`request.asn` stays 0).
 
-**Providing the DB** mirrors GeoIP, with its own `WAF_ASN_DB` env var. Both
+**Providing the DB** mirrors GeoIP, with its own `WAF_ASN_DB` env var. The
+controller and edge
 Dockerfiles bake the ip-to-asn `.mmdb` to `/geoip/ip-to-asn.mmdb` by default
 (`ASN_DB_URL`). It is much larger than the country DB (~74 MB), so pass
 `--build-arg ASN_DB_URL=` (empty) to skip baking it if you don't need
@@ -359,39 +358,6 @@ The engine is free (`pkg/waf`); the work is plumbing.
 The controller needs `get/list/watch configmaps` (added to
 `deploy/role-cluster.yaml` and `deploy/role-namespaced.yaml`). Tenants get
 `edit` on their own zone ConfigMaps via their own RBAC.
-
-## Rust port design (`rust/`)
-
-Reimplement the engine on cel-rust; the integration is *simpler* than the Go
-plugin model because nothing compiled lives in the router.
-
-- **Fast core preserved**: `config.rs` parses `waf_zone: Option<String>` (a pure
-  string — no cel). The cel engine lives in a new `waf.rs` behind a `waf` cargo
-  feature (pulls `cel` + `regex`); `proxy` enables it.
-- **State**: `Shared.global_waf: Arc<Waf>` and
-  `Shared.zones: ArcSwap<HashMap<ZoneId, Arc<Waf>>>` (`arc-swap` is already a
-  dep — the Rust analog of Go's `atomic.Pointer` swap). A ConfigMap reflector
-  (mirroring `cluster.rs`'s `reflect!`) compiles and swaps them, independent of
-  `Shared::rebuild` (the router reconcile).
-- **Phases**: global in `request_filter` (before `router.lookup`); zone in
-  `apply_route_filters` via `ctx.config.waf_zone → shared.zones.load().get(key)`,
-  after `allow_remote`, before `redirect_https` — mirroring the Go order. All
-  request-time lookups; nothing compiled on the hot path.
-- **Metrics**: `parapet_waf_matches` in `proxy/metrics.rs`, same labels.
-
-### Intentional divergences (document like the retry note)
-
-- **Cost limit**: cel-rust has none. Approximate it with a wall-clock deadline
-  checked **between** rules (cel-rust eval isn't mid-expression interruptible);
-  inputs are small maps. Use the `regex` crate (RE2-style, linear) for
-  `regexMatch` so a single rule can't backtrack-blow-up — same guarantee Go's
-  `regexp` gives.
-- **Body inspection**: ships in a later phase. v1 is header-only
-  (`request.body == ""`), matching Go's default (`InspectBody=0`). Phase 2
-  buffers up to N bytes in `request_body_filter` for body-dependent rules.
-- **Dialect drift**: cel-rust ≠ cel-go on macro semantics and some
-  type-coercion edges. Mitigation: a shared `(expression, request, expected)`
-  fixture exercised by both the Go and Rust test suites.
 
 ## Rollout
 
