@@ -3,6 +3,7 @@ package edgecp
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,14 +18,27 @@ import (
 // its rules maps to the resolved zone key. This is host-level (not host/path) —
 // the edge applies a zone per host as an early-drop layer; parapet re-runs the
 // full WAF with path-precise zone resolution authoritatively (see EDGE.md).
+//
+// With WithRateLimit it additionally derives, from the SAME Ingress list, the
+// rate-limit host→zoneKey binding (`…/ratelimit-zone`, same-namespace only) and
+// the known-host list the edge wires as its host-key collapser. store may be
+// nil when only the rate-limit side is enabled.
 type IngressReloader struct {
-	store          *WafStore
+	store          *WafStore       // optional (nil = WAF host→zone derivation off)
+	rl             *RateLimitStore // optional (nil = rate-limit derivation off)
 	watchNamespace string
 	debounce       time.Duration
 }
 
 func NewIngressReloader(store *WafStore, watchNamespace string) *IngressReloader {
 	return &IngressReloader{store: store, watchNamespace: watchNamespace, debounce: 300 * time.Millisecond}
+}
+
+// WithRateLimit wires the rate-limit store so the Ingress reload also derives
+// its host→zone binding and known-host list. Returns the reloader for chaining.
+func (r *IngressReloader) WithRateLimit(rl *RateLimitStore) *IngressReloader {
+	r.rl = rl
+	return r
 }
 
 // LoadOnce does a single synchronous load (call before serving — see WafReloader).
@@ -89,7 +103,12 @@ func (r *IngressReloader) reload(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	r.store.SetHostZone(buildHostZone(ings))
+	if r.store != nil {
+		r.store.SetHostZone(buildHostZone(ings))
+	}
+	if r.rl != nil {
+		r.rl.SetIngressDerived(buildRateLimitHostZone(ings), collectIngressHosts(ings))
+	}
 	return nil
 }
 
@@ -114,6 +133,60 @@ func buildHostZone(ings []networking.Ingress) map[string]string {
 		}
 	}
 	return hz
+}
+
+// buildRateLimitHostZone maps each host of a ratelimit-zone-bound Ingress to
+// its resolved zone key — SAME NAMESPACE ONLY, mirroring plugin.RateLimitZone:
+// a rate-limit zone carries shared counter state, so a cross-namespace bind
+// would let any tenant burn another tenant's per-key budgets. A cross-namespace
+// reference is logged and ignored, exactly like the controller.
+func buildRateLimitHostZone(ings []networking.Ingress) map[string]string {
+	hz := map[string]string{}
+	for i := range ings {
+		ing := &ings[i]
+		raw := ing.Annotations[RateLimitZoneAnnotation]
+		key, ok := zoneKeyOf(ing.Namespace, raw)
+		if !ok {
+			continue
+		}
+		if !strings.HasPrefix(key, ing.Namespace+"/") {
+			slog.Warn("edgecp: cross-namespace ratelimit-zone is not honored (zones carry shared counter state); ignoring",
+				"ingress", ing.Namespace+"/"+ing.Name, "zone", key)
+			continue
+		}
+		for _, rule := range ing.Spec.Rules {
+			host := strings.ToLower(strings.TrimSpace(rule.Host))
+			if host == "" {
+				continue
+			}
+			hz[host] = key
+		}
+	}
+	return hz
+}
+
+// collectIngressHosts returns every host declared by an Ingress rule
+// (lowercased, deduped, sorted — the order feeds the store fingerprint). The
+// edge wires this as the Limiter's KnownHost, so host-keyed limit buckets for
+// hosts no Ingress declares collapse into one shared bucket — mirroring the
+// controller's IsKnownHost cardinality bound under a random-Host flood.
+func collectIngressHosts(ings []networking.Ingress) []string {
+	seen := map[string]struct{}{}
+	for i := range ings {
+		for _, rule := range ings[i].Spec.Rules {
+			host := strings.ToLower(strings.TrimSpace(rule.Host))
+			if host == "" {
+				continue
+			}
+			seen[host] = struct{}{}
+		}
+	}
+	hosts := make([]string, 0, len(seen))
+	for h := range seen {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 // zoneKeyOf mirrors the controller's plugin.ZoneKey / resolve_zone_key: a bare id

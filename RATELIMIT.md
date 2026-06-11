@@ -218,9 +218,14 @@ its last generations until the next request or until its zone is deleted.
   to each controller replica — N replicas admit up to N× `rate`. A
   Redis-backed distributed strategy (parapet has `RedisFixedWindowStrategy`)
   is a possible follow-up.
-- **No edge distribution.** The edge control plane serves certs + WAF rules
-  only; the edge proxy enforces nothing from this feature, and edge **cache
-  hits** are served without reaching the controller — uncounted and unlimited.
+- **Edge enforcement is opt-in and independent.** The edge proxy can enforce
+  the same global+zone sets (`EDGE_RATELIMIT_ENABLED` on the edge,
+  `CP_RATELIMIT_ENABLED` on the control plane, `GET /v1/ratelimit` — see
+  [EDGE.md](EDGE.md#rate-limiting-at-the-edge)). Its counters are per edge,
+  exactly as the controller's are per pod — edge enforcement adds a layer, it
+  does not relieve this one. Edge **cache hits** never reach the controller
+  (uncounted and unlimited here) but ARE limited at the edge when its
+  enforcement is on, since edge limits run before its cache.
 - **No request matching.** Limits apply to every request on the bound scope;
   path/header conditions are the WAF's job (CEL), not a second expression
   language here. (Keying — who shares a bucket — is the `key` characteristics

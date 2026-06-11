@@ -100,6 +100,20 @@ client IP via `WAF_GEOIP_DB` / `WAF_ASN_DB` (the edge image bakes both at the
 default paths). The edge also forwards `X-Forwarded-Country` / `X-Forwarded-ASN`
 to parapet.
 
+## Rate limits (global + zones, optional)
+
+Set `EDGE_RATELIMIT_ENABLED=true` on the edge and `CP_RATELIMIT_ENABLED=true` +
+`POD_NAMESPACE` on the control plane to distribute the ConfigMap-driven
+**global** baseline and tenant **zone** rate limits (`GET /v1/ratelimit`) and
+enforce them at the edge — after the edge WAF, before the response cache (so
+cache hits are limited too). Counters are **per edge**, exactly as the
+controller's are per pod; edge enforcement adds a shedding layer in front, it
+does not relieve the controller's own limits. Zone binding is host-level via
+the `ratelimit-zone` annotation, **same-namespace only** (mirroring the
+controller). `country`/`asn`-keyed limits need the GeoIP DBs (same
+`WAF_GEOIP_DB`/`WAF_ASN_DB` contract as the WAF). See
+[`../../EDGE.md`](../../EDGE.md) "Rate limiting at the edge".
+
 ## Response cache (optional)
 
 Set `EDGE_CACHE_ENABLED=true` (and mount a writable `EDGE_CACHE_DIR`) to enable
