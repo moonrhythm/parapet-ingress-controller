@@ -169,7 +169,10 @@ GET /v1/waf           Authorization: Bearer <token>   [If-None-Match: "<etag>"]
        host_zone_map  : host → zoneKey — LEGACY host-level binding, kept for
                         pre-path-aware edges; a current edge uses it only when
                         route_zone_map is absent (older CP), as whole-host patterns.
-       (ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct)
+       (ETag is over the *scoped* payload, so 304 revalidation is per-edge-correct;
+        the generation is EXCLUDED from the validator — it is process-local, and
+        CP replicas must mint identical validators for identical content or an
+        edge rotating across replicas would never 304)
 
 GET /v1/ratelimit     Authorization: Bearer <token>   [If-None-Match: "<etag>"]
   200 {"generation": N, "global_limits":["…"], "zones":{"<ns>/<name>":["…"]},
@@ -185,7 +188,7 @@ GET /v1/ratelimit     Authorization: Bearer <token>   [If-None-Match: "<etag>"]
        (documents are ARRAYS of YAML strings, one per ConfigMap data value —
         ratelimitrule.Parse takes one document per string and does not split "---",
         so the WAF's concatenated format would silently drop trailing documents;
-        ETag over the scoped payload, like /v1/waf)
+        ETag over the scoped payload with the generation excluded, like /v1/waf)
   401 (no/invalid token)   404 (ratelimit distribution disabled)
 
 GET /v1/purges?since=<seq>   Authorization: Bearer <token>
@@ -217,6 +220,29 @@ POST /v1/purges       Authorization: Bearer <ADMIN token>   ← stronger cred th
        (the admin token is NOT host-scoped — it may purge any host; per-host scoping is
         applied on the read side, not at issue time)
   401 (no/invalid admin token)  400 (invalid scope/host/uri)  404 (purge distribution disabled)
+
+GET /v1/events        Authorization: Bearer <token>   (SSE; long-lived)
+  200 Content-Type: text/event-stream — change-notification stream. Each event:
+       event: change
+       data: {"waf":"<etag>","ratelimit":"<etag>","certs":"<fp>","purges":<seq>}
+       The payload is a VERSION VECTOR (opaque, CP-process-local) — a wake-up
+       signal only, never content. The first event is the current vector (a
+       reconnecting edge covers its disconnected window); after that, one event
+       per change, with `: ping` keepalive comments every CP_EVENTS_PING_INTERVAL
+       (default 20s — keep it under any fronting LB's idle timeout; Google ALB
+       drops idle streams at ~60s). On a change the edge POKES the matching
+       refresh loop, which re-fetches through the scoped, ETag-revalidated
+       endpoints above — authz scoping and fail-static apply are unchanged, and
+       the jittered poll timers remain the correctness floor (an edge without the
+       stream just converges at poll cadence). When the CP sits behind an LB,
+       size the LB's backend/response timeout above the ping interval; the LB
+       cutting the stream at its response timeout is fine — the edge reconnects
+       with backoff.
+  401 (no/invalid token)   404 (events disabled / older CP — edge falls back to polling)
+  503 + Retry-After (a subscriber cap reached — global CP_EVENTS_MAX_SUBSCRIBERS,
+       or per-token CP_EVENTS_MAX_PER_TOKEN so one stream-leaking edge can't
+       starve the rest of the fleet; each stream pins a goroutine+connection;
+       the edge falls back to polling and re-probes)
 
 POST /v1/metrics      Authorization: Bearer <token>   X-Edge-Instance: <instance>
   body: the edge's FULL Prometheus registry in text exposition format
@@ -282,6 +308,53 @@ The edge serves a cached cert. On rotation the new cert must reach the edge
 **before** the old one is distrusted, or handshakes fail in the gap. So: refresh
 on a timer with overlap, honor the ETag/version, and on a fetch failure
 **keep serving the cached cert** (fail-static) — never drop it.
+
+## Change notifications (SSE) — propagation in seconds, polling as the floor
+
+By default the edge also subscribes to `GET /v1/events` (`EDGE_EVENTS_ENABLED`,
+default `true`; `CP_EVENTS_ENABLED` on the CP, default `true`): a server-sent
+event stream whose payload is a **version vector** of the CP's stores (WAF etag,
+ratelimit etag, cert-index fingerprint, purge seq). On a change the edge **pokes
+the matching refresh loop**, which runs its normal ETag-revalidated fetch — so a
+WAF/cert/limit/purge edit propagates to the fleet in seconds instead of one
+`EDGE_REFRESH_INTERVAL`, while everything that matters stays where it was:
+
+- **Wake-up signal only.** No content rides the stream; the edge fetches through
+  the same scoped, authorized, fail-static endpoints. A spoofed/buggy event can
+  at worst trigger a redundant 304 fetch.
+- **Polling stays the correctness floor.** The jittered poll loops are
+  unchanged; the stream is an accelerator. Stream down / CP too old (404) /
+  subscriber cap (503) ⇒ pure polling, with reconnect-with-backoff (404
+  re-probes every ~5m).
+- **Single-flight preserved.** Pokes are buffered(1) channels consumed by each
+  resource's own loop goroutine — a poke never runs a refresh concurrently with
+  a timer tick.
+- **Gap coverage on (re)connect.** The first event of every stream is the
+  current vector, and the edge pokes all loops on connect — anything that
+  changed while disconnected is fetched immediately (steady state: one 304 per
+  resource).
+
+**Fronting LB notes (e.g. Google ALB).** The CP sends `: ping` keepalives every
+`CP_EVENTS_PING_INTERVAL` (default 20s) — keep it under the LB's idle timeout
+(ALB drops idle connections at ~60s). Set the LB's backend **response timeout**
+comfortably high (e.g. ≥ 10 min); the LB cutting a stream at that timeout is
+harmless — the edge reconnects and re-baselines. Separately, the edge's CP
+transport expires pooled idle connections after 30s (`IdleConnTimeout`), so a
+poll never reuses a connection the LB has already silently dropped, and bounds
+every pre-response phase (dial 10s, TLS handshake 10s, response headers 30s);
+the stream additionally arms its 90s silent-stream watchdog BEFORE connecting,
+so a half-dead LB can never wedge the subscriber goroutine. Stream connects are
+fleet-jittered (boot [0,5s); post-EOF reconnect [0,2s) — a CP restart EOFs every
+edge's stream at the same instant) and a 200 that ends before the initial event
+is treated as a failure (backoff), never a hot reconnect loop. Backoff growth is
+evidence-of-failure only: a stream that DELIVERED events resets it however it
+ended — LB response-timeout cuts are *unclean* (no terminal chunk), and treating
+them as failures would ratchet every edge to permanent max backoff.
+
+CP knobs: `CP_EVENTS_MAX_SUBSCRIBERS` (default 1024) and
+`CP_EVENTS_MAX_PER_TOKEN` (default 32 — replicas share one token, one stream
+each, so size it ≥ replicas-per-token); over-cap streams shed with 503 +
+`Retry-After: CP_EVENTS_RETRY_AFTER` (default 30s).
 
 ## WAF at the edge
 
@@ -833,6 +906,7 @@ edge *can* be co-located, prefer keyless (recoverable in git history).
 | CP restart / fresh replica (in-memory journal seq resets below the edge cursor, `since > max_seq`) | CP returns `flush_required` (the cursor-ahead-of-journal check) → edge flushes and realigns its cursor **down** to `max_seq`. The edge also independently flushes on `max_seq < cursor` as defense-in-depth against an older CP. Never silently under-invalidates. |
 | `purge-state` lost/corrupt | Cursor resets to 0 → next poll re-syncs (a trim gap or cursor-ahead → flush-all). Cursor + maps share **one atomic write** so they can't desync. |
 | `POST /v1/metrics` unreachable | Edge keeps serving traffic (**fail static** — push is pure observability); the CP serves the last snapshot until `CP_EDGE_METRICS_TTL`, then the instance's series disappear (its `last_push_seconds` series with them). The next successful push restores everything — counters are cumulative, nothing is lost. |
+| `GET /v1/events` stream down / 404 (old CP) / 503 (cap) | Edge degrades to **pure polling** (the unchanged correctness floor) and reconnects with backoff (404 re-probes ~5m). On reconnect it pokes every loop, covering anything that changed while disconnected. Updates are *slower, never lost*. |
 
 ## Conformance
 

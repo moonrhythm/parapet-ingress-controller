@@ -8,6 +8,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -32,11 +33,22 @@ type CertStore struct {
 	// loaded flips true after the first Set (the reloader's initial cluster list
 	// completed), so the control plane can report readiness via /healthz?ready=1.
 	loaded atomic.Bool
+	// version fingerprints the full (name, etag) index — the /v1/events change
+	// signal. Content-derived (not a Set counter), so a no-change relist of the
+	// cluster's secrets doesn't wake the fleet.
+	version atomic.Pointer[string]
 }
 
 func NewCertStore() *CertStore {
-	return &CertStore{byName: map[string]*certEntry{}}
+	s := &CertStore{byName: map[string]*certEntry{}}
+	v := etagOfString("")
+	s.version.Store(&v)
+	return s
 }
+
+// Version is the store's full-index fingerprint — an opaque change signal for
+// the /v1/events stream (per-edge scoping happens at fetch time, not here).
+func (s *CertStore) Version() string { return *s.version.Load() }
 
 // Loaded reports whether the store has completed at least one load (readiness).
 func (s *CertStore) Loaded() bool { return s.loaded.Load() }
@@ -60,9 +72,24 @@ func (s *CertStore) Set(pairs []PEMPair) {
 			byName[strings.ToLower(n)] = e
 		}
 	}
+	names := make([]string, 0, len(byName))
+	for n := range byName {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	var fp strings.Builder
+	for _, n := range names {
+		fp.WriteString(n)
+		fp.WriteByte('=')
+		fp.WriteString(byName[n].etag)
+		fp.WriteByte('\n')
+	}
+	v := etagOfString(fp.String())
+
 	s.mu.Lock()
 	s.byName = byName
 	s.mu.Unlock()
+	s.version.Store(&v)
 	s.loaded.Store(true)
 }
 

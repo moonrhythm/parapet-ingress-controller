@@ -11,6 +11,41 @@ import (
 	"time"
 )
 
+// runRefreshLoop runs fn forever: on a ticker (first tick offset by a [0,interval)
+// jitter so the fleet's poll instants decorrelate) and on every poke (nil ok — the
+// /v1/events wake-up). Pokes are honored DURING the initial jitter window too (a
+// change observed right after boot refreshes immediately), but the ticker phase
+// stays jitter-anchored — a fleet-wide broadcast must not phase-lock every edge's
+// poll timer into lockstep. All fn invocations happen on this goroutine, keeping
+// each resource's refresh single-flight.
+func runRefreshLoop(ctx context.Context, interval time.Duration, poke <-chan struct{}, fn func()) {
+	deadline := time.NewTimer(fullJitter(interval))
+	defer deadline.Stop()
+jitter:
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-deadline.C:
+			break jitter
+		case <-poke:
+			fn()
+		}
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			fn()
+		case <-poke:
+			fn()
+		}
+	}
+}
+
 // RefreshEdgeCertOnce generates a fresh in-memory keypair, builds a CSR, fetches a
 // signed leaf from the control plane, and atomically swaps the complete cert into
 // the store. Fail-static: on any error the prior cert is kept. The key is generated
@@ -129,28 +164,20 @@ func RefreshCertsAll(cp *CpClient, store *CertStore, domains []string, coord *Re
 // every edge at once; un-jittered loops would hammer GET /v1/certs in lockstep). Each
 // tick refreshes the configured domains PLUS whatever is currently cached (deduped), so
 // on-demand-fetched domains (serve-all mode) keep rotating and observing. Fail-static.
-func RunCertRefresh(ctx context.Context, cp *CpClient, store *CertStore, domains []string, interval time.Duration, coord *RemintCoordinator) {
+// poke (nil ok) wakes the loop immediately on a /v1/events change signal; the steady
+// state of a poked sweep is one cheap 304 per domain. The timer remains the floor.
+func RunCertRefresh(ctx context.Context, cp *CpClient, store *CertStore, domains []string, interval time.Duration, coord *RemintCoordinator, poke <-chan struct{}) {
 	if interval <= 0 { // time.NewTicker panics on a non-positive interval
 		interval = 300 * time.Second
 	}
-	if !sleepCtx(ctx, fullJitter(interval)) {
-		return
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			seen := map[string]struct{}{}
-			for _, d := range append(append([]string{}, domains...), store.Keys()...) {
-				if _, dup := seen[d]; dup {
-					continue
-				}
-				seen[d] = struct{}{}
-				RefreshCertOnce(cp, store, d, coord)
+	runRefreshLoop(ctx, interval, poke, func() {
+		seen := map[string]struct{}{}
+		for _, d := range append(append([]string{}, domains...), store.Keys()...) {
+			if _, dup := seen[d]; dup {
+				continue
 			}
+			seen[d] = struct{}{}
+			RefreshCertOnce(cp, store, d, coord)
 		}
-	}
+	})
 }

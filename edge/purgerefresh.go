@@ -51,22 +51,11 @@ func RefreshPurgeOnce(cp *CpClient, table *PurgeTable) {
 // RunPurgeRefresh runs the periodic cache-purge poll forever. The first tick is
 // jittered by [0,interval] to decorrelate the fleet's poll instants. The cadence is
 // independent of (and typically faster than) the cert/WAF refresh, since purge
-// latency is operator-facing. Fail-static.
-func RunPurgeRefresh(ctx context.Context, cp *CpClient, table *PurgeTable, interval time.Duration) {
+// latency is operator-facing. Fail-static. poke (nil ok) wakes the loop
+// immediately on a /v1/events change signal; the timer remains the fallback floor.
+func RunPurgeRefresh(ctx context.Context, cp *CpClient, table *PurgeTable, interval time.Duration, poke <-chan struct{}) {
 	if interval <= 0 { // time.NewTicker panics on a non-positive interval
 		interval = 10 * time.Second
 	}
-	if !sleepCtx(ctx, fullJitter(interval)) {
-		return
-	}
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			RefreshPurgeOnce(cp, table)
-		}
-	}
+	runRefreshLoop(ctx, interval, poke, func() { RefreshPurgeOnce(cp, table) })
 }

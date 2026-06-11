@@ -134,6 +134,20 @@ func main() {
 
 	ctx := context.Background()
 
+	// Change-notification stream (GET /v1/events): pokes the refresh loops the
+	// moment the CP's stores change, so updates propagate in ~seconds instead of
+	// one EDGE_REFRESH_INTERVAL. Pure accelerator — the jittered poll loops stay
+	// as the correctness floor, and an old CP (404) just means pure polling.
+	// Buffered(1) pokes coalesce; each loop consumes its own channel, keeping
+	// refreshes single-flight per resource.
+	eventsEnabled := envOr("EDGE_EVENTS_ENABLED", "true") == "true"
+	var pokes edge.EventPokes
+	var certPoke, wafPoke, rlPoke, purgePoke chan struct{}
+	if eventsEnabled {
+		certPoke = make(chan struct{}, 1)
+		pokes.Certs = certPoke
+	}
+
 	// Optional data-plane mTLS: fetch a CP-issued client cert (CA-only trust), hold it
 	// in memory (never on disk), and present it on the re-encrypt hop. The re-mint
 	// coordinator owns every re-mint path (proactive on a ca_id flip observed via the
@@ -169,7 +183,7 @@ func main() {
 		loaded := edge.RefreshCertsAll(cp, store, domains, remintCoord)
 		slog.Info("edge: initial cert load", "loaded", loaded, "total", len(domains))
 	}
-	go edge.RunCertRefresh(ctx, cp, store, domains, refreshInterval, remintCoord)
+	go edge.RunCertRefresh(ctx, cp, store, domains, refreshInterval, remintCoord, certPoke)
 
 	if dataplaneMTLS {
 		// Startup mint is direct + UN-jittered (readiness needs it fast); the periodic
@@ -196,7 +210,11 @@ func main() {
 	if wafEnabled {
 		ewaf = edge.NewEdgeWAF(country, asn)
 		edge.RefreshWafOnce(cp, ewaf, remintCoord)
-		go edge.RunWafRefresh(ctx, cp, ewaf, refreshInterval, remintCoord)
+		if eventsEnabled {
+			wafPoke = make(chan struct{}, 1)
+			pokes.WAF = wafPoke
+		}
+		go edge.RunWafRefresh(ctx, cp, ewaf, refreshInterval, remintCoord, wafPoke)
 	}
 
 	// Optional edge rate limiting (ConfigMap-driven global + zone sets fetched
@@ -206,7 +224,11 @@ func main() {
 	if ratelimitEnabled {
 		erl = edge.NewEdgeRateLimit(country, asn)
 		edge.RefreshRateLimitOnce(cp, erl)
-		go edge.RunRateLimitRefresh(ctx, cp, erl, refreshInterval)
+		if eventsEnabled {
+			rlPoke = make(chan struct{}, 1)
+			pokes.RateLimit = rlPoke
+		}
+		go edge.RunRateLimitRefresh(ctx, cp, erl, refreshInterval, rlPoke)
 	}
 
 	// Optional response cache (off by default), from parapet/pkg/cache. The
@@ -267,13 +289,24 @@ func main() {
 	if purgeTable != nil {
 		purgeInterval := time.Duration(envInt64("EDGE_CACHE_PURGE_POLL_INTERVAL", 10)) * time.Second
 		edge.RefreshPurgeOnce(cp, purgeTable) // best-effort initial sync; fail-static
-		go edge.RunPurgeRefresh(ctx, cp, purgeTable, purgeInterval)
+		if eventsEnabled {
+			purgePoke = make(chan struct{}, 1)
+			pokes.Purges = purgePoke
+		}
+		go edge.RunPurgeRefresh(ctx, cp, purgeTable, purgeInterval, purgePoke)
 		// The reaper physically reclaims invalidated entries off the serving path (the
 		// lazy lookup gate already guarantees correctness; this is just reclamation).
 		// Housekeeping cadence, jittered.
 		sweepInterval := time.Duration(envInt64("EDGE_CACHE_PURGE_SWEEP_INTERVAL", 300)) * time.Second
 		go edge.RunReaper(ctx, purgeStorage, purgeTable, sweepInterval)
 		slog.Info("edge cache: purge polling enabled", "poll_interval", purgeInterval, "sweep_interval", sweepInterval)
+	}
+
+	// All pokes are wired — subscribe to the CP's change stream. An old CP (no
+	// /v1/events) degrades to pure polling with an occasional re-probe.
+	if eventsEnabled {
+		go edge.RunEvents(ctx, cp, pokes)
+		slog.Info("edge: change-event stream enabled")
 	}
 
 	var getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error)

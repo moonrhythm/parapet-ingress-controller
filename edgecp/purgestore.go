@@ -76,6 +76,14 @@ func NewPurgeStore(maxEntries int) *PurgeStore {
 	return &PurgeStore{minSeq: 1, maxKeep: maxEntries}
 }
 
+// LastSeq returns the highest issued seq (0 = none yet) — the /v1/events change
+// signal for the purge journal.
+func (s *PurgeStore) LastSeq() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastSeq
+}
+
 // Add appends a purge and returns its seq. scope must be one of flush-all / host /
 // url / prefix / tag. host is required (and normalized) for host/url/prefix; uri is
 // required for url (the exact on-the-wire path+query) and prefix (the path prefix),

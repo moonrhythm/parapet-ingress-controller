@@ -102,6 +102,10 @@ func (s *RateLimitStore) recompute() {
 	s.curEtag.Store(&et)
 }
 
+// Version is the store's full-content etag — an opaque change signal for the
+// /v1/events stream (per-edge scoping happens at fetch time, not here).
+func (s *RateLimitStore) Version() string { return *s.curEtag.Load() }
+
 // fingerprint is a stable serialization of the full content. Documents are
 // length-prefixed so doc-slice boundaries are unambiguous (["a","bc"] vs
 // ["ab","c"]), mirroring the controller's fingerprintDocs.

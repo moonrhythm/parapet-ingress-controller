@@ -2,11 +2,14 @@ package edge
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -28,9 +31,10 @@ const (
 // and the returned private key only ever travel over this connection.
 // GET /v1/certs?sni= and GET /v1/waf, fail-static.
 type CpClient struct {
-	http  *http.Client
-	base  string
-	token string
+	http   *http.Client
+	stream *http.Client // no overall Timeout — used for the long-lived /v1/events SSE stream
+	base   string
+	token  string
 }
 
 // NewCpClient builds a client for base (e.g. https://controlplane:8443). caPEM,
@@ -48,13 +52,39 @@ func NewCpClient(base, token string, caPEM []byte) (*CpClient, error) {
 			tlsConfig.RootCAs = pool
 		}
 	}
+	transport := &http.Transport{
+		TLSClientConfig: tlsConfig,
+		// A zero-value Transport bounds NOTHING on the connect phase (the dial,
+		// TLS-handshake, and response-header timeouts below are DefaultTransport
+		// extras, not Transport defaults). The polling client is saved by its
+		// overall Client.Timeout, but the SSE stream client deliberately has none —
+		// without these, a half-dead LB that accepts the SYN and goes silent would
+		// hang the event stream's connect forever. Bound every pre-response phase
+		// here so both clients fail fast and retry/back off.
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+		// An L7 LB in front of the CP (e.g. Google ALB) silently drops connections
+		// idle longer than its own timeout (~60s); reusing such a half-dead pooled
+		// connection makes the next poll fail (or pins this edge to one stale CP
+		// backend forever, since a poll cadence shorter than the pool's lifetime
+		// never lets the connection rotate). Expire idle connections well below
+		// that so every poll burst dials — and re-balances — fresh.
+		IdleConnTimeout: 30 * time.Second,
+	}
 	return &CpClient{
 		http: &http.Client{
 			Timeout:   30 * time.Second,
-			Transport: &http.Transport{TLSClientConfig: tlsConfig},
+			Transport: transport,
 		},
-		base:  strings.TrimRight(base, "/"),
-		token: token,
+		// The SSE stream must outlive any fixed Timeout (it is a deliberately
+		// long-lived response); cancellation rides the request context instead.
+		stream: &http.Client{Transport: transport},
+		base:   strings.TrimRight(base, "/"),
+		token:  token,
 	}, nil
 }
 
@@ -434,6 +464,41 @@ func (c *CpClient) FetchTrustBundleSignal() (caID, signerFP string, err error) {
 		return "", "", fmt.Errorf("decode: %w", err)
 	}
 	return body.CAID, body.SigningFP, nil
+}
+
+// ErrEventsUnsupported reports that the control plane does not serve
+// GET /v1/events (an older CP, or events disabled). The caller backs off much
+// longer than on a transient error — polling remains the floor either way.
+var ErrEventsUnsupported = errors.New("edge: control plane does not support /v1/events")
+
+// OpenEvents opens the change-notification SSE stream (GET /v1/events). The
+// returned body is the live stream; the caller must close it. Cancellation is
+// the caller's context (the stream client has no overall timeout — an SSE
+// response is deliberately long-lived). A 404 maps to ErrEventsUnsupported.
+func (c *CpClient) OpenEvents(ctx context.Context) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/v1/events", nil)
+	if err != nil {
+		return nil, fmt.Errorf("request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := c.stream.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, ErrEventsUnsupported
+		}
+		return nil, fmt.Errorf("control plane returned %d for /v1/events", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		resp.Body.Close()
+		return nil, fmt.Errorf("control plane returned non-SSE content type %q for /v1/events", ct)
+	}
+	return resp, nil
 }
 
 // do issues an authorized GET, optionally with If-None-Match. The body must be
