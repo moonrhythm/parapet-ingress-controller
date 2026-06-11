@@ -92,11 +92,20 @@ spec:
             #   value: /edge-ca/tls.key
             # - name: EDGE_CLIENTCERT_TTL
             #   value: 168h
+            # --- Pushed edge-fleet metrics ---
+            # Edges with EDGE_METRICS_PUSH_INTERVAL set POST their registry to
+            # /v1/metrics; the snapshots are served merged into /metrics below.
+            # A snapshot expires this many seconds after its last push (keep
+            # >= 3x the fleet push interval). See EDGE.md "Edge metrics push".
+            # - name: CP_EDGE_METRICS_TTL
+            #   value: "300"
           ports:
             - name: https
               containerPort: 8443
             - name: metrics # CP_METRICS_LISTEN — UNAUTHENTICATED Prometheus /metrics
-              containerPort: 9187 #   (non-secret: ca_id fingerprints, counters, generations).
+              containerPort: 9187 #   (non-secret: ca_id fingerprints, counters, generations,
+              #                        plus pushed edge-fleet snapshots when edges enable
+              #                        EDGE_METRICS_PUSH_INTERVAL — see EDGE.md "Edge metrics push").
               #                        Restrict to the scraper via the NetworkPolicy below.
           livenessProbe:
             httpGet:

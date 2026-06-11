@@ -3,6 +3,7 @@ package edgecp
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -30,6 +31,11 @@ type Server struct {
 	// than the per-edge read tokens (an edge can read its purges but not issue them).
 	purge           *PurgeStore
 	purgeAdminToken string
+
+	// metricsStore is the optional pushed-edge-metrics store (nil = ingestion
+	// disabled, POST /v1/metrics → 404). Serving happens on the separate
+	// CP_METRICS_LISTEN via MetricsHandler, not on this API mux.
+	metricsStore *MetricsStore
 
 	// signerState is the (signer, generation) snapshot, replaced WHOLESALE by
 	// SetSigner so a reader Loads both halves coherently (never a torn signer-from-A
@@ -107,6 +113,14 @@ func NewServer(certs *CertStore, authz *Authz) *Server {
 // chaining.
 func (s *Server) WithWAF(waf *WafStore) *Server {
 	s.waf = waf
+	return s
+}
+
+// WithMetricsIngest enables edge metrics ingestion (POST /v1/metrics): edges push
+// their registry snapshots here, and the same store backs the merged /metrics on
+// the CP's metrics listener (MetricsHandler). Returns the server for chaining.
+func (s *Server) WithMetricsIngest(store *MetricsStore) *Server {
+	s.metricsStore = store
 	return s
 }
 
@@ -194,6 +208,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/ratelimit", s.handleRateLimit)
 	mux.HandleFunc("GET /v1/purges", s.handlePurges)
 	mux.HandleFunc("POST /v1/purges", s.handlePurgeAdmin)
+	mux.HandleFunc("POST /v1/metrics", s.handleMetricsPush)
 	mux.HandleFunc("POST /v1/edge-cert", s.handleEdgeCert)
 	mux.HandleFunc("GET /v1/trust-bundle", s.handleTrustBundle)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -448,6 +463,51 @@ func (s *Server) handlePurgeAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]uint64{"seq": seq})
+}
+
+// handleMetricsPush ingests one edge instance's registry snapshot
+// (POST /v1/metrics, text exposition body). The edge_id label is the bearer
+// token's id grant — server-derived, so a token without an identity cannot push
+// (403) and a pushed body can never impersonate another edge. The per-process
+// X-Edge-Instance header disambiguates replicas sharing one edge_id; it is
+// self-reported, but only collides within the caller's own identity.
+func (s *Server) handleMetricsPush(w http.ResponseWriter, r *http.Request) {
+	if s.metricsStore == nil {
+		http.Error(w, "metrics ingestion disabled", http.StatusNotFound)
+		return
+	}
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		edgeMetricsPushIn.WithLabelValues("unauthorized").Inc()
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	edgeID, ok := s.authz.Identity(token)
+	if !ok {
+		edgeMetricsPushIn.WithLabelValues("forbidden").Inc()
+		http.Error(w, "forbidden: token has no edge id", http.StatusForbidden)
+		return
+	}
+	instance := strings.TrimSpace(r.Header.Get("X-Edge-Instance"))
+	if instance == "" || len(instance) > maxInstanceLen {
+		edgeMetricsPushIn.WithLabelValues("no_instance").Inc()
+		http.Error(w, "missing or oversized X-Edge-Instance header", http.StatusBadRequest)
+		return
+	}
+	body := http.MaxBytesReader(w, r.Body, maxEdgeMetricsBody)
+	if err := s.metricsStore.Ingest(edgeID, instance, body); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			edgeMetricsPushIn.WithLabelValues("too_large").Inc()
+			http.Error(w, "metrics body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		edgeMetricsPushIn.WithLabelValues("bad_body").Inc()
+		http.Error(w, "invalid metrics body", http.StatusBadRequest)
+		return
+	}
+	edgeMetricsPushIn.WithLabelValues("ok").Inc()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // bearer extracts the token from an "Authorization: Bearer <token>" header.

@@ -182,10 +182,47 @@ var (
 		Name:      "edge_cache_purge_journal_entries",
 		Help:      "Current number of retained entries in the cache-purge journal.",
 	})
+
+	// edgeMetricsLastPush is the per-instance freshness signal for pushed edge
+	// metrics: the unix time of the last accepted POST /v1/metrics. The series is
+	// DELETED when the snapshot is TTL-evicted, so it disappears with the data it
+	// describes — a present-but-old value means the instance stopped pushing but
+	// hasn't expired yet.
+	edgeMetricsLastPush = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_metrics_last_push_seconds",
+		Help:      "Unix time of the last accepted edge metrics push, by edge_id + edge_instance (deleted on TTL eviction).",
+	}, []string{"edge_id", "edge_instance"})
+
+	// edgeMetricsPushIn counts POST /v1/metrics outcomes. No edge_id label — the
+	// failure arms (unauthorized, no identity) have no trustworthy identity to stamp.
+	edgeMetricsPushIn = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_metrics_push_total",
+		Help:      "Edge metrics pushes by status (ok|unauthorized|forbidden|no_instance|too_large|bad_body).",
+	}, []string{"status"})
+
+	// edgeMetricsFamilyDropped counts pushed metric families dropped at merge time
+	// because their TYPE conflicted with an already-merged family of the same name.
+	edgeMetricsFamilyDropped = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_metrics_family_dropped_total",
+		Help:      "Pushed edge metric families dropped on /metrics merge due to a TYPE conflict.",
+	})
+
+	// edgeMetricsInstanceEvicted counts snapshots evicted because an edge_id hit its
+	// instance cap (a NEW self-reported instance id displaced the stalest one — the
+	// bound that keeps a token from minting unbounded instance ids). A climbing rate
+	// at steady fleet size flags instance-id churn or a misbehaving edge.
+	edgeMetricsInstanceEvicted = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_metrics_instance_evicted_total",
+		Help:      "Edge metrics snapshots evicted by the per-edge_id instance cap (stalest-first).",
+	})
 )
 
 func init() {
-	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration, activeSignerFP, signerActiveFlipFailed, issuedUnderSigner, tokenDisabledNoRotation, rotationStuck, purgeIssued, purgeJournalSize)
+	prom.Registry().MustRegister(signerFingerprint, signerGeneration, signerBundleCerts, signerLoaded, targetCAID, signerFloored, signerRVUnparsed, registryTotal, authzGeneration, activeSignerFP, signerActiveFlipFailed, issuedUnderSigner, tokenDisabledNoRotation, rotationStuck, purgeIssued, purgeJournalSize, edgeMetricsLastPush, edgeMetricsPushIn, edgeMetricsFamilyDropped, edgeMetricsInstanceEvicted)
 }
 
 // SetRotationStuckDeadline configures the overlap-stuck threshold (call once at startup).

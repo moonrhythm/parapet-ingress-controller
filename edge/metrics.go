@@ -147,11 +147,21 @@ var (
 		Name:      "edge_cache_purge_reap_entries_total",
 		Help:      "Cache entries physically reclaimed by the reaper (cumulative).",
 	}, []string{"edge_id"})
+
+	// edgeMetricsClientPush counts metrics-push attempts to the control plane. The
+	// name deliberately differs from the CP-side parapet_edge_metrics_push_total —
+	// this family is itself pushed and merged into the CP's /metrics, and two
+	// same-name families with different label sets would merge confusingly.
+	edgeMetricsClientPush = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: prom.Namespace,
+		Name:      "edge_metrics_client_push_total",
+		Help:      "Edge metrics pushes to the control plane by result (ok|gather_fail|push_fail).",
+	}, []string{"result", "edge_id"})
 )
 
 func init() {
 	prom.Registry().MustRegister(edgeClientCertCAID, edgeClientCertNotAfter, edgeClientCertLoaded, edgeRemint, edgeCPTargetCAID, edgeRefresh, edgeClientCertSignerFP, edgeCPActiveSignerFP, edgeOnDemand,
-		edgePurgePoll, edgePurgeEntries, edgePurgeCursor, edgePurgeRecords, edgePurgeFolds, edgePurgeReapSweeps, edgePurgeReapEntries)
+		edgePurgePoll, edgePurgeEntries, edgePurgeCursor, edgePurgeRecords, edgePurgeFolds, edgePurgeReapSweeps, edgePurgeReapEntries, edgeMetricsClientPush)
 }
 
 // purgeReap records one completed reaper sweep and the entries it reclaimed.
@@ -161,6 +171,9 @@ func purgeReap(reaped int) {
 		edgePurgeReapEntries.WithLabelValues(edgeID).Add(float64(reaped))
 	}
 }
+
+// metricsPush counts one metrics-push attempt by result.
+func metricsPush(result string) { edgeMetricsClientPush.WithLabelValues(result, edgeID).Inc() }
 
 // purgePoll counts one purge poll by result.
 func purgePoll(result string) { edgePurgePoll.WithLabelValues(result, edgeID).Inc() }

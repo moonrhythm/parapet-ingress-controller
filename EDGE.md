@@ -206,6 +206,18 @@ POST /v1/purges       Authorization: Bearer <ADMIN token>   ← stronger cred th
         applied on the read side, not at issue time)
   401 (no/invalid admin token)  400 (invalid scope/host/uri)  404 (purge distribution disabled)
 
+POST /v1/metrics      Authorization: Bearer <token>   X-Edge-Instance: <instance>
+  body: the edge's FULL Prometheus registry in text exposition format
+  204 (snapshot stored; served merged into the CP's /metrics listener)
+  401 (no/invalid token)
+  403 (token has no id grant — the edge_id label is the token's identity, so an
+       id-less token cannot push)
+  400 (missing/oversized X-Edge-Instance, or unparseable body)  413 (body > 8 MiB)
+  404 (CP_METRICS_LISTEN="" — ingestion disabled with the listener)
+       (the CP OVERRIDES any edge_id label in the body with the token's id and adds
+        edge_instance from the header — a pushed body can never impersonate another
+        edge. EDGE_ID should match the token's id; the label is always the latter.)
+
 GET /healthz          (no auth)
   200 always (liveness)
 GET /healthz?ready=1  (no auth)
@@ -696,7 +708,55 @@ controlplane   :8443  HTTPS GET (server-TLS + bearer)       NEW — Go, own Serv
                       (or plaintext HTTP on a trusted private network — TLS off)
                       distributes PRIVATE KEYS; NetworkPolicy: edge sources only;
                       NOT on the public LB
+               :9187  metrics (CP_METRICS_LISTEN) — the CP's own convergence
+                      metrics MERGED with every pushed edge snapshot (below)
 ```
+
+### Edge metrics push (scrape the CP, not the fleet)
+
+The edge fleet is out-of-cluster, so an in-cluster Prometheus often can't reach
+each edge's `EDGE_METRICS_LISTEN`. Opt-in alternative: the edge pushes its **full
+registry** (request/host/backend series + the `edge_*` convergence gauges +
+`go_*`/`process_*`) to `POST /v1/metrics` on its existing authenticated CP
+channel, and the CP serves every live snapshot merged into its own `/metrics` on
+`CP_METRICS_LISTEN` — **one scrape target** for the CP plus the whole fleet.
+`EDGE_METRICS_LISTEN` is untouched (useful for local debugging; set `""` to
+close the port when pushing).
+
+```
+EDGE_METRICS_PUSH_INTERVAL   seconds between pushes; 0 (default) = disabled.
+                             First tick jittered to decorrelate the fleet.
+EDGE_INSTANCE_ID             per-PROCESS discriminator (default: hostname), sent as
+                             X-Edge-Instance. Replicas may share one EDGE_ID/token
+                             identity, so edge_id alone cannot key snapshots — the
+                             CP stores and labels by (edge_id, edge_instance).
+CP_EDGE_METRICS_TTL          seconds a snapshot stays served after its last push
+                             (default 300; keep >= 3x the fleet push interval). A
+                             dead instance's series disappear at TTL instead of
+                             being served stale forever; instance-id churn stays
+                             bounded the same way.
+```
+
+The CP labels every pushed series with the **token-derived** `edge_id`
+(overriding any self-reported value — `EDGE_ID` should match the token's id) plus
+`edge_instance`, so per-family `# HELP`/`# TYPE` blocks merge cleanly: one block,
+one label set per CP/instance (the CP's own HELP/TYPE wins; a TYPE-conflicting
+edge family is dropped and counted in
+`parapet_edge_metrics_family_dropped_total`). Stored samples carry **no
+timestamps** — Prometheus stamps at scrape time — so staleness is bounded by the
+TTL plus the per-instance freshness gauge
+`parapet_edge_metrics_last_push_seconds{edge_id,edge_instance}` (deleted on
+eviction, so its presence implies the snapshot is still served). Push outcomes
+count in `parapet_edge_metrics_push_total{status}` (CP side) and
+`parapet_edge_metrics_client_push_total{result,edge_id}` (edge side). Note the
+per-instance `go_*`/`process_*` series land on the one scrape target — fleet
+cardinality is bounded by live instances via the TTL.
+
+The instance id is self-reported, so the CP also caps DISTINCT instances per
+edge_id (128): at the cap a new instance evicts that identity's stalest snapshot
+(`parapet_edge_metrics_instance_evicted_total`), bounding memory at
+tokens × cap × snapshot even if a compromised edge mints instance ids. Bodies are
+capped at 8 MiB (413).
 
 ### Plaintext HTTP listener (no redirect — the core decides)
 
@@ -745,6 +805,7 @@ edge *can* be co-located, prefer keyless (recoverable in git history).
 | Purge cursor gap (`since+1 < min_seq`, journal trimmed) | CP returns `flush_required` → edge bumps the global epoch (lazy flush-all) and realigns to `max_seq`. Conservative; never under-invalidates. |
 | CP restart / fresh replica (in-memory journal seq resets below the edge cursor, `since > max_seq`) | CP returns `flush_required` (the cursor-ahead-of-journal check) → edge flushes and realigns its cursor **down** to `max_seq`. The edge also independently flushes on `max_seq < cursor` as defense-in-depth against an older CP. Never silently under-invalidates. |
 | `purge-state` lost/corrupt | Cursor resets to 0 → next poll re-syncs (a trim gap or cursor-ahead → flush-all). Cursor + maps share **one atomic write** so they can't desync. |
+| `POST /v1/metrics` unreachable | Edge keeps serving traffic (**fail static** — push is pure observability); the CP serves the last snapshot until `CP_EDGE_METRICS_TTL`, then the instance's series disappear (its `last_push_seconds` series with them). The next successful push restores everything — counters are cumulative, nothing is lost. |
 
 ## Conformance
 

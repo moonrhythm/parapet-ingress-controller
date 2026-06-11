@@ -18,8 +18,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 
-	"github.com/moonrhythm/parapet/pkg/prom"
-
 	"github.com/moonrhythm/parapet-ingress-controller/edgecp"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 )
@@ -369,13 +367,30 @@ func main() {
 	// The payload is non-secret (ca_id fingerprints, counters, generations — no key
 	// material); a NetworkPolicy must still restrict it to the scraper.
 	//
+	// The same listener also serves the PUSHED edge-fleet metrics: edges POST their
+	// registry snapshots to /v1/metrics on the API (token-gated), and MetricsHandler
+	// merges those per-instance snapshots into the CP's own families — one scrape
+	// target for the CP + the out-of-cluster fleet. Snapshots expire CP_EDGE_METRICS_TTL
+	// seconds after their last push, so a dead edge's series disappear instead of
+	// being served stale forever.
+	//
 	// A failed bind is logged loudly but NOT fatal: the control plane's job is issuance
 	// + trust distribution, which must never be taken down because an observability port
 	// is contended. A missing /metrics is already loud to the scraper (the target's
 	// `up == 0`), and the convergence interlock fails closed on a non-reporting target.
 	if metricsListen != "" {
+		metricsStore := edgecp.NewMetricsStore(time.Duration(envInt("CP_EDGE_METRICS_TTL", 300)) * time.Second)
+		server = server.WithMetricsIngest(metricsStore)
+		metricsSrv := &http.Server{
+			Addr:              metricsListen,
+			Handler:           edgecp.MetricsHandler(metricsStore),
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
 		go func() {
-			if err := prom.Start(metricsListen); err != nil && err != http.ErrServerClosed {
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Error("edge control plane: metrics listener failed; serving API without /metrics", "addr", metricsListen, "err", err)
 			}
 		}()
