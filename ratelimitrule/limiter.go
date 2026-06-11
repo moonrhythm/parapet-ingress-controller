@@ -3,8 +3,8 @@ package ratelimitrule
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,10 +40,6 @@ const (
 	// to an ingress with host-less (catch-all) rules, which route any Host.
 	collapsedHost = "other"
 )
-
-// ipv6Mask aggregates IPv6 keys per /64: one eyeball network is one bucket, so
-// a single /64 can't mint 2^64 distinct keys against an ip-keyed limit.
-var ipv6Mask = net.CIDRMask(64, 128)
 
 // maxKeyPartLen caps a header/cookie value's contribution to the bucket key.
 // Values past the cap share a bucket with their 128-byte prefix — conservative
@@ -98,7 +94,7 @@ type compiledLimit struct {
 	mode     mode
 	status   int
 	message  string
-	exclude  []*net.IPNet
+	exclude  []netip.Prefix
 	observe  ratelimit.ObserveFunc // nil when no Observe factory is wired
 
 	// cfgKey fingerprints the strategy-shaping config (key|algorithm|rate|window).
@@ -320,14 +316,16 @@ func (l *Limiter) compileLimit(lim Limit) (compiledLimit, Limit, error) {
 		lim.Message = defaultMessage
 	}
 
-	var exclude []*net.IPNet
+	var exclude []netip.Prefix
 	for _, cidr := range lim.Exclude {
-		_, ipnet, err := net.ParseCIDR(strings.TrimSpace(cidr))
+		// netip.Prefix.Contains masks both sides, so a non-canonical spelling
+		// like 10.1.2.3/8 matches the same addresses net.ParseCIDR admitted.
+		p, err := netip.ParsePrefix(strings.TrimSpace(cidr))
 		if err != nil {
 			errs = append(errs, fmt.Errorf("invalid exclude CIDR %q: %w", cidr, err))
 			continue
 		}
-		exclude = append(exclude, ipnet)
+		exclude = append(exclude, p)
 	}
 
 	if err := errors.Join(errs...); err != nil {
@@ -508,13 +506,20 @@ func (s *set) serve(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	}
 
 	// The client IP is shared by every ip-keyed limit and exclude list; resolve
-	// it once. rawIP keeps parapet's ClientIP fallback semantics: an unparsable
-	// X-Real-IP buckets by its raw string.
-	var ip net.IP
+	// it once. netip.ParseAddr is allocation-free (Addr is a value type), unlike
+	// net.ParseIP. rawIP keeps parapet's ClientIP fallback semantics: an
+	// unparsable X-Real-IP buckets by its raw string. A zoned address
+	// ("fe80::1%eth0") is treated as unparsable for parity with net.ParseIP,
+	// which rejects zones — so those clients keep bucketing by raw string.
+	// Unmap folds 4-in-6 ("::ffff:1.2.3.4") onto the plain IPv4 bucket, matching
+	// the old To4 behavior.
+	var addr netip.Addr
 	var rawIP string
 	if s.needsIP {
 		rawIP = header.Get(r.Header, header.XRealIP)
-		ip = net.ParseIP(rawIP)
+		if a, err := netip.ParseAddr(rawIP); err == nil && a.Zone() == "" {
+			addr = a.Unmap()
+		}
 	}
 	// Cookies are parsed once per request and shared across every cookie-keyed
 	// limit: http.Request.Cookie re-parses the WHOLE Cookie header (which the
@@ -535,10 +540,10 @@ func (s *set) serve(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	for i := range s.limits {
 		lim := &s.limits[i]
 
-		if lim.skip(ip) {
+		if lim.skip(addr) {
 			continue
 		}
-		key := s.bucketKey(lim, r, ip, rawIP, cookies)
+		key := s.bucketKey(lim, r, addr, rawIP, cookies)
 		if lim.strategy.Take(key) {
 			if lim.observe != nil {
 				lim.observe(ratelimit.Event{Name: "", Result: ratelimit.ResultAllowed})
@@ -563,13 +568,15 @@ func (s *set) serve(w http.ResponseWriter, r *http.Request, next http.Handler) {
 	next.ServeHTTP(w, r)
 }
 
-// skip reports whether the client IP is excluded from this limit.
-func (lim *compiledLimit) skip(ip net.IP) bool {
-	if ip == nil || len(lim.exclude) == 0 {
+// skip reports whether the client IP is excluded from this limit. An invalid
+// (unparsable) address is never excluded — fail-closed, garbage can't bypass a
+// limit that carries excludes.
+func (lim *compiledLimit) skip(addr netip.Addr) bool {
+	if !addr.IsValid() || len(lim.exclude) == 0 {
 		return false
 	}
-	for _, n := range lim.exclude {
-		if n.Contains(ip) {
+	for _, p := range lim.exclude {
+		if p.Contains(addr) {
 			return true
 		}
 	}
@@ -580,16 +587,16 @@ func (lim *compiledLimit) skip(ip net.IP) bool {
 // per-request values with "\n" (see keyKind for why that is unambiguous). The
 // single-part case skips the builder — it is the common shape and stays
 // alloc-free for ip/host keys.
-func (s *set) bucketKey(lim *compiledLimit, r *http.Request, ip net.IP, rawIP string, cookies map[string]string) string {
+func (s *set) bucketKey(lim *compiledLimit, r *http.Request, addr netip.Addr, rawIP string, cookies map[string]string) string {
 	if len(lim.keyParts) == 1 {
-		return s.partValue(lim.keyParts[0], r, ip, rawIP, cookies)
+		return s.partValue(lim.keyParts[0], r, addr, rawIP, cookies)
 	}
 	var b strings.Builder
 	for i, p := range lim.keyParts {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString(s.partValue(p, r, ip, rawIP, cookies))
+		b.WriteString(s.partValue(p, r, addr, rawIP, cookies))
 	}
 	return b.String()
 }
@@ -600,7 +607,7 @@ func (s *set) bucketKey(lim *compiledLimit, r *http.Request, ip net.IP, rawIP st
 // host collapses unknown hosts when knownHost is wired. A missing header or
 // cookie contributes "" (those clients share a bucket); values are truncated
 // to maxKeyPartLen.
-func (s *set) partValue(p keyPart, r *http.Request, ip net.IP, rawIP string, cookies map[string]string) string {
+func (s *set) partValue(p keyPart, r *http.Request, addr netip.Addr, rawIP string, cookies map[string]string) string {
 	switch p.kind {
 	case keyHost:
 		return hostKey(r.Host, s.knownHost)
@@ -613,7 +620,7 @@ func (s *set) partValue(p keyPart, r *http.Request, ip net.IP, rawIP string, coo
 	case keyCookie:
 		return truncPart(cookies[p.name])
 	default: // keyIP
-		return ipKey(ip, rawIP)
+		return ipKey(addr, rawIP)
 	}
 }
 
@@ -627,14 +634,19 @@ func truncPart(v string) string {
 	return v
 }
 
-func ipKey(ip net.IP, rawIP string) string {
-	if ip == nil {
+func ipKey(addr netip.Addr, rawIP string) string {
+	if !addr.IsValid() {
 		return rawIP
 	}
-	if v4 := ip.To4(); v4 != nil {
-		return string(v4)
+	if addr.Is4() { // already Unmap()ed: covers plain IPv4 and 4-in-6
+		a4 := addr.As4()
+		return string(a4[:])
 	}
-	return string(ip.Mask(ipv6Mask))
+	// IPv6 aggregates per /64: one eyeball network is one bucket, so a single
+	// /64 can't mint 2^64 distinct keys against an ip-keyed limit.
+	a16 := addr.As16()
+	clear(a16[8:])
+	return string(a16[:])
 }
 
 func hostKey(host string, knownHost func(string) bool) string {
