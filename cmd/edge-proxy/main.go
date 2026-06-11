@@ -294,6 +294,22 @@ func main() {
 		}()
 	}
 
+	// Opt-in metrics push: the full registry is pushed to the control plane so an
+	// in-cluster Prometheus scrapes the CP's /metrics instead of reaching every
+	// out-of-cluster edge. EDGE_INSTANCE_ID disambiguates replicas that share one
+	// EDGE_ID; the CP labels every pushed series with (edge_id, edge_instance).
+	if pushInterval := time.Duration(envInt64("EDGE_METRICS_PUSH_INTERVAL", 0)) * time.Second; pushInterval > 0 {
+		instance := envOr("EDGE_INSTANCE_ID", "")
+		if instance == "" {
+			instance, _ = os.Hostname()
+		}
+		if instance == "" {
+			instance = "unknown"
+		}
+		go edge.RunMetricsPush(ctx, cp, instance, pushInterval)
+		slog.Info("edge: metrics push enabled", "interval", pushInterval, "instance", instance)
+	}
+
 	health := healthz.New()
 	health.SetReady(false) // healthz defaults to ready; gate it on a usable cert below
 

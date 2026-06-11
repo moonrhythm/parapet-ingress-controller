@@ -355,6 +355,31 @@ func (c *CpClient) FetchEdgeCert(csrPEM []byte) (EdgeCertFetch, error) {
 	}, nil
 }
 
+// PushMetrics POSTs one registry snapshot (text exposition) to POST /v1/metrics.
+// instance is the per-process discriminator (X-Edge-Instance): replicas can share
+// one EDGE_ID/token identity, so the CP keys and labels snapshots by (edge_id,
+// instance). Any non-2xx is an error; the caller fail-statics (the next tick
+// pushes a fresh snapshot — nothing is lost).
+func (c *CpClient) PushMetrics(instance, contentType string, body []byte) error {
+	req, err := http.NewRequest(http.MethodPost, c.base+"/v1/metrics", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("X-Edge-Instance", instance)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("control plane returned %d for /v1/metrics", resp.StatusCode)
+	}
+	return nil
+}
+
 // parseRetryAfter parses an HTTP Retry-After header value: either delta-seconds
 // (e.g. "5") or an HTTP-date. Returns 0 on empty/unparseable/negative.
 func parseRetryAfter(v string) time.Duration {

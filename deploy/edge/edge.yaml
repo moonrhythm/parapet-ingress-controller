@@ -130,6 +130,14 @@ spec:
             # "" to disable.
             - name: EDGE_METRICS_LISTEN
               value: ":9187"
+            # Metrics push (opt-in): POST the full registry to the control plane's
+            # /v1/metrics every N seconds, so an in-cluster Prometheus scrapes the
+            # CP's /metrics instead of reaching this out-of-cluster edge. See
+            # EDGE.md "Edge metrics push".
+            # - name: EDGE_METRICS_PUSH_INTERVAL # seconds; 0 (default) = disabled
+            #   value: "60"
+            # - name: EDGE_INSTANCE_ID           # per-process discriminator (default: hostname);
+            #   value: "edge-a-1"                #   replicas may share one EDGE_ID
           ports:
             - name: https
               containerPort: 443
