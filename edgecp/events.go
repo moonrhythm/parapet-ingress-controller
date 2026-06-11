@@ -17,6 +17,9 @@ type EventsSnapshot struct {
 	// WAF/RateLimit are the stores' content etags ("" when distribution is off).
 	WAF       string `json:"waf,omitempty"`
 	RateLimit string `json:"ratelimit,omitempty"`
+	// Hosts is the known-host store's content etag ("" when off). A host change
+	// pokes only the edge's hosts refresh — it doesn't affect WAF/ratelimit.
+	Hosts string `json:"hosts,omitempty"`
 	// Certs is a fingerprint over the cert store's full (name, etag) index.
 	Certs string `json:"certs,omitempty"`
 	// Purges is the purge journal's last issued seq (0 = none/off).

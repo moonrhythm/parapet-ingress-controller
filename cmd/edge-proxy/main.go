@@ -142,11 +142,23 @@ func main() {
 	// refreshes single-flight per resource.
 	eventsEnabled := envOr("EDGE_EVENTS_ENABLED", "true") == "true"
 	var pokes edge.EventPokes
-	var certPoke, wafPoke, rlPoke, purgePoke chan struct{}
+	var certPoke, wafPoke, rlPoke, hostsPoke, purgePoke chan struct{}
 	if eventsEnabled {
 		certPoke = make(chan struct{}, 1)
 		pokes.Certs = certPoke
 	}
+
+	// Known-host set (GET /v1/hosts) — the request metric's host oracle. Always
+	// fetched (the metric is always mounted), independent of WAF/ratelimit;
+	// fail-static, and a 404 from a CP without the endpoint just leaves the metric
+	// collapsing every host to "other".
+	edgeHosts := edge.NewEdgeHosts()
+	edge.RefreshHostsOnce(cp, edgeHosts)
+	if eventsEnabled {
+		hostsPoke = make(chan struct{}, 1)
+		pokes.Hosts = hostsPoke
+	}
+	go edge.RunHostsRefresh(ctx, cp, edgeHosts, refreshInterval, hostsPoke)
 
 	// Optional data-plane mTLS: fetch a CP-issued client cert (CA-only trust), hold it
 	// in memory (never on disk), and present it on the re-encrypt hop. The re-mint
@@ -354,6 +366,14 @@ func main() {
 	m.Use(health)
 	m.Use(host.StripPort())
 	m.Use(host.ToLower())
+	// Per-request counter (parapet_requests{host,status,method,edge_id}); the same
+	// family the in-cluster controller exports. Outermost (past host
+	// normalization) so the counted status is the one the client sees — WAF
+	// blocks, rate-limit rejects, and cache hits alike. host is bounded to the
+	// Ingress-declared known-host set (EdgeHosts), so a random-Host flood in
+	// serve-all mode can't grow series cardinality, while real hosts keep EXACT
+	// per-host labels for the observation system.
+	m.Use(edge.Requests(edgeHosts.IsKnownHost))
 	if !disableLog {
 		m.Use(logger.Stdout())
 	}

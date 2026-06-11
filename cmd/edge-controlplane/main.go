@@ -318,6 +318,7 @@ func main() {
 	// fetch sees the full payload, not a half-populated store.
 	var wafStore *edgecp.WafStore
 	var rlStore *edgecp.RateLimitStore
+	var hostsStore *edgecp.HostsStore
 	if wafEnabled {
 		wafStore = edgecp.NewWafStore()
 		wafReloader := edgecp.NewWafReloader(wafStore, watchNamespace, podNamespace)
@@ -338,8 +339,16 @@ func main() {
 		server = server.WithRateLimit(rlStore)
 		slog.Info("edge control plane: ratelimit distribution enabled", "pod_namespace", podNamespace)
 	}
-	if wafStore != nil || rlStore != nil {
-		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore)
+	// Standalone known-host distribution (GET /v1/hosts) — the edge request
+	// metric's host oracle. On by default and independent of WAF/ratelimit, since
+	// the metric is always on; it only rides the same Ingress watch.
+	if envOr("CP_HOSTS_ENABLED", "true") == "true" {
+		hostsStore = edgecp.NewHostsStore()
+		server = server.WithHosts(hostsStore)
+		slog.Info("edge control plane: hosts distribution enabled")
+	}
+	if wafStore != nil || rlStore != nil || hostsStore != nil {
+		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore).WithHosts(hostsStore)
 		if err := ingReloader.LoadOnce(ctx); err != nil {
 			slog.Error("edgecp: initial ingress load failed", "err", err)
 		}
@@ -379,6 +388,9 @@ func main() {
 			}
 			if rlStore != nil {
 				snap.RateLimit = rlStore.Version()
+			}
+			if hostsStore != nil {
+				snap.Hosts = hostsStore.Version()
 			}
 			if purgeStore != nil {
 				snap.Purges = purgeStore.LastSeq()

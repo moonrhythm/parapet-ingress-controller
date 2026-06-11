@@ -64,6 +64,7 @@ client ──TLS──► edge (Go/parapet, outside k8s)                        
                   │     GET /v1/certs?sni=… → cert+key+ETag (allowed SNI) │
                   │     GET /v1/waf         → rules for edge domains      │
                   │     GET /v1/ratelimit   → limits for edge domains     │
+                  │     GET /v1/hosts       → known hosts (metric oracle) │
                   │   authz: bearer token → allowed domains/zones         │
                   │   reads: TLS Secrets, WAF + ratelimit ConfigMaps,     │
                   │          Ingresses                                    │
@@ -117,6 +118,7 @@ check gates both endpoints:
 - `GET /v1/certs/{sni}` → require `sni ∈ allowed(token)`.
 - `GET /v1/waf` → return only the zones / host-map entries for the token's domains.
 - `GET /v1/ratelimit` → same scoping (zones, host-map, known hosts) per token.
+- `GET /v1/hosts` → only the known hosts for the token's domains (the request metric's host oracle).
 
 Server-side TLS is mandatory here: it encrypts the token **and the returned
 private key** in flight and lets the edge authenticate the control plane. The
@@ -191,6 +193,23 @@ GET /v1/ratelimit     Authorization: Bearer <token>   [If-None-Match: "<etag>"]
         ETag over the scoped payload with the generation excluded, like /v1/waf)
   401 (no/invalid token)   404 (ratelimit distribution disabled)
 
+GET /v1/hosts         Authorization: Bearer <token>   [If-None-Match: "<etag>"]
+  200 {"generation": N, "hosts":["…"]}
+       hosts          : every Ingress-declared host the edge may serve, scoped to
+                        the token's domains (sorted, deduped). The edge wires it as
+                        the request metric's host oracle: parapet_requests's `host`
+                        label is bounded to this set (an unknown host collapses to
+                        "other"), giving EXACT per-host labels while keeping series
+                        cardinality bounded under a random-Host flood.
+       STANDALONE — not folded into /v1/waf or /v1/ratelimit — because the metric is
+       always on (even with WAF + rate-limiting off) and a stale/empty list only
+       over-collapses the label to "other" (a cardinality bound, never a WAF/limit
+       correctness signal), so it has NO atomicity coupling with those payloads.
+       Served by default (CP_HOSTS_ENABLED, default true); it rides the same Ingress
+       watch as the WAF/ratelimit binding derivation.
+       (ETag over the scoped payload with the generation excluded, like /v1/waf)
+  401 (no/invalid token)   404 (hosts distribution disabled / older CP)
+
 GET /v1/purges?since=<seq>   Authorization: Bearer <token>
   200 {"entries":[{"seq":N,"scope":"url|host|prefix|tag|flush-all","host":"…","uri":"…","tag":"…"}],
        "max_seq": N, "flush_required": false}
@@ -224,7 +243,7 @@ POST /v1/purges       Authorization: Bearer <ADMIN token>   ← stronger cred th
 GET /v1/events        Authorization: Bearer <token>   (SSE; long-lived)
   200 Content-Type: text/event-stream — change-notification stream. Each event:
        event: change
-       data: {"waf":"<etag>","ratelimit":"<etag>","certs":"<fp>","purges":<seq>}
+       data: {"waf":"<etag>","ratelimit":"<etag>","hosts":"<etag>","certs":"<fp>","purges":<seq>}
        The payload is a VERSION VECTOR (opaque, CP-process-local) — a wake-up
        signal only, never content. The first event is the current vector (a
        reconnecting edge covers its disconnected window); after that, one event

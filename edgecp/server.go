@@ -27,6 +27,12 @@ type Server struct {
 	// /v1/ratelimit → 404). Same scoping/ETag model as the WAF endpoint.
 	ratelimit *RateLimitStore
 
+	// hosts is the optional standalone known-host distribution store (nil =
+	// /v1/hosts → 404). It feeds the edge request metric's host oracle; same
+	// scoping/ETag model. Standalone because the metric is always on and a stale
+	// list only over-collapses the metric label (no atomicity with waf/ratelimit).
+	hosts *HostsStore
+
 	// purge is the optional cache-purge journal (nil = purge distribution disabled,
 	// /v1/purges → 404). purgeAdminToken gates POST /v1/purges — a STRONGER credential
 	// than the per-edge read tokens (an edge can read its purges but not issue them).
@@ -137,6 +143,13 @@ func (s *Server) WithRateLimit(rl *RateLimitStore) *Server {
 	return s
 }
 
+// WithHosts enables the standalone known-host endpoint (GET /v1/hosts). Returns
+// the server for chaining.
+func (s *Server) WithHosts(hosts *HostsStore) *Server {
+	s.hosts = hosts
+	return s
+}
+
 // WithEvents enables the change-notification stream (GET /v1/events). Returns
 // the server for chaining; the caller runs hub.Run in its own goroutine.
 func (s *Server) WithEvents(hub *EventsHub) *Server {
@@ -219,6 +232,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/certs", s.handleCert)
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
 	mux.HandleFunc("GET /v1/ratelimit", s.handleRateLimit)
+	mux.HandleFunc("GET /v1/hosts", s.handleHosts)
 	mux.HandleFunc("GET /v1/purges", s.handlePurges)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/purges", s.handlePurgeAdmin)
@@ -433,6 +447,50 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 	}
 	// Generation zeroed in the validator for the same reason as handleWAF:
 	// process-local counters must not defeat 304 revalidation across replicas.
+	etagResp := resp
+	etagResp.Generation = 0
+	etagBody, err := json.Marshal(etagResp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	etag := etagOfString(string(etagBody))
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// hostsResponse is the GET /v1/hosts payload: the known-host list scoped to the
+// token's domains. It is the edge request metric's host oracle.
+type hostsResponse struct {
+	Generation uint64   `json:"generation"`
+	Hosts      []string `json:"hosts"`
+}
+
+// handleHosts serves the known-host list scoped to the edge's allowed domains.
+// ETag is over the scoped payload with the generation zeroed, the same model as
+// handleWAF.
+func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.hosts == nil {
+		http.Error(w, "hosts distribution disabled", http.StatusNotFound)
+		return
+	}
+	generation, hosts := s.hosts.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
+	resp := hostsResponse{Generation: generation, Hosts: hosts}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
 	etagResp := resp
 	etagResp.Generation = 0
 	etagBody, err := json.Marshal(etagResp)

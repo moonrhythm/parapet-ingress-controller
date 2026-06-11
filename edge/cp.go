@@ -273,6 +273,50 @@ func (c *CpClient) FetchRateLimit(currentEtag string) (RateLimitFetch, error) {
 	}
 }
 
+// HostsFetch is the outcome of a known-host fetch (the request metric's host
+// oracle). Scoped to the edge's token.
+type HostsFetch struct {
+	// Unchanged is true on a 304.
+	Unchanged  bool
+	Generation uint64
+	Hosts      []string
+	Etag       string
+}
+
+type hostsBody struct {
+	Generation uint64   `json:"generation"`
+	Hosts      []string `json:"hosts"`
+}
+
+// FetchHosts fetches the known-host list scoped to the edge's token, with ETag
+// revalidation. A 404 ("hosts distribution disabled" — an old CP, or CP_HOSTS_
+// ENABLED=false) is treated like any other non-200/304: an error the caller
+// handles fail-static (keeps last-good; the metric just keeps its current bound).
+func (c *CpClient) FetchHosts(currentEtag string) (HostsFetch, error) {
+	resp, err := c.do(c.base+"/v1/hosts", currentEtag)
+	if err != nil {
+		return HostsFetch{}, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return HostsFetch{Unchanged: true}, nil
+	case http.StatusOK:
+		var body hostsBody
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxWafBody)).Decode(&body); err != nil {
+			return HostsFetch{}, fmt.Errorf("decode: %w", err)
+		}
+		return HostsFetch{
+			Generation: body.Generation,
+			Hosts:      body.Hosts,
+			Etag:       resp.Header.Get("ETag"),
+		}, nil
+	default:
+		return HostsFetch{}, fmt.Errorf("control plane returned %d for /v1/hosts", resp.StatusCode)
+	}
+}
+
 // PurgeFetch is the outcome of a cache-purge poll.
 type PurgeFetch struct {
 	// Disabled is true on a 404 ("purge distribution disabled" at the CP): a clean,
