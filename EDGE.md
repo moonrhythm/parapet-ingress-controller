@@ -42,6 +42,9 @@ traffic); the cluster stays the source of truth:
 3. **The cluster stays authoritative for WAF.** The edge is a *lower* trust tier,
    so its WAF is an early-drop optimization; parapet re-runs the full WAF inside.
    A buggy, stale, or compromised edge can never mean an *unprotected* origin.
+   (Default. `WAF_VALIDATED_PROXY` on the core is the explicit opt-out for
+   strongly-identified edge hops — see
+   [the backstop section](#parapet-stays-authoritative-the-backstop).)
 4. **One WAF engine everywhere.** The edge reuses `parapet/pkg/waf` (the same Go
    CEL engine the controller uses) + `wafrule`, so rule semantics are identical
    by construction and it shares the [`conformance/`](conformance/) corpus via the
@@ -258,7 +261,8 @@ are handled. The edge runs **global + zone** WAF as a first layer:
    With no DB loaded, `country` is `""` and `asn` is `0` and neither header is
    forwarded (the field is always present in the rule map, so a rule never errors)
    — such a rule simply won't early-drop at the edge, but parapet still re-runs it
-   authoritatively.
+   authoritatively (unless the core skips the re-run via `WAF_VALIDATED_PROXY`,
+   which is why that opt-in requires GeoIP/ASN-DB parity — see its section below).
 2. **Global WAF** (always) → block early on match.
 3. Resolve the zone from the `host_zone_map` → **zone WAF** → block on match.
 4. If not blocked, forward to parapet with `X-Forwarded-For/-Proto/-Country/-ASN`.
@@ -284,10 +288,53 @@ is **non-fatal**: parapet re-runs global + zone WAF authoritatively and resolves
 the zone from its own router. So:
 
 - Edge WAF = early-drop optimization + DDoS shield (lower trust tier).
-- parapet WAF = authority. **Do not disable parapet's WAF for edge traffic.**
+- parapet WAF = authority. **By default parapet re-runs the WAF for edge
+  traffic** — keep it that way unless you've read the opt-out below.
 
 Because the edge sets `X-Forwarded-For` and parapet trusts it
 (`TRUST_PROXY=<edge CIDR>`), both evaluate against the same client IP.
+
+#### Skipping the core re-run (`WAF_VALIDATED_PROXY`, opt-in)
+
+When every edge runs the WAF and the edge→core hop is strongly identified, the
+double evaluation can be turned off on the core: set `WAF_VALIDATED_PROXY` to a
+comma-separated list of
+
+- `edge-mtls` — the request's TLS client cert chains to the live edge CA.
+  Cryptographic; requires edge auto-trust on the core (`EDGE_TRUST_CP_ENDPOINT`)
+  and the re-encrypt data plane on the edge (`EDGE_UPSTREAM_TLS=true` +
+  `EDGE_DATAPLANE_MTLS`), since the plaintext hop carries no client cert.
+- CIDRs / named groups — the immediate TCP peer is in the listed ranges (the
+  `TRUST_PROXY` spec language). The option for the plaintext `:80` hop; only as
+  strong as network reachability into those ranges (anything that can source
+  from them — e.g. any pod in a flat cluster network — bypasses the core WAF).
+
+Matching requests skip the core's global **and** zone WAF, counted as
+`parapet_waf_skips{scope}`; rate limits, auth, routing, and geo headers are
+unchanged, and non-matching traffic (direct, LB, another front proxy) still
+gets the full core WAF. `WAF_VALIDATED_PROXY` is deliberately separate from
+`TRUST_PROXY`: a front proxy you trust for `X-Forwarded-*` (e.g. Cloudflare)
+did **not** run your WAF.
+
+This makes the edge's WAF — and its `host_zone_map` zone resolution —
+authoritative for matching traffic. The trade-offs you accept:
+
+- the core trusts the *hop*, not a per-request claim: it cannot tell a
+  `EDGE_WAF_ENABLED=false` edge apart, so every edge must run the WAF with the
+  same rule source;
+- zone-resolution drift is no longer corrected by the core for that traffic;
+- an edge that boots while the CP is unreachable serves with an **empty
+  ruleset** until its first snapshot lands (fail-static protects against later
+  fetch failures, not the first) — with the skip on, that window reaches the
+  origin unscreened;
+- keep `WAF_INSPECT_BODY` / fail-mode parity between edge and core, or the
+  edge's verdict is weaker than the one it replaces — and GeoIP/ASN-DB parity
+  too: on a DB-less edge `request.country`/`request.asn` rules never match, and
+  with the skip on nobody re-runs them.
+
+Fail-fast guards: `WAF_VALIDATED_PROXY=true` is refused (that's
+`WAF_ENABLED=false` with extra steps), `edge-mtls` without auto-trust and
+malformed CIDRs abort startup.
 
 ### Edge behind another proxy (`TRUST_PROXY`)
 
@@ -661,7 +708,8 @@ repo entirely; it is recoverable from git history.
    hosts; the control plane derives `host → zoneKey` from Ingress objects and
    ships it scoped to the edge's allowed hosts, alongside the zone rulesets).
    Path-precise zone resolution stays parapet's authoritative job — if the edge's
-   host-level binding ever diverges, parapet corrects it on its re-run.
+   host-level binding ever diverges, parapet corrects it on its re-run (not for
+   traffic the core skips via `WAF_VALIDATED_PROXY`, which accepts that drift).
 4. **Response cache** — optional disk-backed HTTP cache (`EDGE_CACHE_*`),
    honor-origin policy, LRU-bounded, restart-persistent, fail-static. **(done)**
    See [Response cache at the edge](#response-cache-at-the-edge). Edge-only (no

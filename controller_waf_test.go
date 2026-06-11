@@ -61,6 +61,44 @@ rules:
 	assert.Equal(t, http.StatusForbidden, w.Code, "request.country resolver blocks via the global WAF")
 }
 
+func TestGlobalWAFSkipValidated(t *testing.T) {
+	t.Parallel()
+
+	// A request the SkipValidated predicate matches (its WAF verdict was already
+	// decided at the edge) must bypass the global ruleset; everything else still
+	// evaluates. The predicate here keys off a test-local header — the real one
+	// is peer-based (edge client cert / peer CIDR), built in main.
+	ctrl := New("", proxy.New())
+	ctrl.PodNamespace = "ctrl-ns"
+	ctrl.WAFConfig = WAFConfig{
+		Enabled:       true,
+		SkipValidated: func(r *http.Request) bool { return r.Header.Get("X-Test-From-Edge") == "1" },
+	}
+	ctrl.InitWAF()
+	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
+rules:
+  - id: block-all
+    expression: "true"
+    action: block
+`))
+	ctrl.reloadWAFDebounced()
+
+	serve := func(fromEdge bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(http.MethodGet, "http://app/", nil)
+		if fromEdge {
+			r.Header.Set("X-Test-From-Edge", "1")
+		}
+		w := httptest.NewRecorder()
+		ctrl.GlobalWAF().ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})).ServeHTTP(w, r)
+		return w
+	}
+
+	assert.Equal(t, http.StatusOK, serve(true).Code, "validated-at-edge request bypasses the global WAF")
+	assert.Equal(t, http.StatusForbidden, serve(false).Code, "other traffic still evaluates")
+}
+
 func TestReloadWAF(t *testing.T) {
 	t.Parallel()
 

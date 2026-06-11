@@ -140,6 +140,7 @@ func main() {
 		"http_server_max_header_bytes", httpServerMaxHeaderBytes,
 		"load_all_certs", loadAllCerts,
 		"waf_enabled", wafConfig.Enabled,
+		"waf_validated_proxy", config.String("WAF_VALIDATED_PROXY"),
 		"ratelimit_enabled", rateLimitEnabled,
 	)
 
@@ -165,97 +166,11 @@ func main() {
 
 	go prom.Start(":9187")
 
-	proxy := proxy.New()
-	proxy.ConfigTransport(configTransport)
-	if autoH2C {
-		proxy.EnableAutoH2C(autoH2CTTL)
-	}
-
-	ctrl := controller.New(watchNamespace, proxy)
-	ctrl.LoadAllCerts = loadAllCerts
-	ctrl.PodNamespace = podNamespace
-	ctrl.WAFConfig = wafConfig
-	ctrl.InitWAF()
-	ctrl.RateLimitConfig = controller.RateLimitConfig{
-		Enabled: rateLimitEnabled,
-		// The WAF's GeoIP resolvers double as the ratelimit country/asn key
-		// resolvers (nil when the DB isn't loaded — SetLimits then rejects
-		// limits using those keys, loudly, instead of bucketing everyone
-		// together).
-		Country: wafConfig.Country,
-		ASN:     wafConfig.ASN,
-	}
-	ctrl.InitRateLimit()
-	ctrl.Use(plugin.InjectStateIngress)
-	ctrl.Use(plugin.AllowRemote)
-	if wafConfig.Enabled {
-		ctrl.Use(plugin.WAFZone(ctrl.LookupZone))
-	}
-	ctrl.Use(plugin.RedirectHTTPS)
-	ctrl.Use(plugin.InjectHSTS)
-	ctrl.Use(plugin.RedirectRules)
-	if rateLimitEnabled {
-		// Zone rate limits run just before the per-ingress annotation limiters:
-		// coarse tenant-wide limits first, then the ingress's own.
-		ctrl.Use(plugin.RateLimitZone(ctrl.LookupRateLimitZone))
-	}
-	ctrl.Use(plugin.RateLimit)
-	ctrl.Use(plugin.BodyLimit)
-	ctrl.Use(plugin.UpstreamProtocol)
-	ctrl.Use(plugin.UpstreamHost)
-	ctrl.Use(plugin.UpstreamPath)
-	ctrl.Use(plugin.OperationsTrace)
-	ctrl.Use(plugin.BasicAuth)
-	ctrl.Use(plugin.ForwardAuth)
-	ctrl.Use(plugin.StripPrefix)
-	// Watch starts below, AFTER the edge-trust readiness hook is wired — firstReload
-	// reads ctrl.WaitTrustReady, so it must be installed before Watch runs.
-
-	m := parapet.Middlewares{}
-	m.Use(ctrl.Healthz())
-	m.Use(host.StripPort())
-	m.Use(host.ToLower())
-	m.Use(metric.HostActiveTracker(ctrl.IsKnownHost))
-	m.Use(hostCountryRateLimit(ctrl.IsKnownHost))
-	m.Use(hostRateLimit(ctrl.IsKnownHost))
-
-	if !disableLog {
-		m.Use(logger.Stdout())
-	}
-	m.Use(state.Middleware(!disableLog))
-	m.Use(metric.Requests(ctrl.IsKnownHost))
-	m.Use(compress.Gzip())
-	m.Use(compress.BrWithQuality(4))
-	m.Use(compress.Zstd())
-	if wafConfig.Enabled {
-		// Global WAF runs just before routing: blocks are access-logged and
-		// counted above, and request.host is already normalized. Per-zone WAF
-		// runs inside the per-ingress chain (plugin.WAFZone).
-		m.Use(ctrl.GlobalWAF())
-	}
-	if rateLimitEnabled {
-		// Global rate limits run after the global WAF, deliberately: WAF-blocked
-		// traffic never burns rate budget, and a rate-limited client can't dodge
-		// the WAF's matching/metrics. (The reverse order would shed limiter
-		// rejections before spending CEL evaluation on them — chosen against.)
-		// Rejections here are access-logged and counted above, like WAF blocks.
-		// Per-zone limits run inside the per-ingress chain (plugin.RateLimitZone).
-		m.Use(ctrl.GlobalRateLimit())
-	}
-	// Forward the resolved GeoIP country/ASN to upstreams. Mounted only when a DB
-	// is loaded (resolver non-nil); runs just before routing so the headers reach
-	// the proxied request.
-	if wafConfig.Country != nil || wafConfig.ASN != nil {
-		m.Use(forwardGeoHeaders(wafConfig.Country, wafConfig.ASN))
-	}
-	m.Use(ctrl)
-
-	cidrTrust := trustcidr.Parse(config.String("TRUST_PROXY"))
-
 	// Edge auto-trust (CA-only mTLS). When EDGE_TRUST_CP_ENDPOINT is set, the core
 	// pulls the edge CA from the control plane (GET /v1/trust-bundle, tokenless,
 	// over MANDATORY verified server-TLS) and trusts any client-cert chain verified
 	// to it — in addition to the static TRUST_PROXY CIDRs. See EDGE-AUTOTRUST.md.
+	// Built before the controller so WAF_VALIDATED_PROXY below can reference it.
 	var trustMgr *trust.Manager
 	if ep := config.String("EDGE_TRUST_CP_ENDPOINT"); ep != "" {
 		mode, err := trust.ClassifyEndpoint(ep)
@@ -314,6 +229,116 @@ func main() {
 		go trustMgr.Run(context.Background(), tc, pollInterval)
 		slog.Info("edge auto-trust enabled (CA-only mTLS)", "endpoint", ep)
 	}
+
+	// WAF offload: when WAF_VALIDATED_PROXY matches a request's peer (the edge
+	// proxy, which runs the same global+zone rules), the core skips its own WAF
+	// evaluation for that request. Opt-in; bad specs are fatal so a typo can't
+	// silently drop coverage. Inert without WAF_ENABLED (nothing is mounted).
+	if spec := config.String("WAF_VALIDATED_PROXY"); spec != "" {
+		var verifyEdgeCert func(*tls.ConnectionState) bool
+		if trustMgr != nil {
+			verifyEdgeCert = trustMgr.VerifyClientCert
+		}
+		pred, err := buildWAFValidatedProxy(spec, verifyEdgeCert)
+		if err != nil {
+			slog.Error("WAF_VALIDATED_PROXY rejected", "spec", spec, "error", err)
+			os.Exit(1)
+		}
+		wafConfig.SkipValidated = pred
+		if !wafConfig.Enabled {
+			slog.Warn("WAF_VALIDATED_PROXY set but WAF_ENABLED is off — nothing to skip", "spec", spec)
+		} else if pred != nil {
+			slog.Info("waf: skipping evaluation for traffic already validated at a trusted hop", "validated_proxy", spec)
+		}
+	}
+
+	proxy := proxy.New()
+	proxy.ConfigTransport(configTransport)
+	if autoH2C {
+		proxy.EnableAutoH2C(autoH2CTTL)
+	}
+
+	ctrl := controller.New(watchNamespace, proxy)
+	ctrl.LoadAllCerts = loadAllCerts
+	ctrl.PodNamespace = podNamespace
+	ctrl.WAFConfig = wafConfig
+	ctrl.InitWAF()
+	ctrl.RateLimitConfig = controller.RateLimitConfig{
+		Enabled: rateLimitEnabled,
+		// The WAF's GeoIP resolvers double as the ratelimit country/asn key
+		// resolvers (nil when the DB isn't loaded — SetLimits then rejects
+		// limits using those keys, loudly, instead of bucketing everyone
+		// together).
+		Country: wafConfig.Country,
+		ASN:     wafConfig.ASN,
+	}
+	ctrl.InitRateLimit()
+	ctrl.Use(plugin.InjectStateIngress)
+	ctrl.Use(plugin.AllowRemote)
+	if wafConfig.Enabled {
+		ctrl.Use(plugin.WAFZone(ctrl.LookupZone, wafConfig.SkipValidated))
+	}
+	ctrl.Use(plugin.RedirectHTTPS)
+	ctrl.Use(plugin.InjectHSTS)
+	ctrl.Use(plugin.RedirectRules)
+	if rateLimitEnabled {
+		// Zone rate limits run just before the per-ingress annotation limiters:
+		// coarse tenant-wide limits first, then the ingress's own.
+		ctrl.Use(plugin.RateLimitZone(ctrl.LookupRateLimitZone))
+	}
+	ctrl.Use(plugin.RateLimit)
+	ctrl.Use(plugin.BodyLimit)
+	ctrl.Use(plugin.UpstreamProtocol)
+	ctrl.Use(plugin.UpstreamHost)
+	ctrl.Use(plugin.UpstreamPath)
+	ctrl.Use(plugin.OperationsTrace)
+	ctrl.Use(plugin.BasicAuth)
+	ctrl.Use(plugin.ForwardAuth)
+	ctrl.Use(plugin.StripPrefix)
+	// Watch starts below, AFTER the edge-trust readiness hook is wired — firstReload
+	// reads ctrl.WaitTrustReady, so it must be installed before Watch runs.
+
+	m := parapet.Middlewares{}
+	m.Use(ctrl.Healthz())
+	m.Use(host.StripPort())
+	m.Use(host.ToLower())
+	m.Use(metric.HostActiveTracker(ctrl.IsKnownHost))
+	m.Use(hostCountryRateLimit(ctrl.IsKnownHost))
+	m.Use(hostRateLimit(ctrl.IsKnownHost))
+
+	if !disableLog {
+		m.Use(logger.Stdout())
+	}
+	m.Use(state.Middleware(!disableLog))
+	m.Use(metric.Requests(ctrl.IsKnownHost))
+	m.Use(compress.Gzip())
+	m.Use(compress.BrWithQuality(4))
+	m.Use(compress.Zstd())
+	if wafConfig.Enabled {
+		// Global WAF runs just before routing: blocks are access-logged and
+		// counted above, and request.host is already normalized. Per-zone WAF
+		// runs inside the per-ingress chain (plugin.WAFZone). Requests matched
+		// by WAF_VALIDATED_PROXY (already validated at the edge) skip both.
+		m.Use(ctrl.GlobalWAF())
+	}
+	if rateLimitEnabled {
+		// Global rate limits run after the global WAF, deliberately: WAF-blocked
+		// traffic never burns rate budget, and a rate-limited client can't dodge
+		// the WAF's matching/metrics. (The reverse order would shed limiter
+		// rejections before spending CEL evaluation on them — chosen against.)
+		// Rejections here are access-logged and counted above, like WAF blocks.
+		// Per-zone limits run inside the per-ingress chain (plugin.RateLimitZone).
+		m.Use(ctrl.GlobalRateLimit())
+	}
+	// Forward the resolved GeoIP country/ASN to upstreams. Mounted only when a DB
+	// is loaded (resolver non-nil); runs just before routing so the headers reach
+	// the proxied request.
+	if wafConfig.Country != nil || wafConfig.ASN != nil {
+		m.Use(forwardGeoHeaders(wafConfig.Country, wafConfig.ASN))
+	}
+	m.Use(ctrl)
+
+	cidrTrust := trustcidr.Parse(config.String("TRUST_PROXY"))
 
 	// Edge auto-trust: gate readiness on the edge-CA pool, bounded and fail-static, so a
 	// freshly-started core isn't routed edge traffic during the cold-start window — when
