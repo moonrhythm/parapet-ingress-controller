@@ -67,16 +67,164 @@ live in [`plugin`](plugin).
 
 ## Configuration
 
-The controller is configured through environment variables (see the
+Every component is configured entirely through environment variables. The tables
+below list **all** of them, grouped by binary. The controller's set is also the
+contract in [`SPEC.md`](SPEC.md); the edge components are designed in
+[`EDGE.md`](EDGE.md). See the
 [deploy](https://github.com/moonrhythm/parapet-ingress-controller/tree/main/deploy)
-manifests for the full set). Notable options:
+manifests for runnable examples.
 
-- `INGRESS_CLASS` (default `parapet`) — the `ingressClassName` to handle.
-- `WATCH_NAMESPACE` (default all) — restrict the controller to one namespace.
-- `TRUST_PROXY` — `true`, `false`, or comma-separated CIDRs (supports the `cloudflare` shorthand).
-- `LOAD_ALL_CERTS` (default `false`) — load every TLS-typed secret in the watch
-  namespace, not just those referenced by an Ingress's `spec.tls`. Lets a
-  wildcard certificate serve SNI without wiring its secret into each ingress.
+### Controller (`cmd/parapet-ingress-controller`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `HTTP_PORT` | `80` | HTTP (+ h2c) listener port |
+| `HTTPS_PORT` | `443` | TLS port; **empty** = HTTP-only; unset = 443 |
+| `INGRESS_CLASS` | `parapet` | `ingressClassName` to handle |
+| `KUBERNETES_BACKEND` | cluster | Source of K8s objects: in-cluster watch (default), `fs` (one-shot load of static manifests, no watch — local dev/smoke tests), or `local` (kubectl proxy at `127.0.0.1:8001`) |
+| `KUBERNETES_FS` | — | Directory of static manifests; **required** when `KUBERNETES_BACKEND=fs` |
+| `WATCH_NAMESPACE` | `""` (all) | Restrict the watch to one namespace |
+| `POD_NAMESPACE` | `""` | Controller's namespace (bounds the global WAF / rate-limit rulesets) |
+| `LOAD_ALL_CERTS` | `false` | Index every TLS secret, not just `spec.tls`-referenced — lets a wildcard cert serve SNI without per-ingress wiring |
+| `TRUST_PROXY` | `""` | `true` / `false` / comma-separated CIDRs (+ `cloudflare` / `google` / `bunny` shorthands). Whether to honor inbound `X-Forwarded-*` from a trusted front proxy vs. overwrite with the peer |
+| `WAIT_BEFORE_SHUTDOWN` | `30s` | Drain delay on SIGTERM |
+| `DISABLE_LOG` | `false` | Suppress the access log |
+| `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | Max request header size |
+| `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host in-flight cap / queue size (0 = off) |
+| `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host+country cap / queue size |
+| `HOST_COUNTRY_HEADER` | `""` | Header(s) carrying the country code for the per-host+country limiter |
+| `TR_MAX_CONNS_PER_HOST` | stdlib | Upstream max connections per host |
+| `TR_MAX_IDLE_CONNS_PER_HOST` | stdlib / 128 | Upstream idle connection pool size |
+| `UPSTREAM_AUTO_H2C` | `false` | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported (verdict cached per-Service with a TTL) |
+| `UPSTREAM_AUTO_H2C_TTL` | `10m` | How long a cached auto-h2c verdict is trusted before re-probing (only when `UPSTREAM_AUTO_H2C` is on) |
+| `PROFILER` / `PROFILER_NAME` | `false` / — | Enable Cloud Profiler / its service name |
+| `RATELIMIT_ENABLED` | `false` | Master switch for ConfigMap-driven rate limiting (see [RATELIMIT.md](RATELIMIT.md)) |
+| `WAF_ENABLED` | `false` | Master switch for the WAF (see [WAF.md](WAF.md)) |
+| `WAF_FAIL_MODE` | `open` | `open` (skip on rule error) / `closed` (500) |
+| `WAF_EVAL_TIMEOUT` | `5ms` | Per-request ruleset deadline |
+| `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | IPLocate ip-to-country `.mmdb` → `request.country` + rate-limit `country` keys (loaded when WAF **or** ratelimit is on). Defaults to the baked-in DB; `""` disables |
+| `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | IPLocate ip-to-asn `.mmdb` → `request.asn` + rate-limit `asn` keys. Defaults to the baked-in DB; `""` disables |
+| `WAF_COST_LIMIT` | — | CEL cost cap per rule (see [WAF.md](WAF.md)) |
+| `WAF_INSPECT_BODY` | — | Request-body bytes made available to rules |
+| `WAF_DISABLE_MACROS` | — | CEL macro kill-switch |
+| `WAF_VALIDATED_PROXY` | `""` | Skip the core's global+zone WAF for requests already validated at the edge. Comma list of `edge-mtls` (peer cert chains to the live edge CA; requires `EDGE_TRUST_CP_ENDPOINT`) and/or CIDRs/named groups (immediate TCP peer); also requires the `X-Parapet-Waf` claim. `true` is refused; a bad spec is fatal at startup |
+| `EDGE_TRUST_CP_ENDPOINT` | `""` | Edge-trust CP endpoint — enables `edge-mtls` verification (peer client cert against the live edge CA bundle) |
+| `EDGE_TRUST_CP_CA` | `""` | CA file to verify the edge-trust CP's TLS (else system roots) |
+| `EDGE_TRUST_CP_CACHE_FILE` | `""` | Warm-start path for the fetched trust bundle (survives CP-down restarts) |
+| `EDGE_TRUST_CP_MAX_STALE` | `3600` (s) | Max age the cached trust bundle is honored when the CP is unreachable |
+| `EDGE_TRUST_CP_POLL_INTERVAL` | `300` (s) | How often to refresh the edge-trust bundle from the CP |
+| `EDGE_TRUST_READY_WAIT` | `10s` | Startup wait for the first trust-bundle fetch before serving |
+
+### Edge control plane (`cmd/edge-controlplane`)
+
+In-cluster REST API that distributes cert+key, WAF rules, rate limits, and cache
+purges to edges. See [EDGE.md](EDGE.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `CP_LISTEN` | `:8443` | API listener address |
+| `CP_METRICS_LISTEN` | `:9187` | Prometheus listener (separate, unauthenticated); `""` disables |
+| `CP_TLS_CERT` / `CP_TLS_KEY` | `""` | Server cert + key → HTTPS. **Both empty** = plaintext HTTP (only on a trusted private network); one-of-two is a config error |
+| `CP_TOKENS` | `""` | Per-edge bearer tokens as JSON: `{"<token>":["acme.com",…]}` or `{"<token>":{"id","domains","disabled"}}` |
+| `CP_TOKENS_FILE` | `""` | Alternative to `CP_TOKENS`: path to that JSON file |
+| `WATCH_NAMESPACE` | `""` (all) | Namespace to watch for cert secrets / WAF / ratelimit ConfigMaps |
+| `POD_NAMESPACE` | `""` | CP's namespace (bounds the global WAF ruleset; holds the managed CA Secret) |
+| `CP_WAF_ENABLED` | `false` | Serve WAF rules to edges (`GET /v1/waf`) |
+| `CP_RATELIMIT_ENABLED` | `false` | Serve rate-limit sets to edges (`GET /v1/ratelimit`) |
+| `CP_EDGE_SIGN_CONCURRENCY` | `GOMAXPROCS` | Max concurrent edge-cert signings (overflow → 503 + Retry-After) |
+| `CP_EDGE_SIGN_RETRY_AFTER` | `5` (s) | `Retry-After` returned when signing is shed |
+| `CP_TRUST_WATCH_CONCURRENCY` | `1024` | Max blocked long-pollers on `GET /v1/trust-bundle?watch=1` (0 disables the cap) |
+| `CP_TRUST_WATCH_RETRY_AFTER` | `5` (s) | `Retry-After` when the watch cap is hit |
+| `CP_EVENTS_ENABLED` | `true` | Serve the `GET /v1/events` SSE change stream |
+| `CP_EVENTS_PING_INTERVAL` | `20` (s) | SSE keep-alive ping interval |
+| `CP_EVENTS_MAX_SUBSCRIBERS` | `1024` | Max concurrent SSE subscribers |
+| `CP_EVENTS_MAX_PER_TOKEN` | `32` | Max SSE subscribers per token |
+| `CP_EVENTS_RETRY_AFTER` | `30` (s) | `Retry-After` when the SSE cap is hit |
+| `CP_PURGE_ENABLED` | `false` | Enable the cache-purge journal (`GET`/`POST /v1/purges`) |
+| `CP_PURGE_ADMIN_TOKEN` | — | Stronger credential required to **issue** a purge (`POST /v1/purges`) |
+| `CP_PURGE_MAX_ENTRIES` | `0` (unbounded) | Per-token purge-journal cap before a conservative fold |
+| `CP_EDGE_METRICS_TTL` | `300` (s) | How long a pushed edge metrics snapshot is served before its series expire |
+| `EDGE_CA_CERT` / `EDGE_CA_KEY` | `""` | Provided-mode edge CA cert + key → enable client-cert issuance + trust bundle |
+| `EDGE_CA_SECRET` | `""` | Managed-mode edge CA Secret in `POD_NAMESPACE` (alternative to the provided files). Neither set ⇒ issuance off |
+| `EDGE_CA_PROVIDED_GENERATION` | cert mtime | Provided-mode CA generation stamp (operator bumps on each rotation) |
+| `EDGE_CA_TTL` | ~2 years | Lifetime for a self-generated/rotated CA |
+| `EDGE_CLIENTCERT_TTL` | `168h` (7d) | Issued edge client-cert lifetime |
+| `EDGE_CLIENTCERT_SKEW` | `10m` | Backdating skew on issued client certs |
+| `EDGE_CA_ROTATION_DEADLINE` | `86400` (s) | When a stuck overlap rotation is flagged via metrics |
+| `EDGE_CA_BOOTSTRAP` | `false` | Run-once Job: self-generate the CA into its Secret, then exit |
+| `EDGE_CA_ROTATE` | `false` | Run-once Job: stage a NEW CA alongside OLD (overlap), then exit |
+| `EDGE_CA_REVOKE` | `false` | Run-once Job: drop the OLD CA after convergence checks, then exit |
+| `EDGE_CA_REVOKE_EDGE_ID` | — | Edge id being revoked (revoke mode) |
+| `EDGE_CA_REVOKE_TIMEOUT` | `30m` | Overall deadline for the revoke convergence wait |
+| `EDGE_CONVERGE_STATUS` | `false` | Run-once: print fleet convergence status, then exit |
+
+The `EDGE_CONVERGE_*` knobs below tune the run-once convergence/revoke Jobs (they
+scrape Prometheus to confirm the fleet has adopted a CA/authz generation before a
+destructive step):
+
+| Variable | Default | Description |
+|---|---|---|
+| `EDGE_CONVERGE_PROM_URL` | — | Prometheus URL to scrape edge/CP/core convergence series |
+| `EDGE_CONVERGE_EXPECTED_CP` / `_CORE` / `_MIN_EDGES` | `0` | Expected reporter counts that must all be present |
+| `EDGE_CONVERGE_EXPECTED_CA_ID` | — | CA id the fleet must report |
+| `EDGE_CONVERGE_EXPECTED_SIGNER_FP` | — | Active-signer fingerprint the fleet must report |
+| `EDGE_CONVERGE_EXPECTED_AUTHZ_GEN` | `0` | Authz generation the fleet must report |
+| `EDGE_CONVERGE_REVOKED_EDGE_ID` | — | Edge id expected to be absent/revoked |
+| `EDGE_CONVERGE_EXCLUDE` | — | Comma-separated ids to exclude from the convergence check |
+| `EDGE_CONVERGE_STABLE_READS` | `2` | Consecutive matching scrapes required |
+| `EDGE_CONVERGE_FRESHNESS` | `5m` | Max age of a scraped series to count |
+| `EDGE_CONVERGE_POLL_INTERVAL` | `30s` | Between convergence evaluations |
+| `EDGE_CONVERGE_SCRAPE_INTERVAL` | `15s` | Between Prometheus scrapes |
+| `EDGE_REFRESH_INTERVAL` | `300s` | The edge poll cadence the Job assumes when computing its wait |
+| `EDGE_CONVERGE_REVOKED_TOKEN` / `_CP_URL` / `_CP_CA` | — | Token + URL + CA to actively probe a revoked edge's access during revoke |
+
+### Edge proxy (`cmd/edge-proxy`)
+
+Out-of-cluster TLS-terminating proxy. See [EDGE.md](EDGE.md).
+
+| Variable | Default | Description |
+|---|---|---|
+| `EDGE_HTTPS_LISTEN` | `0.0.0.0:443` | Public TLS listener |
+| `EDGE_HTTP_LISTEN` | `0.0.0.0:80` | Public HTTP listener; `""` disables |
+| `EDGE_METRICS_LISTEN` | `:9187` | Prometheus listener; `""` disables |
+| `EDGE_CP_ENDPOINT` | `https://controlplane:8443` | Control-plane base URL (must be `https://` unless `EDGE_CP_ALLOW_PLAINTEXT=true`) |
+| `EDGE_CP_ALLOW_PLAINTEXT` | `false` | Allow a non-`https` CP endpoint (trusted private network only) |
+| `EDGE_CP_TOKEN` | — | **Required** per-edge bearer token |
+| `EDGE_CP_CA` | `""` | CA file to verify the CP's TLS (else system roots) |
+| `EDGE_ID` | hostname | Stable logical edge identity (required with `EDGE_DATAPLANE_MTLS`) |
+| `EDGE_INSTANCE_ID` | `""` | Disambiguates replicas sharing one `EDGE_ID` in pushed metrics |
+| `EDGE_DOMAINS` | `""` (serve-all) | Comma-separated domains to serve; empty = on-demand fetch any authorized SNI |
+| `EDGE_REFRESH_INTERVAL` | `300` (s) | Cert/WAF/ratelimit refresh poll cadence |
+| `EDGE_EVENTS_ENABLED` | `true` | Subscribe to the CP's `GET /v1/events` change stream (accelerator over polling) |
+| `WAIT_BEFORE_SHUTDOWN` | `30` (s) | Drain delay on SIGTERM |
+| `DISABLE_LOG` | `false` | Suppress the access log |
+| `TRUST_PROXY` | `""` | Same spec as the controller — set when the edge sits behind another L7 proxy |
+| `EDGE_UPSTREAM_ADDR` | `parapet:80` | Where to forward (the in-cluster parapet) |
+| `EDGE_UPSTREAM_TLS` | `false` | Re-encrypt the upstream hop with TLS |
+| `EDGE_UPSTREAM_SNI` | `""` | SNI/Host for the upstream TLS hop |
+| `EDGE_DATAPLANE_MTLS` | `false` | Present a CP-issued client cert on the upstream hop (requires `EDGE_UPSTREAM_TLS=true` + `EDGE_ID`) |
+| `EDGE_WAF_ENABLED` | `false` | Run the global+zone WAF at the edge |
+| `EDGE_RATELIMIT_ENABLED` | `false` | Enforce the CP-distributed rate limits at the edge (requires `CP_RATELIMIT_ENABLED`) |
+| `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | Same as the controller — `request.country`; `""` disables |
+| `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | Same as the controller — `request.asn`; `""` disables |
+| `EDGE_ONDEMAND_NEG_TTL` | `30` (s) | Serve-all mode: negative-cache TTL for an unauthorized/unknown SNI |
+| `EDGE_ONDEMAND_MAX_INFLIGHT` | `32` | Serve-all mode: max concurrent on-demand cert fetches |
+| `EDGE_METRICS_PUSH_INTERVAL` | `0` (off) | Push the edge's metrics to the CP every N seconds (0 = disabled) |
+| `EDGE_CACHE_ENABLED` | `false` | Enable the HTTP response cache |
+| `EDGE_CACHE_BACKEND` | `disk` | `disk` or `memory` |
+| `EDGE_CACHE_DIR` | `/var/cache/parapet-edge` | Cache root (disk backend only) |
+| `EDGE_CACHE_MAX_SIZE` | `1073741824` (1 GiB) | Total bytes cap, LRU-evicted |
+| `EDGE_CACHE_MAX_FILE_SIZE` | `8388608` (8 MiB) | Per-object bytes cap |
+| `EDGE_CACHE_PURGE_ENABLED` | `true` | Poll for + apply cache purges (needs `CP_PURGE_ENABLED`) |
+| `EDGE_CACHE_PURGE_POLL_INTERVAL` | `10` (s) | Poll `GET /v1/purges` cadence |
+| `EDGE_CACHE_PURGE_MAX_RECORDS` | `65536` | Per-map invalidation-record cap before a conservative fold-to-global |
+| `EDGE_CACHE_PURGE_SWEEP_INTERVAL` | `300` (s) | Background reaper cadence (reclaim invalidated entries off the serving path) |
+| `EDGE_CLIENTCERT_RENEW_REMAINING_FRACTION` | `0.66` | Re-mint the mTLS client cert once this fraction of its life remains |
+| `EDGE_CLIENTCERT_REMINT_JITTER` | `60` (s) | Jitter on proactive re-mints |
+| `EDGE_CLIENTCERT_REMINT_BACKOFF_BASE` | `2` (s) | Base backoff between failed re-mints |
+| `EDGE_CLIENTCERT_REMINT_COOLDOWN` | `5 × refresh` (s) | Min interval between re-mint attempts |
+| `EDGE_CLIENTCERT_REMINT_BREAKER_K` | `3` | Failures before the re-mint breaker trips |
+| `EDGE_CLIENTCERT_REMINT_PROACTIVE_J` | `5` | Proactive re-mint jitter buckets |
 
 ## Web Application Firewall (WAF)
 
