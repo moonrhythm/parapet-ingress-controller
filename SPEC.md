@@ -56,13 +56,14 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 | `basic-auth` | `user:pass` | HTTP Basic Auth |
 | `forward-auth` | YAML (`url`, `authRequestHeaders`, `authResponseHeaders`) | Delegate auth to an external service |
 | `waf-zone` | zone id, or `ns/id` | Bind the Ingress to a WAF zone (see [WAF.md](WAF.md)) |
+| `ratelimit-zone` | zone id (same-namespace only) | **Go-only** Bind the Ingress to a rate-limit zone (see [RATELIMIT.md](RATELIMIT.md)); inert when `RATELIMIT_ENABLED` is off. Cross-namespace refs are NOT honored (zones carry shared counter state) |
 | `operations-trace` / `-project` / `-sampler` | `"true"` / project id / float ratio | **Go-only** Cloud Trace (no Rust SDK; see Profiler/Trace divergence) |
 
 ### Per-request order
 
 1. host normalization → `/healthz` (IP-host only) → host/country concurrency limits
-2. **global WAF** (before routing)
-3. routing → per-route: `allow-remote` → **zone WAF** → `redirect-https` → rate limits → body limit → basic-auth → forward-auth
+2. **global WAF** → **global rate limits** (Go-only, `RATELIMIT_ENABLED`) (before routing)
+3. routing → per-route: `allow-remote` → **zone WAF** → `redirect-https` → **zone rate limits** (Go-only) → annotation rate limits → body limit → basic-auth → forward-auth
 4. upstream proxy (with retry on connection failure + bad-addr skip)
 
 ### Request header normalization (both implementations)
@@ -111,6 +112,24 @@ it via the `parapet/pkg/waf` `ASN` resolver hook (parapet ≥ v0.15.2). When the
 loaded, the resolved value is also sent **upstream** as the `X-Forwarded-ASN` header
 (overwriting any client-supplied value); when ASN lookup is off the header is left
 untouched.
+
+## Rate limiting (ConfigMap-driven, Go-only)
+
+Full design in **[RATELIMIT.md](RATELIMIT.md)**. Summary: gated by
+`RATELIMIT_ENABLED`, a global baseline limit set (ConfigMaps labeled
+`parapet.moonrhythm.io/ratelimit: global`, honored only in `POD_NAMESPACE`)
+plus tenant zones (labeled `…/ratelimit: zone`, zone id = ConfigMap name),
+bound per-Ingress by `ratelimit-zone` — **same-namespace only**, a deliberate
+divergence from `waf-zone` because zones carry shared counter state. Limits
+are `id`/`key` (a characteristic or a composite list: `ip`, `host`, `asn`,
+`country`, `header:<name>`, `cookie:<name>`; the GeoIP-backed keys require the
+`WAF_GEOIP_DB`/`WAF_ASN_DB` databases, which load when either the WAF or rate
+limiting is enabled) / `rate`+`window` (1s..1h) / `algorithm` (fixed, sliding)
+/ `mode` (enforce, shadow) / `status` (429, 503) / `exclude` CIDRs. Reloads are debounced, mux-decoupled, all-or-nothing
+(last-good kept), and preserve live counters for limits whose shaping config
+didn't change. `/.well-known/acme-challenge` is never limited. Counters are
+per-pod; the edge proxy does not enforce these limits and edge cache hits
+bypass them entirely.
 
 ## Edge control plane (cert+key + WAF distribution)
 
@@ -198,10 +217,11 @@ invariants:
 | `TR_MAX_IDLE_CONNS_PER_HOST` | stdlib / 128 | both | Upstream idle pool (Rust: process-global) |
 | `DISABLE_LOG` | `false` | both | Suppress the access log |
 | `WAF_ENABLED` | `false` | both | Master switch for the WAF |
+| `RATELIMIT_ENABLED` | `false` | **Go-only** | Master switch for ConfigMap-driven rate limiting (global + zone sets; see [RATELIMIT.md](RATELIMIT.md)) |
 | `WAF_FAIL_MODE` | `open` | both | `open` (skip on rule error) / `closed` (500) |
 | `WAF_EVAL_TIMEOUT` | `5ms` | both | Per-request ruleset deadline |
-| `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | both | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); sets `request.country`. Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.country` `""`); a missing explicit path is an error |
-| `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | both | Path to an IPLocate ip-to-asn `.mmdb` (flat string `asn`); sets `request.asn`. Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.asn` `0`); a missing explicit path is an error |
+| `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | both | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); sets `request.country` and serves rate-limit `country` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.country` `""`); a missing explicit path is an error |
+| `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | both | Path to an IPLocate ip-to-asn `.mmdb` (flat string `asn`); sets `request.asn` and serves rate-limit `asn` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.asn` `0`); a missing explicit path is an error |
 | `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | **Go-only** | Max header size (no Pingora 0.8 equivalent) |
 | `TR_MAX_CONNS_PER_HOST` | stdlib | **Go-only** | Max conns per host (no Pingora 0.8 equivalent) |
 | `PROFILER` / `PROFILER_NAME` | `false` | **Go-only** | Cloud Profiler (no Rust SDK) |
@@ -229,7 +249,7 @@ the metric exists in both.
 | `parapet_network_request_bytes` / `parapet_network_response_bytes` | both |
 | `parapet_waf_matches{rule_id,action,scope}` | both (note: **no** `_total` suffix) |
 | `parapet_waf_eval_duration_seconds{outcome,scope}` | **Go-only** (histogram of per-request rule-eval latency; `outcome` = `pass\|allow\|block\|error`, fired once per evaluated request — the pass path `parapet_waf_matches` can't see) |
-| `parapet_ratelimit_total{name,result}` | **Go-only** (`result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters) |
+| `parapet_ratelimit_total{name,result}` | **Go-only** (`result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names) |
 | `parapet_connections{state}` | **Go-only** (no Pingora `ConnState` equivalent) |
 | `go_*` runtime, Cloud Profiler/Trace | **Go-only** |
 | `parapet_rejected_requests{reason}`, `parapet_tls_sni_no_cert_total{reason}`, `process_*` (custom `/proc`) | **Rust-only** (Go gets `process_*` from client_golang) |

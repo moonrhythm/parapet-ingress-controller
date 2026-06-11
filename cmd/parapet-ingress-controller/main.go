@@ -52,6 +52,8 @@ func main() {
 	autoH2C := config.Bool("UPSTREAM_AUTO_H2C")
 	autoH2CTTL := config.DurationDefault("UPSTREAM_AUTO_H2C_TTL", 10*time.Minute)
 
+	rateLimitEnabled := config.Bool("RATELIMIT_ENABLED")
+
 	wafConfig := controller.WAFConfig{
 		Enabled:       config.Bool("WAF_ENABLED"),
 		FailClosed:    config.String("WAF_FAIL_MODE") == "closed",
@@ -60,12 +62,14 @@ func main() {
 		InspectBody:   int64(config.Int("WAF_INSPECT_BODY")),
 		DisableMacros: config.Bool("WAF_DISABLE_MACROS"),
 	}
-	// GeoIP databases for the WAF. WAF_GEOIP_DB (request.country) and WAF_ASN_DB
-	// (request.asn) default to the paths baked into the image; set either to a
-	// custom path, or to "" to disable. A missing file at an explicitly-set path
-	// is logged as an error; a missing file at the default path is a quiet no-op
-	// (the DB just wasn't baked). Loading is always non-fatal.
-	if wafConfig.Enabled {
+	// GeoIP databases, shared by the WAF (request.country / request.asn) and by
+	// rate-limit `country` / `asn` keys — loaded when either feature is on.
+	// WAF_GEOIP_DB and WAF_ASN_DB default to the paths baked into the image; set
+	// either to a custom path, or to "" to disable. A missing file at an
+	// explicitly-set path is logged as an error; a missing file at the default
+	// path is a quiet no-op (the DB just wasn't baked). Loading is always
+	// non-fatal.
+	if wafConfig.Enabled || rateLimitEnabled {
 		// dbPath returns (path, explicit): the env value when set ("" disables),
 		// else the baked default (a missing default file is not an error).
 		dbPath := func(env, def string) (string, bool) {
@@ -79,13 +83,13 @@ func main() {
 			db, err := geoip.Open(path)
 			switch {
 			case err != nil && explicit:
-				slog.Error("waf: can not open geoip database; request.country will be empty",
+				slog.Error("geoip: can not open country database; request.country will be empty and ratelimit country keys are rejected",
 					"path", path, "error", err)
 			case err != nil:
-				slog.Debug("waf: no geoip database at default path; request.country disabled",
+				slog.Debug("geoip: no country database at default path; country lookups disabled",
 					"path", path)
 			default:
-				slog.Info("waf: geoip database loaded", "path", path)
+				slog.Info("geoip: country database loaded", "path", path)
 				wafConfig.Country = func(r *http.Request) string {
 					// CountryCached memoizes by client IP so repeat IPs skip the
 					// mmdb lookup; semantics are identical to db.Country.
@@ -101,13 +105,13 @@ func main() {
 			db, err := geoip.OpenASN(path)
 			switch {
 			case err != nil && explicit:
-				slog.Error("waf: can not open asn database; request.asn will be 0",
+				slog.Error("geoip: can not open asn database; request.asn will be 0 and ratelimit asn keys are rejected",
 					"path", path, "error", err)
 			case err != nil:
-				slog.Debug("waf: no asn database at default path; request.asn disabled",
+				slog.Debug("geoip: no asn database at default path; asn lookups disabled",
 					"path", path)
 			default:
-				slog.Info("waf: asn database loaded", "path", path)
+				slog.Info("geoip: asn database loaded", "path", path)
 				wafConfig.ASN = func(r *http.Request) int64 {
 					// ASNCached memoizes by client IP so repeat IPs skip the mmdb
 					// lookup and the per-call strconv.ParseInt; semantics are
@@ -136,6 +140,7 @@ func main() {
 		"http_server_max_header_bytes", httpServerMaxHeaderBytes,
 		"load_all_certs", loadAllCerts,
 		"waf_enabled", wafConfig.Enabled,
+		"ratelimit_enabled", rateLimitEnabled,
 	)
 
 	if enableProfiler {
@@ -171,6 +176,16 @@ func main() {
 	ctrl.PodNamespace = podNamespace
 	ctrl.WAFConfig = wafConfig
 	ctrl.InitWAF()
+	ctrl.RateLimitConfig = controller.RateLimitConfig{
+		Enabled: rateLimitEnabled,
+		// The WAF's GeoIP resolvers double as the ratelimit country/asn key
+		// resolvers (nil when the DB isn't loaded — SetLimits then rejects
+		// limits using those keys, loudly, instead of bucketing everyone
+		// together).
+		Country: wafConfig.Country,
+		ASN:     wafConfig.ASN,
+	}
+	ctrl.InitRateLimit()
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)
 	if wafConfig.Enabled {
@@ -179,6 +194,11 @@ func main() {
 	ctrl.Use(plugin.RedirectHTTPS)
 	ctrl.Use(plugin.InjectHSTS)
 	ctrl.Use(plugin.RedirectRules)
+	if rateLimitEnabled {
+		// Zone rate limits run just before the per-ingress annotation limiters:
+		// coarse tenant-wide limits first, then the ingress's own.
+		ctrl.Use(plugin.RateLimitZone(ctrl.LookupRateLimitZone))
+	}
 	ctrl.Use(plugin.RateLimit)
 	ctrl.Use(plugin.BodyLimit)
 	ctrl.Use(plugin.UpstreamProtocol)
@@ -212,6 +232,15 @@ func main() {
 		// counted above, and request.host is already normalized. Per-zone WAF
 		// runs inside the per-ingress chain (plugin.WAFZone).
 		m.Use(ctrl.GlobalWAF())
+	}
+	if rateLimitEnabled {
+		// Global rate limits run after the global WAF, deliberately: WAF-blocked
+		// traffic never burns rate budget, and a rate-limited client can't dodge
+		// the WAF's matching/metrics. (The reverse order would shed limiter
+		// rejections before spending CEL evaluation on them — chosen against.)
+		// Rejections here are access-logged and counted above, like WAF blocks.
+		// Per-zone limits run inside the per-ingress chain (plugin.RateLimitZone).
+		m.Use(ctrl.GlobalRateLimit())
 	}
 	// Forward the resolved GeoIP country/ASN to upstreams. Mounted only when a DB
 	// is loaded (resolver non-nil); runs just before routing so the headers reach

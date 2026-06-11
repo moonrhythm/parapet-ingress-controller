@@ -28,13 +28,17 @@ unrelated work onto an existing feature branch or commit straight to `main`.
 cmd/parapet-ingress-controller/   # binary entry-point (main.go, config.go)
 controller.go                     # Controller struct — watch/reload logic (generic watchResource)
 controller_waf.go                 # WAF wiring: global instance + zone registry, ConfigMap watch
+controller_ratelimit.go           # rate-limit wiring: global set + zone registry, 2nd ConfigMap watch
 retry.go                          # retryMiddleware — retries idempotent requests on upstream failure
 wafrule/                          # WAF rule YAML DTO + parser (-> []waf.Rule)
+ratelimitrule/                    # rate-limit YAML DTO + parser + runtime (hot-swap Limiter, fixed/sliding strategies)
 geoip/                            # IPLocate ip-to-country/ip-to-asn .mmdb -> request.country/asn (WAF_GEOIP_DB/WAF_ASN_DB)
 plugin/                           # annotation-driven middleware plugins
   plugin.go                       # core plugin type + built-in plugins
   auth.go                         # BasicAuth, ForwardAuth
   waf.go                          # WAFZone — bind ingress to a WAF zone by reference
+  ratelimitzone.go                # RateLimitZone — bind ingress to a rate-limit zone (same-ns only)
+  zone.go                         # ZoneKey — shared zone-reference annotation resolver
   trace.go                        # OpenTelemetry tracing
 proxy/                            # reverse-proxy implementation
   proxy.go, transport.go          # http.ReverseProxy wrapper
@@ -60,7 +64,7 @@ cmd/edge-proxy/                   # out-of-cluster edge proxy binary (parapet fr
 Dockerfile                        # controller image (multi-stage Go build, CGO + cbrotli)
 Dockerfile.edge-controlplane      # control-plane image (pure Go, distroless/static)
 Dockerfile.edge                   # edge proxy image (pure Go, distroless/static + baked GeoIP)
-# also at repo root: deploy/  WAF.md  SPEC.md  EDGE.md  conformance/  rust/ (DEPRECATED + FROZEN — do not edit)
+# also at repo root: deploy/  WAF.md  RATELIMIT.md  SPEC.md  EDGE.md  conformance/  rust/ (DEPRECATED + FROZEN — do not edit)
 # .github/workflows/: go-test / go-build / go-release .yaml (path-filtered to **/*.go + go.mod/go.sum);
 #   edge-build / edge-e2e .yaml build + smoke-test the edge + control-plane images
 ```
@@ -84,7 +88,7 @@ and the upstream hop.
 ## Key concepts
 
 ### Controller lifecycle
-`Controller.Watch()` starts four goroutines that continuously watch Ingress, Service, Secret, and Endpoints resources (plus a fifth, ConfigMaps, when `WAF_ENABLED=true`). Changes are coalesced through a 300 ms `debounce.Debounce` before triggering a reload. On reload, a new `http.ServeMux` is built and swapped in under a `sync.RWMutex` — zero downtime. WAF ConfigMap changes are the exception: they recompile rulesets without rebuilding the mux (see the WAF concept below).
+`Controller.Watch()` starts four goroutines that continuously watch Ingress, Service, Secret, and Endpoints resources (plus a fifth, WAF ConfigMaps, when `WAF_ENABLED=true`, and a sixth, rate-limit ConfigMaps, when `RATELIMIT_ENABLED=true`). Changes are coalesced through a 300 ms `debounce.Debounce` before triggering a reload. On reload, a new `http.ServeMux` is built and swapped in atomically (`atomic.Pointer[routeState]`) — zero downtime. WAF and rate-limit ConfigMap changes are the exception: they recompile their rulesets/limit sets without rebuilding the mux (see the WAF and rate-limit concepts below).
 
 ### Plugins
 A `Plugin` is `func(ctx plugin.Context)` where `Context` carries:
@@ -118,6 +122,13 @@ A CEL-rule firewall on top of `parapet/pkg/waf`. **Full design in [`WAF.md`](WAF
 - **Zones** (`zones atomic.Pointer[map[string]*waf.WAF]`, key `<namespace>/<name>`) — tenant rulesets an ingress binds via `parapet.moonrhythm.io/waf-zone`; `plugin.WAFZone` resolves the key (namespace-local, or `ns/id` cross-ref) and looks up the live registry per request.
 
 Global runs first and is authoritative. **WAF reload is decoupled from the mux**: ConfigMap changes call `reloadWAFDebounced` (recompile + atomic swap) and never rebuild routes; `SetRules` is all-or-nothing so a bad ruleset keeps the last-good one. Rules parse via `wafrule/`; matches count `parapet_waf_matches{rule_id,action,scope}` (`metric/waf.go`). Code: `controller_waf.go`, `plugin/waf.go`, `wafrule/`.
+
+### Rate limiting (opt-in, `RATELIMIT_ENABLED=true`)
+ConfigMap-driven request-rate limits mirroring the WAF's zone model under their own label (`parapet.moonrhythm.io/ratelimit: global|zone`), watched as a 6th resource (separate label key — selectors can't OR — and separate store/debounce). **Full design in [`RATELIMIT.md`](RATELIMIT.md).**
+- **Global** (`globalRateLimit`, mounted right after the global WAF — WAF-blocked traffic never burns rate budget) — only honored from `POD_NAMESPACE`.
+- **Zones** (`rlZones atomic.Pointer[map[string]*ratelimitrule.Limiter]`, key `<namespace>/<name>`) — bound via `parapet.moonrhythm.io/ratelimit-zone`, **same-namespace only** (deliberate divergence from `waf-zone`: zones carry shared counter state, so a cross-ns bind would be a cross-tenant DoS channel; `plugin.RateLimitZone` warns and ignores cross-ns refs).
+
+Limits: `id` / `key` (a characteristic or composite list — `ip` with IPv6-/64 bucketing, `host` with unknown-Host collapsing, `asn`/`country` from the shared GeoIP resolvers (`RateLimitConfig.ASN/Country`; the WAF_GEOIP_DB/WAF_ASN_DB databases load when WAF **or** ratelimit is enabled, and SetLimits rejects geo keys when the resolver is missing), `header:<name>`/`cookie:<name>` with 128-byte value truncation but client-mintable cardinality — see RATELIMIT.md's warning) / `rate`+`window` (1s..1h) / `algorithm` (`fixed` = parapet `FixedWindowStrategy` directly — requires parapet ≥ v0.18.1, whose `After` computes the reset on the epoch grid (parapet#244; an epoch-grid canary test pins the floor); `sliding` = own two-generation-map reimplementation of parapet's math, retained after parapet v0.18.1 fixed the janitor leak (parapet#243) for its zero-goroutine storage, O(1) generation eviction, and stricter backward-clock semantics) / `mode` (`enforce|shadow`) / `status` (429|503) / `exclude` CIDRs. `/.well-known/acme-challenge` is never limited. Reload mirrors the WAF (`rlReloadMu` for the debounce-overlap hazard, fingerprint skip, all-or-nothing `SetLimits` keeps last-good) and additionally **preserves live counters**: unchanged input isn't reapplied, and `SetLimits` carries strategies over when a limit's shaping config didn't change. Decisions count in `parapet_ratelimit_total{name,result}` with names `global:<id>` / `zone:<ns>/<name>:<id>` (the `zone:` prefix avoids colliding with the annotation limiters' `<ns>/<ingress>:<s|m|h>`). Code: `controller_ratelimit.go`, `plugin/ratelimitzone.go`, `ratelimitrule/`.
 
 **GeoIP** (`request.country`): `WAF_GEOIP_DB` defaults to the baked `/geoip/ip-to-country.mmdb` (set `""` to disable; a missing file at the default path is a quiet no-op, a missing explicit path logs an error). `main.go` opens it (`geoip/`, `maxminddb-golang`, flat `country_code` schema, not MaxMind's nested `country.iso_code`) and sets `WAFConfig.Country` to a resolver (client IP via `geoip.ClientIP`, parapet precedence → ISO code, else `"XX"`). `newWAF` assigns it to every WAF's `waf.WAF.Country` (the parapet hook added in v0.15.1), so `request.country` is set on the global and zone rulesets. nil resolver (no DB) → `request.country == ""`.
 
