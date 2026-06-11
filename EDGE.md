@@ -692,6 +692,12 @@ EDGE_CACHE_BACKEND       disk | memory (default disk)
 EDGE_CACHE_DIR           cache root, disk backend only (default /var/cache/parapet-edge)
 EDGE_CACHE_MAX_SIZE      total bytes cap, LRU-evicted (default 1073741824 = 1 GiB)
 EDGE_CACHE_MAX_FILE_SIZE per-object bytes cap (default 8388608 = 8 MiB)
+EDGE_CACHE_CHUNKED       cache GET responses with no Content-Length (chunked /
+                         on-the-fly-compressed bodies — gzip/br/zstd) by buffering
+                         to derive a length (default true; the cap is enforced
+                         mid-stream, SSE is never buffered, and a truncated upstream
+                         is never committed since the forwarder aborts on it). Set
+                         false to cache only Content-Length'd responses.
 EDGE_CACHE_PURGE_ENABLED         poll for + apply cache purges (default true; needs
                                  CP_PURGE_ENABLED on the control plane)
 EDGE_CACHE_PURGE_POLL_INTERVAL   poll GET /v1/purges (default 10s; lower than the

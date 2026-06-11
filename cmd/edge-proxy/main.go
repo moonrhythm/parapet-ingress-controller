@@ -276,6 +276,14 @@ func main() {
 			cacheMetrics := observe.CacheResult()
 			opts := cache.Options{
 				MaxFileSize: maxFile,
+				// Cache GET responses that arrive chunked with no Content-Length —
+				// on-the-fly-compressed assets (gzip/br/zstd) are the common case, and
+				// without this they're permanently uncacheable. Safe here: the edge
+				// forwarder is httputil.ReverseProxy, which panics http.ErrAbortHandler
+				// on a truncated upstream body, so a partial body is never committed
+				// (the cap is still enforced mid-stream, SSE is never buffered). On by
+				// default; EDGE_CACHE_CHUNKED=false reverts to Content-Length-only.
+				CacheChunked: envOr("EDGE_CACHE_CHUNKED", "true") == "true",
 				OnResult: func(r *http.Request, info cache.ResultInfo) {
 					cacheMetrics(r, info)
 					cache.LogResult(r, info)
