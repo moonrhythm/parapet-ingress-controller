@@ -102,8 +102,9 @@ only once a CP rules snapshot has landed, so an edge on its empty boot ruleset
 — or one with `EDGE_WAF_ENABLED=false` — forwards claimless requests that get
 the full core WAF. The edge strips client-supplied claims unconditionally; the
 core deletes the claim from any request it did not skip, so an unvalidated
-claim never reaches CEL rules, the zone WAF, or the upstream (a skipped
-request's claim flows upstream, core-vouched). Everything else (rate limits,
+claim never reaches CEL rules or the zone WAF, and the core's proxy deletes it
+from **every** upstream request regardless of WAF config — the claim is a
+core↔edge wire contract that backends never see. Everything else (rate limits,
 auth, routing, geo headers) is unchanged, and non-matching traffic still gets
 the full WAF. `true` is refused, and a bad spec (malformed CIDR, `edge-mtls`
 without `EDGE_TRUST_CP_ENDPOINT`) is fatal at startup. Edge images that predate

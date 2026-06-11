@@ -363,8 +363,10 @@ once a CP snapshot has landed, and the edge strips any client-supplied claim
 unconditionally — even with `EDGE_WAF_ENABLED=false` (`edge.StripWAFClaim`,
 mounted before the WAF so CEL rules never see a spoofed value either). On the
 core side, the claim is deleted from every request that is *not* skipped, so an
-unvalidated claim never reaches CEL rules, the zone WAF, or the backend; a
-skipped request's claim flows upstream, core-vouched. The claim is what lets
+unvalidated claim never reaches CEL rules or the zone WAF; and the core's proxy
+deletes it from **every** upstream request regardless of WAF config, so the
+backend never sees it — the claim is purely a core↔edge wire contract. It is
+also what lets
 the core tell edges apart **per request**: a WAF-disabled edge, or one still on
 its empty boot ruleset (booted while the CP was unreachable), forwards
 claimless requests — which simply get the full core WAF.

@@ -103,13 +103,13 @@ rules:
 
 	rec, claim := serve(true)
 	assert.Equal(t, http.StatusOK, rec.Code, "validated-at-edge request bypasses the global WAF")
-	assert.Equal(t, "7", claim, "a validated claim is core-vouched and flows upstream")
+	assert.Equal(t, "7", claim, "a validated claim stays in-chain for the zone-WAF skip (the proxy strips it before the backend)")
 
 	rec, _ = serve(false)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "other traffic still evaluates")
 
-	// An unvalidated claim must be deleted before rules/zone/upstream see it —
-	// use a rule that passes so the inner handler can observe the headers.
+	// An unvalidated claim must be deleted before rules and the zone skip see
+	// it — use a rule that passes so the inner handler can observe the headers.
 	ctrl.watchedConfigMaps.Store("ctrl-ns/waf-global", wafCM("ctrl-ns", "waf-global", roleGlobal, `
 rules:
   - id: block-nothing
@@ -119,7 +119,7 @@ rules:
 	ctrl.reloadWAFDebounced()
 	rec, claim = serve(false)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Empty(t, claim, "an unvalidated claim is stripped before the ruleset and upstream")
+	assert.Empty(t, claim, "an unvalidated claim is stripped before the ruleset and the zone skip")
 }
 
 func TestReloadWAF(t *testing.T) {
