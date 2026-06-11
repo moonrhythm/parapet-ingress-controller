@@ -12,18 +12,11 @@ private keys) and WAF rules for the domains that edge serves.
 > framework) are **Go**. They share **only a language-neutral HTTP/JSON contract**
 > (below) on the wire. Per [`CLAUDE.md`](CLAUDE.md) the contract changes here first.
 
-> **Both Go (was: Go control plane + Rust edge).** The edge was originally
-> Rust/Pingora (`rust/edge`) so the control plane and edge shared *nothing* in code
-> — only the HTTP/JSON API. After recurring bugs in pingora 0.8 (the
-> patched-vendored connection-pool / H2-idle leaks; see `rust/Cargo.toml`
-> `[patch.crates-io]`), the edge was **migrated to Go** on the parapet framework,
-> reusing the controller's `cert`/`wafrule`/`geoip` packages and `parapet/pkg/waf`.
-> `rust/edge` has since been **removed** (it soaked in production; recoverable from
-> git history). The control plane and edge still share only the wire contract — no shared
-> in-process state — but, both being Go, they now draw on the same libraries. See
-> [Implementation history](#implementation-history). (An even earlier iteration put
-> a gRPC control plane in `rust/controlplane`; that was superseded when the design
-> moved off keyless to a Go REST service.)
+> **Both Go.** The control plane and edge share only the wire contract — no
+> shared in-process state — but, both being Go, they draw on the same libraries
+> (the controller's `cert`/`wafrule`/`geoip` packages and `parapet/pkg/waf`).
+> (The edge was originally a separate Rust/Pingora implementation that shared
+> *nothing* in code; see [Implementation history](#implementation-history).)
 
 > **Design note — this replaced an earlier *keyless* design.** Keyless TLS (the
 > private key stays in-cluster; the edge calls back to sign each handshake) puts
@@ -261,8 +254,7 @@ are handled. The edge runs **global + zone** WAF as a first layer:
    loaded the edge also forwards `X-Forwarded-Country` / `X-Forwarded-ASN` to
    parapet (overwriting any client value), matching the controller's upstream
    behavior — including forwarding `X-Forwarded-ASN: 0` and `X-Forwarded-Country:
-   XX` for an unplaceable IP when the DB is loaded (the Go edge follows the Go
-   controller here; the former Rust edge omitted the ASN header when `asn==0`).
+   XX` for an unplaceable IP when the DB is loaded.
    With no DB loaded, `country` is `""` and `asn` is `0` and neither header is
    forwarded (the field is always present in the rule map, so a rule never errors)
    — such a rule simply won't early-drop at the edge, but parapet still re-runs it
@@ -327,9 +319,6 @@ shot. A malformed value fails fast at startup. Trust is **by source IP only** �
 it is no stronger than the front proxy's own ingress filtering, so an attacker who
 can reach the edge directly from a trusted CIDR can spoof `X-Forwarded-For`; keep
 the edge reachable only from the front proxy.
-
-> **Implementation parity:** the edge-side `TRUST_PROXY` knob currently exists in
-> the **Go** edge (`cmd/edge-proxy`); the Rust edge does not yet honor it.
 
 ## Response cache at the edge
 
@@ -452,8 +441,7 @@ GET needs a `Content-Length`).
 > /v1/purges`). The lookup gate is the `parapet/pkg/cache`
 > `Options.InvalidatedAfter` hook (parapet **v0.17.0**); the reaper uses
 > `Storage.Range` + the raw host/uri in `Meta` (parapet **v0.17.1**); tag scope
-> uses the surrogate keys in `Meta.Tags` (parapet **v0.17.2**). Pure-Go feature,
-> no Rust counterpart.
+> uses the surrogate keys in `Meta.Tags` (parapet **v0.17.2**).
 
 Invalidation is **pulled from the control plane**, exactly like cert and WAF
 distribution: an operator publishes a purge once at the control plane and every
@@ -653,18 +641,12 @@ language-keyed), so `:edge-<sha>` carried over the Rust→Go migration unchanged
 
 ## Implementation history
 
-The edge was originally **Rust/Pingora** (`rust/edge`, openssl backend, a
-`rust/` workspace member depending on the `controller` crate). It was migrated to
-**Go** on the parapet framework after recurring memory bugs in pingora 0.8 —
-notably the per-peer `ConnectionPool` leak (cloudflare/pingora#748) and the
-downstream HTTP/2 idle-connection leak, both worked around with patched-vendored
-crates (`rust/Cargo.toml` `[patch.crates-io]`) but not fully resolved upstream.
-The Go edge reuses the controller's Go libraries (`cert`, `wafrule`, `geoip`,
-`parapet/pkg/waf`), so it shares the WAF/GeoIP contract by construction and gets
-HTTP/2 `Cookie` reassembly for free from `net/http`. `rust/edge` was **removed**
-after the Go edge soaked in production — it is recoverable from git history if
-needed. (The Rust **controller** implementation stays in `rust/`; only the Rust
-*edge* was retired.)
+The edge was originally **Rust/Pingora**; it was rewritten in **Go** on the
+parapet framework after recurring memory bugs in pingora 0.8 (notably
+cloudflare/pingora#748), letting it reuse the controller's Go libraries (`cert`,
+`wafrule`, `geoip`, `parapet/pkg/waf`) and get HTTP/2 `Cookie` reassembly for
+free from `net/http`. The Rust implementation has since been removed from the
+repo entirely; it is recoverable from git history.
 
 ## Phasing
 

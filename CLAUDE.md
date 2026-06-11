@@ -1,19 +1,11 @@
-# parapet-ingress-controller (Go)
+# parapet-ingress-controller
 
-The Go implementation of parapet-ingress-controller, built on the [parapet](https://github.com/moonrhythm/parapet) middleware framework. It watches Kubernetes Ingress, Service, Secret, ConfigMap, and Endpoints resources and hot-reloads an `http.ServeMux` router without restarting the process.
+A Kubernetes ingress controller built in Go on the [parapet](https://github.com/moonrhythm/parapet) middleware framework. It watches Kubernetes Ingress, Service, Secret, ConfigMap, and Endpoints resources and hot-reloads an `http.ServeMux` router without restarting the process.
 
-> **Go is the sole maintained implementation.** The behavior contract —
-> annotations, env vars, metrics, WAF model, per-request order — is
-> [`SPEC.md`](SPEC.md). This file is the **Go-specific** architecture guide; the
-> Go module lives at the repo root, so the paths below are relative to it. The
-> shared assets (`deploy/`, `WAF.md`, `SPEC.md`, `EDGE.md`, `conformance/`) sit
-> alongside the Go code at the repo root.
->
-> ⚠️ **The Rust implementation (`rust/`) is DEPRECATED and FROZEN. Do not edit
-> any file under `rust/`** — not for new features, not for SPEC parity, not for
-> cleanup. It is kept only for historical reference. SPEC.md is no longer a
-> two-way contract: change behavior in the Go code, and update SPEC.md to match,
-> without porting anything to Rust. The Rust CI workflows have been removed.
+> The behavior contract — annotations, env vars, metrics, WAF model,
+> per-request order — is [`SPEC.md`](SPEC.md): change behavior in the code and
+> update SPEC.md to match. This file is the architecture guide; the Go module
+> lives at the repo root, so the paths below are relative to it.
 
 ## Before starting a task
 
@@ -64,7 +56,7 @@ cmd/edge-proxy/                   # out-of-cluster edge proxy binary (parapet fr
 Dockerfile                        # controller image (multi-stage Go build, CGO + cbrotli)
 Dockerfile.edge-controlplane      # control-plane image (pure Go, distroless/static)
 Dockerfile.edge                   # edge proxy image (pure Go, distroless/static + baked GeoIP)
-# also at repo root: deploy/  WAF.md  RATELIMIT.md  SPEC.md  EDGE.md  conformance/  rust/ (DEPRECATED + FROZEN — do not edit)
+# also at repo root: deploy/  WAF.md  RATELIMIT.md  SPEC.md  EDGE.md  conformance/
 # .github/workflows/: go-test / go-build / go-release .yaml (path-filtered to **/*.go + go.mod/go.sum);
 #   edge-build / edge-e2e .yaml build + smoke-test the edge + control-plane images
 ```
@@ -112,9 +104,9 @@ TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.
 ### Proxy
 `proxy.Proxy` wraps `httputil.ReverseProxy`. The upstream URL is resolved at request time via `route.Table.Lookup`. Protocol is controlled by the `parapet.moonrhythm.io/upstream-protocol` annotation (default: `http`).
 
-On a **connection failure** (dial error — no response from upstream), the proxy's `ErrorHandler` panics; `retryMiddleware` (`retry.go`) recovers it and retries the request (up to 5 times with backoff) — but only when the body hasn't been read, so non-idempotent requests aren't replayed. `proxy.IsRetryable` is **dial-error-only**: an upstream that *responds* — including 502/503 — has processed the request, so its response passes through to the client unchanged rather than being retried (retrying could duplicate side effects and amplify load on a failing backend). This matches the Rust port; see [`SPEC.md`](SPEC.md).
+On a **connection failure** (dial error — no response from upstream), the proxy's `ErrorHandler` panics; `retryMiddleware` (`retry.go`) recovers it and retries the request (up to 5 times with backoff) — but only when the body hasn't been read, so non-idempotent requests aren't replayed. `proxy.IsRetryable` is **dial-error-only**: an upstream that *responds* — including 502/503 — has processed the request, so its response passes through to the client unchanged rather than being retried (retrying could duplicate side effects and amplify load on a failing backend). See [`SPEC.md`](SPEC.md).
 
-**Auto-h2c detection** (opt-in, `UPSTREAM_AUTO_H2C=true`, Go-only): `proxy.EnableAutoH2C(ttl)` swaps the gateway's plain-`http` path for `autoH2CTransport` (`proxy/autoh2c.go`), which speculatively tries h2c first and falls back to HTTP/1.1 when the upstream isn't HTTP/2. Each probe outcome — **positive (h2c) or negative (HTTP/1.1-only)** — is cached in a `sync.Map` **keyed per-Service** (`<ns>/<name>:<port>`, stamped into request `state` as `upstreamKey` by `makeHandler`; falls back to the dialed `host:port`), so the cache stays bounded as pods churn and a new pod of a known Service skips the probe. Entries carry a **TTL** (`UPSTREAM_AUTO_H2C_TTL`, default 10m): on expiry the upstream is re-probed, so a Service that gains or loses h2c support is re-detected without a restart (this replaces the earlier clear-on-reload). A **fresh** cached entry takes the fast path straight to the right transport — so steady h2c traffic is fully multiplexed and never serialized. Only **unknown/expired** upstreams reach the **single-flight** guard (`probing sync.Map`): one request probes while the rest use HTTP/1.1, so a cold start or TTL expiry can't trigger a herd of failed h2c connections. Fallback safety: **only bodyless requests probe.** The h2c client streams any request body as DATA frames (consuming it) before its read loop detects an HTTP/1.1 peer and fails — leaving nothing to replay over HTTP/1.1 and surfacing `http2: frame too large … looked like an HTTP/1.1 header`. So a request carrying a body (`hasBody` ⇒ `ContentLength != 0`, including chunked `-1`) is routed straight to the fallback **without probing or caching**; a later bodyless request establishes the verdict for the whole Service, after which bodied requests ride the cached transport via the fast path. Trade-off: a plain-http upstream that is h2c-only **and** only ever receives bodied requests never auto-upgrades — those should set `appProtocol: h2c` explicitly. A **dial error is not an h2c signal** — it propagates to the retry path and is never cached. WebSocket/Upgrade requests always take HTTP/1.1 (httputil.ReverseProxy has no RFC 8441 HTTP/2 path) and are never probed or cached; `https` and explicit `appProtocol: h2c` upstreams are untouched. Rust is frozen — not ported.
+**Auto-h2c detection** (opt-in, `UPSTREAM_AUTO_H2C=true`, Go-only): `proxy.EnableAutoH2C(ttl)` swaps the gateway's plain-`http` path for `autoH2CTransport` (`proxy/autoh2c.go`), which speculatively tries h2c first and falls back to HTTP/1.1 when the upstream isn't HTTP/2. Each probe outcome — **positive (h2c) or negative (HTTP/1.1-only)** — is cached in a `sync.Map` **keyed per-Service** (`<ns>/<name>:<port>`, stamped into request `state` as `upstreamKey` by `makeHandler`; falls back to the dialed `host:port`), so the cache stays bounded as pods churn and a new pod of a known Service skips the probe. Entries carry a **TTL** (`UPSTREAM_AUTO_H2C_TTL`, default 10m): on expiry the upstream is re-probed, so a Service that gains or loses h2c support is re-detected without a restart (this replaces the earlier clear-on-reload). A **fresh** cached entry takes the fast path straight to the right transport — so steady h2c traffic is fully multiplexed and never serialized. Only **unknown/expired** upstreams reach the **single-flight** guard (`probing sync.Map`): one request probes while the rest use HTTP/1.1, so a cold start or TTL expiry can't trigger a herd of failed h2c connections. Fallback safety: **only bodyless requests probe.** The h2c client streams any request body as DATA frames (consuming it) before its read loop detects an HTTP/1.1 peer and fails — leaving nothing to replay over HTTP/1.1 and surfacing `http2: frame too large … looked like an HTTP/1.1 header`. So a request carrying a body (`hasBody` ⇒ `ContentLength != 0`, including chunked `-1`) is routed straight to the fallback **without probing or caching**; a later bodyless request establishes the verdict for the whole Service, after which bodied requests ride the cached transport via the fast path. Trade-off: a plain-http upstream that is h2c-only **and** only ever receives bodied requests never auto-upgrades — those should set `appProtocol: h2c` explicitly. A **dial error is not an h2c signal** — it propagates to the retry path and is never cached. WebSocket/Upgrade requests always take HTTP/1.1 (httputil.ReverseProxy has no RFC 8441 HTTP/2 path) and are never probed or cached; `https` and explicit `appProtocol: h2c` upstreams are untouched.
 
 ### WAF (opt-in, `WAF_ENABLED=true`)
 A CEL-rule firewall on top of `parapet/pkg/waf`. **Full design in [`WAF.md`](WAF.md).** Two rulesets, both fed by label-marked ConfigMaps (`parapet.moonrhythm.io/waf: global|zone`), watched as a 5th resource:
@@ -136,11 +128,11 @@ Limits: `id` / `key` (a characteristic or composite list — `ip` with IPv6-/64 
 
 ## Annotation & configuration reference
 
-The annotation reference, env-var table, and per-request order are the **shared
-contract** — see [`SPEC.md`](SPEC.md). Go-specific notes: `auth.go` documents
-the `basic-auth` / `forward-auth` formats; all `WAF_*` knobs are honored here,
-including `WAF_COST_LIMIT`, `WAF_INSPECT_BODY`, and `WAF_DISABLE_MACROS` (which
-the Rust port omits — see SPEC's divergence table).
+The annotation reference, env-var table, and per-request order are the
+**contract** — see [`SPEC.md`](SPEC.md). Implementation notes: `auth.go`
+documents the `basic-auth` / `forward-auth` formats; the WAF tunables
+(`WAF_COST_LIMIT`, `WAF_INSPECT_BODY`, `WAF_DISABLE_MACROS`) are documented in
+[`WAF.md`](WAF.md).
 
 ## Build & run
 
@@ -163,7 +155,7 @@ go build -o parapet-ingress-controller \
 
 Before committing, run `gofmt -l .` (must print nothing) and `go vet ./...` — CI
 fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
-`make test` target (Go only; Rust is frozen and no longer built or tested).
+`make test` target.
 
 ### Docker image
 - Builder: `golang:1.26.4-trixie` with `libbrotli-dev` (CGO enabled, `-tags=cbrotli`)
@@ -185,7 +177,7 @@ module github.com/moonrhythm/parapet-ingress-controller
 go 1.26.4
 ```
 
-The module lives at the repo root, so `go install` targets are `…/parapet-ingress-controller/cmd/parapet-ingress-controller`. (A deprecated, frozen Rust implementation lives in `rust/` — kept for reference only; do not edit it.) Key dependencies: `github.com/moonrhythm/parapet`, `k8s.io/client-go`, `go.opentelemetry.io`, `github.com/prometheus/client_golang`, `cloud.google.com/go/profiler`.
+The module lives at the repo root, so `go install` targets are `…/parapet-ingress-controller/cmd/parapet-ingress-controller`. Key dependencies: `github.com/moonrhythm/parapet`, `k8s.io/client-go`, `go.opentelemetry.io`, `github.com/prometheus/client_golang`, `cloud.google.com/go/profiler`.
 
 ## Adding a new plugin
 

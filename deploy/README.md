@@ -1,12 +1,10 @@
 # Deploy
 
-These manifests are **image-agnostic** — they work with either implementation.
-Pick the image stream in `deployment.yaml` / `daemonset.yaml`:
+Set the image in `deployment.yaml` / `daemonset.yaml`:
 
-- Go (parapet): `…/parapet-ingress-controller:<tag>`
-- Rust (Pingora): `…/parapet-ingress-controller:rust-<sha>`
+- `…/parapet-ingress-controller:<tag>`
 
-Both honor the same env vars and RBAC (see [`../SPEC.md`](../SPEC.md)).
+Env vars and RBAC are documented in [`../SPEC.md`](../SPEC.md).
 
 The WAF is off by default. `deployment.yaml` / `daemonset.yaml` carry a
 commented-out opt-in block (`WAF_ENABLED` + `WAF_GEOIP_DB` + `WAF_ASN_DB`); the

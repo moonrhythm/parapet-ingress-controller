@@ -5,9 +5,8 @@
 // layer, optionally caches responses on disk, and forwards to the in-cluster
 // parapet with the X-Forwarded-* headers parapet trusts. See ../EDGE.md.
 //
-// This replaces the former Rust/Pingora edge (rust/edge): same HTTP/JSON control
-// -plane contract, same env contract, same per-request behavior. It reuses the
-// Go controller's cert.Table (SNI resolution), wafrule + parapet/pkg/waf (the
+// The edge reuses the
+// controller's cert.Table (SNI resolution), wafrule + parapet/pkg/waf (the
 // CEL engine), and geoip packages verbatim, so the edge WAF blocks identically
 // to parapet — which remains authoritative and re-runs the full WAF.
 package edge
@@ -40,7 +39,7 @@ const (
 // resolution behaves exactly like parapet). Keys live only here — never written
 // to disk. See EDGE.md "Cert distribution flow".
 //
-// Two-part structure mirrors the Rust edge's CertStore:
+// Two-part structure:
 //   - table: the lock-free SNI index read on every TLS handshake.
 //   - cache: source of truth keyed by the *fetch key* (the domain the edge
 //     requested, e.g. "acme.com" or "*.acme.com"), used to rebuild table and to
@@ -113,7 +112,7 @@ func (s *CertStore) SetOnDemand(fetch func(sni string)) {
 // against the live table; on a miss in serve-all mode it fetches the cert on
 // demand (the handshake blocks on it) and retries. Returns (nil, nil) on a final
 // miss so crypto/tls falls back to tls.Config.Certificates[0] (the self-signed
-// fallback) — it never errors the handshake, matching the Rust edge.
+// fallback) — it never errors the handshake.
 func (s *CertStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if c, _ := s.table.Get(hello); c != nil {
 		return c, nil

@@ -1,19 +1,17 @@
 # GeoIP test fixtures
 
 Two tiny [IPLocate](https://github.com/iplocate/ip-address-databases)-shaped MMDBs
-used by both implementations' GeoIP tests:
+used by the GeoIP tests:
 
-- `iplocate-country.mmdb` (**ip-to-country**) — Go `TestCountryIPLocateSchema`
-  (`geoip/geoip_test.go`), Rust `geoip_decodes_iplocate_flat_schema` /
-  `country_of_resolves_and_falls_back_to_xx` (`rust/controller/src/waf.rs`).
-- `iplocate-asn.mmdb` (**ip-to-asn**) — Go `TestASNIPLocate`, Rust
-  `asn_decodes_iplocate_flat_string` / `asn_of_resolves_and_zero_without_db`.
+- `iplocate-country.mmdb` (**ip-to-country**) — `TestCountryIPLocateSchema`
+  (`geoip/geoip_test.go`).
+- `iplocate-asn.mmdb` (**ip-to-asn**) — `TestASNIPLocate`.
 
 They exist to pin the **record schema**: IPLocate records are *flat* —
 `country_code` / `asn` at the top level — unlike MaxMind GeoIP2, which nests
 country under `country.iso_code`. The file format is a standard MMDB; only the
 layout differs. A decoder that expects MaxMind's nested schema returns nothing
-against the country DB, so these tests fail loudly if either implementation
+against the country DB, so these tests fail loudly if the resolver
 regresses to it. The ip-to-asn `asn` is a *string* (e.g. `"15169"`) that the
 resolver parses to an integer.
 
@@ -46,7 +44,7 @@ mirroring IPLocate's real schema.
 ## Regenerating
 
 The fixture is generated with [`mmdbwriter`](https://github.com/maxmind/mmdbwriter)
-(kept out of the project modules — run it in a scratch dir):
+(kept out of the project module — run it in a scratch dir):
 
 ```bash
 mkdir /tmp/gengeoip && cd /tmp/gengeoip && go mod init gengeoip

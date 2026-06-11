@@ -2,13 +2,11 @@ name: edge-build
 
 # Builds the two edge images and publishes them under the SAME
 # `parapet-ingress-controller` image name as the controller, distinguished by a
-# module prefix on the tag (mirroring the existing `:<sha>` Go / `:rust-<sha>`
-# Rust streams):
+# module prefix on the tag (alongside the controller's `:<sha>` stream):
 #   controlplane-<sha>  — the Go control plane (Dockerfile.edge-controlplane)
 #   edge-<sha>          — the Go edge proxy    (Dockerfile.edge)
-# Both are now Go (the edge was migrated off Rust/Pingora; rust/edge has been removed).
 # See EDGE.md. Triggered when the Go module or the edge manifests change.
-# Auth/registries mirror go-build / rust-build.
+# Auth/registries mirror go-build.
 on:
   push:
     branches:

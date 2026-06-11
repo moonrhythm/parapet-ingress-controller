@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// testDB / asnTestDB are tiny IPLocate-shaped fixtures (flat schemas) shared
-// with the Rust tests under conformance/. See conformance/geoip/README.md.
+// testDB / asnTestDB are tiny IPLocate-shaped fixtures (flat schemas) kept
+// under conformance/. See conformance/geoip/README.md.
 const (
 	testDB    = "../conformance/geoip/iplocate-country.mmdb"
 	asnTestDB = "../conformance/geoip/iplocate-asn.mmdb"

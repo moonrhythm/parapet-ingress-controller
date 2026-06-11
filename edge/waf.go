@@ -45,8 +45,8 @@ func NewEdgeWAF(country func(*http.Request) string, asn func(*http.Request) int6
 		w := waf.New()
 		w.Country = country
 		w.ASN = asn
-		// Edge tunables are fixed (matching the Rust edge's WafConfig::default):
-		// fail-open, 5ms eval timeout (waf's own default when EvalTimeout==0).
+		// Edge tunables are fixed: fail-open, 5ms eval timeout (waf's own
+		// default when EvalTimeout==0).
 		w.Logger = waf.LoggerFunc(func(format string, args ...any) {
 			slog.Debug(fmt.Sprintf(format, args...))
 		})

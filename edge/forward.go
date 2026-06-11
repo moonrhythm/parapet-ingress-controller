@@ -18,7 +18,7 @@ import (
 // parapet. It uses plaintext h2c by default, or re-encrypts with TLS when
 // EDGE_UPSTREAM_TLS=true (presenting EDGE_UPSTREAM_SNI as the SNI/Host for the
 // handshake). It does NOT rewrite the HTTP Host — the original client Host is
-// forwarded, as in the Rust edge.
+// forwarded.
 //
 // The X-Forwarded-For / X-Real-Ip / X-Forwarded-Proto headers are set by the
 // parapet server's own inbound proxy layer. By default the edge is the first hop
@@ -37,9 +37,8 @@ type Forwarder struct {
 // when non-nil (and useTLS), presents the edge's data-plane mTLS client cert on the
 // re-encrypt handshake so the core can CA-only-trust this edge (EDGE_DATAPLANE_MTLS).
 //
-// The plaintext hop is HTTP/1.1, matching the former Rust edge (pingora's
-// HttpPeer with tls=false defaults to HTTP/1.1, not h2c); parapet's :80 accepts
-// it. Re-encrypt uses TLS with InsecureSkipVerify (a cluster-internal hop,
+// The plaintext hop is HTTP/1.1 (not h2c); parapet's :80 accepts it.
+// Re-encrypt uses TLS with InsecureSkipVerify (a cluster-internal hop,
 // matching the controller's upstream posture) — the edge authenticates ITSELF to
 // the core with its client cert; it does not yet verify the core's server cert.
 // onCertReject, when non-nil, fires when the CORE rejects the edge's data-plane client

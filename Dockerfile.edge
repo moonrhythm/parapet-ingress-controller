@@ -44,8 +44,7 @@ RUN mkdir -p /geoip && \
 
 # ---- runtime ----
 # distroless/static provides CA roots + tzdata; the default (root) variant — not
-# :nonroot — so the edge can bind the privileged :443 / :80 ports, matching the
-# former Rust edge image.
+# :nonroot — so the edge can bind the privileged :443 / :80 ports.
 FROM gcr.io/distroless/static-debian12
 
 COPY --from=build /workspace/edge-proxy /usr/local/bin/edge-proxy

@@ -1,12 +1,8 @@
 # Behavior contract
 
-This is the **single source of truth** for what the controller does — the
-contract that **both** implementations ([`./`](.) and [`rust/`](rust/)) must
-honor. When behavior changes, change it here first, then in both implementations
-and the [`conformance/`](conformance/) fixtures.
-
-Anything marked **Go-only** or **Rust-only** is an intentional divergence (with a
-reason); everything else must behave identically across the two binaries.
+This is the **single source of truth** for what the controller does. When
+behavior changes, change it here first, then in the code and the
+[`conformance/`](conformance/) fixtures.
 
 ## IngressClass
 
@@ -29,7 +25,7 @@ Endpoint selection is **round-robin**; an address that fails to dial is marked
 **bad for 2s** and skipped (reactive health — no active probing). Host is
 lowercased and port-stripped before matching.
 
-**Retry is connection-only** (both implementations): a dial failure — or a
+**Retry is connection-only**: a dial failure — or a
 connection broken before any response — is retried up to 5× with backoff,
 marking the pod bad and round-robining to another. An upstream that *responds* —
 **including with 502/503** — is **never** retried; its response passes through to
@@ -56,17 +52,17 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 | `basic-auth` | `user:pass` | HTTP Basic Auth |
 | `forward-auth` | YAML (`url`, `authRequestHeaders`, `authResponseHeaders`) | Delegate auth to an external service |
 | `waf-zone` | zone id, or `ns/id` | Bind the Ingress to a WAF zone (see [WAF.md](WAF.md)) |
-| `ratelimit-zone` | zone id (same-namespace only) | **Go-only** Bind the Ingress to a rate-limit zone (see [RATELIMIT.md](RATELIMIT.md)); inert when `RATELIMIT_ENABLED` is off. Cross-namespace refs are NOT honored (zones carry shared counter state) |
-| `operations-trace` / `-project` / `-sampler` | `"true"` / project id / float ratio | **Go-only** Cloud Trace (no Rust SDK; see Profiler/Trace divergence) |
+| `ratelimit-zone` | zone id (same-namespace only) | Bind the Ingress to a rate-limit zone (see [RATELIMIT.md](RATELIMIT.md)); inert when `RATELIMIT_ENABLED` is off. Cross-namespace refs are NOT honored (zones carry shared counter state) |
+| `operations-trace` / `-project` / `-sampler` | `"true"` / project id / float ratio | Cloud Trace |
 
 ### Per-request order
 
 1. host normalization → `/healthz` (IP-host only) → host/country concurrency limits
-2. **global WAF** → **global rate limits** (Go-only, `RATELIMIT_ENABLED`) (before routing)
-3. routing → per-route: `allow-remote` → **zone WAF** → `redirect-https` → **zone rate limits** (Go-only) → annotation rate limits → body limit → basic-auth → forward-auth
+2. **global WAF** → **global rate limits** (`RATELIMIT_ENABLED`) (before routing)
+3. routing → per-route: `allow-remote` → **zone WAF** → `redirect-https` → **zone rate limits** → annotation rate limits → body limit → basic-auth → forward-auth
 4. upstream proxy (with retry on connection failure + bad-addr skip)
 
-### Request header normalization (both implementations)
+### Request header normalization
 
 Before the WAF reads the request and before forwarding upstream, an HTTP/2
 request's **`Cookie` header must be reassembled into a single field**. Per RFC
@@ -75,13 +71,10 @@ HPACK compression; a proxy must rejoin the crumbs with `"; "` into one
 `Cookie: a=1; b=2` so a backend (or the WAF) that reads only the first field
 doesn't lose cookies — a dropped session cookie shows up as **random forced
 logouts under HTTP/2**, browser-graded (Safari splits most aggressively).
-
-- **Go** gets this for free: `net/http`'s HTTP/2 server reassembles `Cookie`
-  before the request reaches proxy/middleware code — this covers both the Go
-  controller and the Go edge proxy.
-- **Rust** must do it explicitly — **Pingora does not** reassemble; the controller
-  rejoins the crumbs in `request_filter` (`coalesce_cookies`). (The former Rust
-  edge did the same; the edge is now Go and inherits the free reassembly.)
+`net/http`'s HTTP/2 server does this reassembly before the request reaches
+proxy/middleware code, covering both the controller and the edge proxy — but it
+is a load-bearing contract point: any future serving path that bypasses
+`net/http` must reassemble explicitly.
 
 ## WAF
 
@@ -90,15 +83,16 @@ Full design in **[WAF.md](WAF.md)**. Summary: a global baseline ruleset
 `POD_NAMESPACE`) plus tenant zones (labeled `…/waf: zone`, zone id = ConfigMap
 name), bound per-Ingress by `waf-zone` (namespace-local or `ns/id`). CEL rules
 with actions `log` / `allow` / `block`. Global runs first and is authoritative.
-Rule **strings are portable** across both implementations; the
-[`conformance/`](conformance/) CEL corpus guards that.
+The supported rule-authoring surface is pinned by the
+[`conformance/`](conformance/) CEL corpus, so engine upgrades can't silently
+change what a rule matches.
 
 **GeoIP**: `WAF_GEOIP_DB` defaults to the IPLocate ip-to-country `.mmdb` baked into
 the image (set `""` to disable), and rules can filter on `request.country`
 (ISO 3166-1 alpha-2, from the client IP), e.g. `request.country == "TH"` or
 `containsAny(request.country, ["CN", "RU"])`. The field is **always present**: `""`
 when GeoIP is off, `"XX"` when the DB can't place the IP — so it never fails open on
-a missing key. (Go exposes it via the `parapet/pkg/waf` `Country` resolver hook.)
+a missing key. (Exposed via the `parapet/pkg/waf` `Country` resolver hook.)
 When the DB is loaded, the resolved value is also sent **upstream** as the
 `X-Forwarded-Country` header (overwriting any client-supplied value, so it can't be
 spoofed); when GeoIP is off the header is left untouched.
@@ -107,13 +101,13 @@ spoofed); when GeoIP is off the header is left untouched.
 image (set `""` to disable), and rules can filter on `request.asn` (the autonomous
 system number, an **int**, from the client IP), e.g. `request.asn == 13335`. Always
 present: `0` when ASN lookup is off or the IP can't be placed (RFC 7607 reserved, so
-`request.asn == 0` is a usable predicate and the field never fails open). Go exposes
-it via the `parapet/pkg/waf` `ASN` resolver hook (parapet ≥ v0.15.2). When the DB is
+`request.asn == 0` is a usable predicate and the field never fails open). Exposed
+via the `parapet/pkg/waf` `ASN` resolver hook (parapet ≥ v0.15.2). When the DB is
 loaded, the resolved value is also sent **upstream** as the `X-Forwarded-ASN` header
 (overwriting any client-supplied value); when ASN lookup is off the header is left
 untouched.
 
-## Rate limiting (ConfigMap-driven, Go-only)
+## Rate limiting (ConfigMap-driven)
 
 Full design in **[RATELIMIT.md](RATELIMIT.md)**. Summary: gated by
 `RATELIMIT_ENABLED`, a global baseline limit set (ConfigMaps labeled
@@ -138,8 +132,7 @@ Full design in **[EDGE.md](EDGE.md)**. An optional out-of-cluster **edge** proxy
 and runs the WAF. A **Go** in-cluster **control plane** (`cmd/edge-controlplane`)
 distributes, per edge, the cert+key and WAF rules for that edge's domains over an
 **HTTPS REST** API (`GET /v1/certs?sni=…`, `GET /v1/waf`) authenticated by a
-**per-edge bearer token** → allowed domains/zones. (The edge was migrated off the
-former Rust/Pingora implementation, `rust/edge`, since removed.) Contract-relevant
+**per-edge bearer token** → allowed domains/zones. Contract-relevant
 invariants:
 
 - **Cert+key distribution (not keyless)** — the edge holds the cert+key for its
@@ -158,12 +151,10 @@ invariants:
 - **Separate channel** — control plane on its own port/Service (`:8443`), HTTPS +
   bearer token, reachable only by edges over a private path, never on the public
   LoadBalancer.
-- **Both Go** — control plane and edge are both Go. The control plane reuses
-  `cert`, `k8s`, `wafrule`; the edge reuses `cert`, `wafrule`,
-  `geoip`, and `parapet/pkg/waf`. They still share only the HTTP/JSON contract
-  on the wire (no shared in-process state), though both being Go they now draw on
-  the same libraries. (Earlier the edge was Rust/Pingora and shared nothing in
-  code; it was migrated to Go — see EDGE.md "Implementation history".)
+- **Separate processes, shared libraries** — the control plane reuses `cert`,
+  `k8s`, `wafrule`; the edge reuses `cert`, `wafrule`, `geoip`, and
+  `parapet/pkg/waf`. They share only the HTTP/JSON contract on the wire (no
+  shared in-process state).
 - **Response cache (edge-only)** — the edge has an optional disk-backed HTTP
   response cache (`EDGE_CACHE_*`, off by default): **honor-origin** policy (caches
   only on explicit `Cache-Control`/`Expires` freshness; refuses
@@ -173,9 +164,9 @@ invariants:
   the parapet controller does not cache, so there is no controller equivalent and
   no conformance obligation. A cache **hit** is served without contacting parapet,
   so parapet's authoritative WAF does not re-run on hits (only origin-opted-in
-  public content is cached). One Go-edge nuance vs the former Rust edge: a GET is
-  cached only with a `Content-Length` within the per-object cap (chunked GETs pass
-  through uncached, to never store a truncated body). See
+  public content is cached). A GET is cached only with a `Content-Length` within
+  the per-object cap (chunked GETs pass through uncached, to never store a
+  truncated body). See
   [EDGE.md](EDGE.md#response-cache-at-the-edge).
 - **Cache purge (edge-only)** — invalidation is **pulled** from the control plane
   (`GET`/`POST /v1/purges`, a per-edge-scoped journal + cursor), mirroring
@@ -194,65 +185,60 @@ invariants:
   global epoch (over-invalidates, never under-), and disk by the cache's LRU byte
   cap. Issuing a purge needs `CP_PURGE_ADMIN_TOKEN` (a stronger
   credential than the per-edge read tokens). Edge-only — no controller mirror, no
-  conformance obligation, **pure-Go (no Rust counterpart)**. See
+  conformance obligation. See
   [EDGE.md](EDGE.md#purge--invalidation).
 
 ## Configuration (environment variables)
 
-| Variable | Default | Scope | Description |
-|---|---|---|---|
-| `HTTP_PORT` | `80` | both | HTTP (+ h2c) listener port |
-| `HTTPS_PORT` | `443` | both | TLS port; **empty** = HTTP-only; unset = 443 |
-| `INGRESS_CLASS` | `parapet` | both | IngressClassName to handle |
-| `KUBERNETES_BACKEND` | cluster | both | Source of K8s objects: in-cluster watch (default) or `fs` (one-shot load of static manifests, no watch — local dev/smoke tests). **Go-only** also accepts `local` (kubectl proxy at `127.0.0.1:8001`) |
-| `KUBERNETES_FS` | — | both | Directory of static manifests; **required** when `KUBERNETES_BACKEND=fs` |
-| `WATCH_NAMESPACE` | `""` (all) | both | Restrict the watch to one namespace |
-| `POD_NAMESPACE` | `""` | both | Controller's namespace (bounds global WAF rules) |
-| `LOAD_ALL_CERTS` | `false` | both | Index every TLS secret, not just `spec.tls`-referenced |
-| `TRUST_PROXY` | `""` | both | `true`/`false`/CIDRs (+ `cloudflare`/`google`/`bunny`). Whether to honor inbound `X-Forwarded-*` (real client IP) from a trusted front proxy vs. overwrite with the peer. The Go edge proxy honors the same knob to sit behind an L7 proxy (e.g. Cloudflare) — see EDGE.md; the Rust edge does not yet |
-| `WAIT_BEFORE_SHUTDOWN` | `30s` | both | Drain delay on SIGTERM |
-| `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host in-flight cap / queue size. Slot is released when upstream response headers arrive (or on a 101 upgrade), not at end-of-body — so SSE / WebSocket / long-poll streams don't pin a slot for the stream lifetime. The cap exists to shed load while upstreams are *unresponsive*. |
-| `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | both | Per-host+country cap / queue (same release semantics as `HOST_CONCURRENT_CAPACITY`) |
-| `HOST_COUNTRY_HEADER` | `""` | both | Header(s) carrying the country code |
-| `TR_MAX_IDLE_CONNS_PER_HOST` | stdlib / 128 | both | Upstream idle pool (Rust: process-global) |
-| `DISABLE_LOG` | `false` | both | Suppress the access log |
-| `WAF_ENABLED` | `false` | both | Master switch for the WAF |
-| `RATELIMIT_ENABLED` | `false` | **Go-only** | Master switch for ConfigMap-driven rate limiting (global + zone sets; see [RATELIMIT.md](RATELIMIT.md)) |
-| `WAF_FAIL_MODE` | `open` | both | `open` (skip on rule error) / `closed` (500) |
-| `WAF_EVAL_TIMEOUT` | `5ms` | both | Per-request ruleset deadline |
-| `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | both | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); sets `request.country` and serves rate-limit `country` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.country` `""`); a missing explicit path is an error |
-| `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | both | Path to an IPLocate ip-to-asn `.mmdb` (flat string `asn`); sets `request.asn` and serves rate-limit `asn` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.asn` `0`); a missing explicit path is an error |
-| `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | **Go-only** | Max header size (no Pingora 0.8 equivalent) |
-| `TR_MAX_CONNS_PER_HOST` | stdlib | **Go-only** | Max conns per host (no Pingora 0.8 equivalent) |
-| `PROFILER` / `PROFILER_NAME` | `false` | **Go-only** | Cloud Profiler (no Rust SDK) |
-| `WAF_COST_LIMIT` / `WAF_INSPECT_BODY` / `WAF_DISABLE_MACROS` | — | **Go-only** | cel-rust has no cost limit; body inspection is phase-2 |
-| `UPSTREAM_AUTO_H2C` | `false` | **Go-only** | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The verdict (h2c or HTTP/1.1-only) is cached per-Service with a TTL and re-probed on expiry; concurrent probes for a cold/expired upstream are single-flighted so they can't stampede failed connections. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
-| `UPSTREAM_AUTO_H2C_TTL` | `10m` | **Go-only** | How long a cached auto-h2c verdict is trusted before the upstream is re-probed (only when `UPSTREAM_AUTO_H2C` is on) |
-| `UPSTREAM_CONNECT_TIMEOUT` | `2s` | **Rust-only** | TCP connect timeout to a pod (connect phase) |
-| `UPSTREAM_TOTAL_CONNECT_TIMEOUT` | `3s` | **Rust-only** | Connect + TLS-handshake timeout |
-| `DEBUG_ENDPOINTS` | `false` | **Rust-only** | Serve `GET /debug/routes` |
+| Variable | Default | Description |
+|---|---|---|
+| `HTTP_PORT` | `80` | HTTP (+ h2c) listener port |
+| `HTTPS_PORT` | `443` | TLS port; **empty** = HTTP-only; unset = 443 |
+| `INGRESS_CLASS` | `parapet` | IngressClassName to handle |
+| `KUBERNETES_BACKEND` | cluster | Source of K8s objects: in-cluster watch (default), `fs` (one-shot load of static manifests, no watch — local dev/smoke tests), or `local` (kubectl proxy at `127.0.0.1:8001`) |
+| `KUBERNETES_FS` | — | Directory of static manifests; **required** when `KUBERNETES_BACKEND=fs` |
+| `WATCH_NAMESPACE` | `""` (all) | Restrict the watch to one namespace |
+| `POD_NAMESPACE` | `""` | Controller's namespace (bounds global WAF rules) |
+| `LOAD_ALL_CERTS` | `false` | Index every TLS secret, not just `spec.tls`-referenced |
+| `TRUST_PROXY` | `""` | `true`/`false`/CIDRs (+ `cloudflare`/`google`/`bunny`). Whether to honor inbound `X-Forwarded-*` (real client IP) from a trusted front proxy vs. overwrite with the peer. The edge proxy honors the same knob to sit behind an L7 proxy (e.g. Cloudflare) — see EDGE.md |
+| `WAIT_BEFORE_SHUTDOWN` | `30s` | Drain delay on SIGTERM |
+| `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host in-flight cap / queue size. Slot is released when upstream response headers arrive (or on a 101 upgrade), not at end-of-body — so SSE / WebSocket / long-poll streams don't pin a slot for the stream lifetime. The cap exists to shed load while upstreams are *unresponsive*. |
+| `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host+country cap / queue (same release semantics as `HOST_CONCURRENT_CAPACITY`) |
+| `HOST_COUNTRY_HEADER` | `""` | Header(s) carrying the country code |
+| `TR_MAX_IDLE_CONNS_PER_HOST` | stdlib / 128 | Upstream idle pool |
+| `DISABLE_LOG` | `false` | Suppress the access log |
+| `WAF_ENABLED` | `false` | Master switch for the WAF |
+| `RATELIMIT_ENABLED` | `false` | Master switch for ConfigMap-driven rate limiting (global + zone sets; see [RATELIMIT.md](RATELIMIT.md)) |
+| `WAF_FAIL_MODE` | `open` | `open` (skip on rule error) / `closed` (500) |
+| `WAF_EVAL_TIMEOUT` | `5ms` | Per-request ruleset deadline |
+| `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); sets `request.country` and serves rate-limit `country` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.country` `""`); a missing explicit path is an error |
+| `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | Path to an IPLocate ip-to-asn `.mmdb` (flat string `asn`); sets `request.asn` and serves rate-limit `asn` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.asn` `0`); a missing explicit path is an error |
+| `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | Max header size |
+| `TR_MAX_CONNS_PER_HOST` | stdlib | Max conns per host |
+| `PROFILER` / `PROFILER_NAME` | `false` | Cloud Profiler |
+| `WAF_COST_LIMIT` / `WAF_INSPECT_BODY` / `WAF_DISABLE_MACROS` | — | CEL cost cap / body-bytes inspection / macro kill-switch (see WAF.md) |
+| `UPSTREAM_AUTO_H2C` | `false` | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The verdict (h2c or HTTP/1.1-only) is cached per-Service with a TTL and re-probed on expiry; concurrent probes for a cold/expired upstream are single-flighted so they can't stampede failed connections. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
+| `UPSTREAM_AUTO_H2C_TTL` | `10m` | How long a cached auto-h2c verdict is trusted before the upstream is re-probed (only when `UPSTREAM_AUTO_H2C` is on) |
 
 ## Metrics
 
-Prometheus, served on `:9187`. Names/labels match across implementations where
-the metric exists in both.
+Prometheus, served on `:9187`.
 
-| Metric | Scope |
+| Metric | Notes |
 |---|---|
-| `parapet_requests{host,status,method,ingress_name,ingress_namespace,service_type,service_name}` | both |
-| `parapet_service_duration_seconds{service_type,service_namespace,service_name}` | both |
-| `parapet_reload{success}` | both |
-| `parapet_host_active_requests{host,kind}` | both |
-| `parapet_host_ratelimit_requests{host}` | both |
-| `parapet_backend_connections{addr}` | both (Rust = in-flight-per-addr approximation) |
-| `parapet_backend_network_read_bytes{addr}` / `_write_bytes{addr}` | both |
-| `parapet_network_request_bytes` / `parapet_network_response_bytes` | both |
-| `parapet_waf_matches{rule_id,action,scope}` | both (note: **no** `_total` suffix) |
-| `parapet_waf_eval_duration_seconds{outcome,scope}` | **Go-only** (histogram of per-request rule-eval latency; `outcome` = `pass\|allow\|block\|error`, fired once per evaluated request — the pass path `parapet_waf_matches` can't see) |
-| `parapet_ratelimit_total{name,result}` | **Go-only** (`result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names) |
-| `parapet_connections{state}` | **Go-only** (no Pingora `ConnState` equivalent) |
-| `go_*` runtime, Cloud Profiler/Trace | **Go-only** |
-| `parapet_rejected_requests{reason}`, `parapet_tls_sni_no_cert_total{reason}`, `process_*` (custom `/proc`) | **Rust-only** (Go gets `process_*` from client_golang) |
+| `parapet_requests{host,status,method,ingress_name,ingress_namespace,service_type,service_name}` | |
+| `parapet_service_duration_seconds{service_type,service_namespace,service_name}` | |
+| `parapet_reload{success}` | |
+| `parapet_host_active_requests{host,kind}` | |
+| `parapet_host_ratelimit_requests{host}` | |
+| `parapet_backend_connections{addr}` | |
+| `parapet_backend_network_read_bytes{addr}` / `_write_bytes{addr}` | |
+| `parapet_network_request_bytes` / `parapet_network_response_bytes` | |
+| `parapet_waf_matches{rule_id,action,scope}` | note: **no** `_total` suffix |
+| `parapet_waf_eval_duration_seconds{outcome,scope}` | histogram of per-request rule-eval latency; `outcome` = `pass\|allow\|block\|error`, fired once per evaluated request — the pass path `parapet_waf_matches` can't see |
+| `parapet_ratelimit_total{name,result}` | `result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names |
+| `parapet_connections{state}` | per-state connection gauge |
+| `go_*` runtime, `process_*` (client_golang), Cloud Profiler/Trace | |
 
 Host and HTTP-method labels are collapsed to `other` for values the router
 doesn't serve, to bound cardinality under a flood.
@@ -266,21 +252,5 @@ plain HTTP. The set is bounded to `{http, websocket, h2c, sse, other}` so a
 client can't mint unbounded series with arbitrary `Upgrade` values.
 
 The byte counters (`parapet_backend_network_*_bytes`, `parapet_network_*_bytes`)
-share names but **not magnitudes**: Go wraps the `net.Conn` so it counts wire
-bytes (headers + TLS framing included); Rust counts only body bytes seen in the
-filter phases (headers/framing excluded). Treat them as comparable in *shape*,
-not absolute value.
-
-## Intentional Go↔Rust divergences
-
-- **WAF cost limit** — cel-rust has none; Rust checks `WAF_EVAL_TIMEOUT` between
-  rules. **WAF body inspection** is phase-2 in Rust (`request.body` empty).
-- **WAF CEL surface** — Go uses cel-go's full stdlib + macros; Rust uses
-  cel-rust 0.13 (a subset). The portable surface (the contract) is documented in
-  [`WAF.md`](WAF.md#cel-surface): `bool()`/`type()`/`dyn()` and the tz-arg time
-  accessors are Go-only, `max()`/`min()`/`optional.*` are Rust-only,
-  `WAF_DISABLE_MACROS` is Go-only, and no CEL extension libraries are enabled in
-  either.
-- **Cloud Profiler/Trace** are Go-only (no Rust SDK).
-- See [`CLAUDE.md`](CLAUDE.md) and
-  [`rust/README.md`](rust/README.md) for the full per-impl detail.
+count **wire bytes** (headers + TLS framing included) — the `net.Conn` is
+wrapped, so they are not body-byte counts.

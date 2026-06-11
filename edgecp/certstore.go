@@ -25,7 +25,7 @@ type certEntry struct {
 
 // CertStore is an SNI-indexed, hot-swappable view of the cluster's TLS secrets.
 // Lookups do exact match then a single-label wildcard climb, matching
-// go/cert.Table.Get and the Rust cert::Table so all three agree on coverage.
+// cert.Table.Get so the controller and the control plane agree on coverage.
 type CertStore struct {
 	mu     sync.RWMutex
 	byName map[string]*certEntry // SAN (lowercased) -> entry

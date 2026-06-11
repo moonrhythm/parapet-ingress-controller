@@ -18,7 +18,7 @@ import (
 
 // This exercises the full HTTP wire contract a real edge client depends on:
 // the server (NewServer.Handler) behind a real httptest server, driven by a real
-// net/http client doing exactly what the Rust CpClient does — GET
+// net/http client doing exactly what an edge CP client does — GET
 // /v1/certs/{sni} with a bearer token and If-None-Match. It guards the contract
 // in EDGE.md so an accidental change to status codes / headers / JSON shape is
 // caught here.

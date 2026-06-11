@@ -1,6 +1,4 @@
-# Umbrella Makefile. Go is the sole maintained implementation and lives at the
-# repo root. The Rust implementation in rust/ is DEPRECATED and FROZEN — it is
-# no longer built or tested here; do not edit it.
+# Makefile for parapet-ingress-controller (Go, at the repo root).
 .PHONY: test go-test run-local go-build-dev
 
 # Run the test suite.

@@ -4,9 +4,7 @@
 // caches responses on disk, and forwards to the in-cluster parapet with the
 // X-Forwarded-* headers parapet trusts. See ../../EDGE.md.
 //
-// This is the Go re-implementation of the former Rust/Pingora edge: same
-// control-plane HTTP/JSON contract, same EDGE_* env contract, same per-request
-// behavior. It reuses the controller's cert/wafrule/geoip packages and
+// The edge reuses the controller's cert/wafrule/geoip packages and
 // parapet/pkg/waf (the CEL engine), so the edge WAF blocks identically to
 // parapet — which remains authoritative.
 package main

@@ -1,7 +1,8 @@
 # WAF CEL corpus
 
-Canonical CEL rule strings that **must evaluate identically** under cel-go (Go
-controller, via `parapet/pkg/waf`) and cel-rust (Rust controller, `waf.rs`).
+Canonical CEL rule strings whose results are **pinned**: they must keep
+evaluating exactly as specified here under the controller's engine (cel-go, via
+`parapet/pkg/waf`), including across cel-go / `parapet/pkg/waf` upgrades.
 Each case is a rule `expression`, the request fields it reads, and whether it
 should **block** (expression → `true`) with `action: block`.
 
@@ -62,7 +63,7 @@ missing key.
 | 23 | `request.asn != 4808` (allow-list) | `0` (unknown) | yes |
 | 24 | `request.asn != 4808` (allow-list) | `4808` | no |
 
-## Semantics both engines honor
+## Pinned semantics
 
 - **Actions**: `block` terminates (status/message); `allow` short-circuits *this
   ruleset only* and proceeds; `log` records and continues. Rules run ascending by
