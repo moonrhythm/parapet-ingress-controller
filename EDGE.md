@@ -665,6 +665,21 @@ cacheable object locally removes a full origin round trip. Enabled with
   series under a flood. Unless `DISABLE_LOG` is set, each access-log line also
   carries the outcome as a `cacheStatus` field.
 
+  `parapet_cache_egress_bytes{host,result,edge_id}` counts the response-body
+  bytes written to clients by the edge cache, partitioned by cache outcome. It
+  is the billing source for cache-HIT egress: HIT responses are served entirely
+  from the edge store — the origin (parapet core) is never contacted — so those
+  bytes are invisible to `parapet_backend_network_read_bytes` (which only counts
+  origin reads) and to pod-egress kernel counters (which only see traffic that
+  reaches the pod). The `result` label carries `HIT`, `STALE`, or `MISS` for
+  the three cache outcomes that emit an `X-Cache` header; any unexpected value
+  is collapsed to `other` (defense in depth). Responses with no `X-Cache`
+  header (bypass, WebSocket upgrades, etc.) produce no series. The `host` label
+  is bounded by the same known-host oracle as `parapet_requests`: unknown hosts
+  collapse to `"other"` so a Host-flood cannot grow series cardinality. This
+  metric is only registered when the response cache is enabled
+  (`EDGE_CACHE_BACKEND` is set).
+
 ### On-disk layout (sharded by hash)
 
 ```

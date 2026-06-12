@@ -408,6 +408,10 @@ func main() {
 		m.Use(forwardGeoHeaders(country, asn))
 	}
 	if respCache != nil {
+		// CacheEgress sits just outside the cache: it observes X-Cache and
+		// counts body bytes for every managed response (HITs, STALEs, MISSes)
+		// so billing can account for cache-HIT egress that never reaches the origin.
+		m.Use(edge.CacheEgress(edgeHosts.IsKnownHost))
 		m.Use(respCache)
 	}
 	m.Use(forwarder)
