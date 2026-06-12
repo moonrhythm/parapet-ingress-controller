@@ -131,6 +131,7 @@ purges to edges. See [EDGE.md](EDGE.md).
 | `POD_NAMESPACE` | `""` | CP's namespace (bounds the global WAF ruleset; holds the managed CA Secret) |
 | `CP_WAF_ENABLED` | `false` | Serve WAF rules to edges (`GET /v1/waf`) |
 | `CP_RATELIMIT_ENABLED` | `false` | Serve rate-limit sets to edges (`GET /v1/ratelimit`) |
+| `CP_HOSTS_ENABLED` | `true` | Serve the known-hosts oracle to edges (`GET /v1/hosts`) — the edge per-host request metric's allow-list |
 | `CP_EDGE_SIGN_CONCURRENCY` | `GOMAXPROCS` | Max concurrent edge-cert signings (overflow → 503 + Retry-After) |
 | `CP_EDGE_SIGN_RETRY_AFTER` | `5` (s) | `Retry-After` returned when signing is shed |
 | `CP_TRUST_WATCH_CONCURRENCY` | `1024` | Max blocked long-pollers on `GET /v1/trust-bundle?watch=1` (0 disables the cap) |
@@ -215,6 +216,7 @@ Out-of-cluster TLS-terminating proxy. See [EDGE.md](EDGE.md).
 | `EDGE_CACHE_DIR` | `/var/cache/parapet-edge` | Cache root (disk backend only) |
 | `EDGE_CACHE_MAX_SIZE` | `1073741824` (1 GiB) | Total bytes cap, LRU-evicted |
 | `EDGE_CACHE_MAX_FILE_SIZE` | `8388608` (8 MiB) | Per-object bytes cap |
+| `EDGE_CACHE_CHUNKED` | `true` | Cache GET responses with no `Content-Length` (chunked / on-the-fly-compressed bodies — gzip/br/zstd) by buffering to derive a length; the cap is still enforced mid-stream, SSE is never buffered, and a truncated upstream is never committed. `false` caches only `Content-Length`'d responses |
 | `EDGE_CACHE_PURGE_ENABLED` | `true` | Poll for + apply cache purges (needs `CP_PURGE_ENABLED`) |
 | `EDGE_CACHE_PURGE_POLL_INTERVAL` | `10` (s) | Poll `GET /v1/purges` cadence |
 | `EDGE_CACHE_PURGE_MAX_RECORDS` | `65536` | Per-map invalidation-record cap before a conservative fold-to-global |
