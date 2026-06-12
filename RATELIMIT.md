@@ -123,8 +123,10 @@ limits:
     it match.
   - **A runtime eval error fails OPEN** — the limit is skipped for that request,
     never rejected. This mirrors the WAF's fail-open default: a buggy or
-    too-expensive filter can never 429 legitimate traffic. (Filter cost is
-    bounded by the same `WAF_COST_LIMIT`; macros follow `WAF_DISABLE_MACROS`.)
+    too-expensive filter can never 429 legitimate traffic. (In the controller,
+    filter cost is bounded by the same `WAF_COST_LIMIT` and macros follow
+    `WAF_DISABLE_MACROS` — one CEL surface, one operator knob; at the edge the
+    filter uses parapet's defaults, exactly as the edge WAF does.)
   - A bad expression is rejected at **load** (all-or-nothing, like every other
     field): the set keeps its last-good limits and the input is retried, so a
     typo never silently disables a limit at request time.

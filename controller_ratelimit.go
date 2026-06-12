@@ -35,6 +35,13 @@ type RateLimitConfig struct {
 	// limits — the WAF's request.asn resolver. nil makes SetLimits reject asn
 	// keys. Set from WAF_ASN_DB in main.
 	ASN func(*http.Request) int64
+	// FilterCostLimit / FilterDisableMacros bound a limit's CEL `filter` exactly
+	// like a WAF rule. Set from WAF_COST_LIMIT / WAF_DISABLE_MACROS in main, so a
+	// filter — same CEL engine, same tenant-authored trust surface as a WAF zone
+	// rule — is hardened by the same operator knob. Zero values leave the parapet
+	// defaults (cost 1e6, macros enabled).
+	FilterCostLimit     uint64
+	FilterDisableMacros bool
 }
 
 // newRateLimiter builds a Limiter wired with the controller's metric observer,
@@ -50,6 +57,10 @@ func (ctrl *Controller) newRateLimiter(namePrefix string) *ratelimitrule.Limiter
 		KnownHost: ctrl.IsKnownHost,
 		Country:   ctrl.RateLimitConfig.Country,
 		ASN:       ctrl.RateLimitConfig.ASN,
+		// Bound filter CEL with the same knobs as the WAF (WAF_COST_LIMIT /
+		// WAF_DISABLE_MACROS) so the two CEL surfaces are hardened identically.
+		FilterCostLimit:     ctrl.RateLimitConfig.FilterCostLimit,
+		FilterDisableMacros: ctrl.RateLimitConfig.FilterDisableMacros,
 	}
 }
 

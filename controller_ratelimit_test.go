@@ -535,3 +535,38 @@ limits:
 	assert.True(t, do())
 	assert.False(t, do(), "asn key resolves through the wired resolver")
 }
+
+func TestReloadRateLimit_FilterMacroKnobWired(t *testing.T) {
+	t.Parallel()
+
+	// A limit `filter` is bounded by the same operator knob as a WAF rule:
+	// FilterDisableMacros (set from WAF_DISABLE_MACROS) must flow into the
+	// global + zone limiters so a macro-using filter is refused at compile —
+	// proving the wiring, not just the default. The expression is a CEL macro
+	// (exists), which compiles by default but is rejected when macros are off.
+	const macroFilter = `
+limits:
+  - id: f
+    rate: 1
+    window: 1h
+    filter: request.headers.exists(k, k == "x-api-key")
+`
+	// Default config (macros on): the filter compiles, the limit loads.
+	on := newRLController()
+	on.watchedRLConfigMaps.Store("cust1/acme", rlCM("cust1", "acme", roleZone, macroFilter))
+	on.reloadRateLimitDebounced()
+	require.Equal(t, []string{"f"}, on.LookupRateLimitZone("cust1/acme").IDs(),
+		"macros enabled by default: filter compiles")
+
+	// DisableMacros wired through config: the same filter is rejected, so the
+	// zone keeps its (empty) last-good set instead of loading the limit.
+	off := New("", proxy.New())
+	off.PodNamespace = "ctrl-ns"
+	off.RateLimitConfig = RateLimitConfig{Enabled: true, FilterDisableMacros: true}
+	off.InitRateLimit()
+	off.watchedRLConfigMaps.Store("cust1/acme", rlCM("cust1", "acme", roleZone, macroFilter))
+	off.reloadRateLimitDebounced()
+	zone := off.LookupRateLimitZone("cust1/acme")
+	require.NotNil(t, zone)
+	assert.Empty(t, zone.IDs(), "FilterDisableMacros wired: macro filter rejected, last-good kept")
+}

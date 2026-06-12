@@ -271,6 +271,11 @@ func main() {
 		// together).
 		Country: wafConfig.Country,
 		ASN:     wafConfig.ASN,
+		// Bound a limit's CEL `filter` with the same operator knobs as the WAF:
+		// same engine, same tenant-authored trust surface (WAF_COST_LIMIT /
+		// WAF_DISABLE_MACROS feed both).
+		FilterCostLimit:     wafConfig.CostLimit,
+		FilterDisableMacros: wafConfig.DisableMacros,
 	}
 	ctrl.InitRateLimit()
 	ctrl.Use(plugin.InjectStateIngress)

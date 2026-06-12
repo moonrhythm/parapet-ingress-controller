@@ -600,6 +600,10 @@ What to know before enabling:
   per-method limit scopes identically at the edge and the core. `request.body`
   is `""` (no body buffering); a geo reference resolves through the edge's GeoIP
   funcs (unwired ⇒ never matches); a filter eval error fails open (limit skipped).
+  Filter CEL is bounded by parapet's defaults (cost 1e6, macros on) — the edge
+  WAF uses `waf.New()` defaults too, so the two stay consistent (the controller
+  additionally honors `WAF_COST_LIMIT`/`WAF_DISABLE_MACROS`, which the edge has
+  no equivalent of).
 - **Host-key cardinality**: the payload's `hosts` list (every Ingress-declared
   host, scoped per edge) is wired as the Limiter's `KnownHost`, so host-keyed
   buckets for undeclared hosts collapse into one — a random-Host flood can't
