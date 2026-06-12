@@ -73,7 +73,10 @@ enforces the ConfigMap-driven global+zone rate limits (`edge/ratelimit.go`,
 `EDGE_RATELIMIT_ENABLED`, reusing `ratelimitrule` exactly like the controller;
 per-edge counters, mounted after the WAF and before the cache), optionally
 caches responses via `parapet/pkg/cache` (memory or disk backend,
-selected by `EDGE_CACHE_BACKEND`), and forwards to parapet (`edge/forward.go`). Refresh loops are fail-static
+selected by `EDGE_CACHE_BACKEND`; `EDGE_CACHE_CHUNKED` (default on) also caches
+no-`Content-Length` chunked/on-the-fly-compressed bodies by buffering to derive a
+length — safe because the `httputil.ReverseProxy` forwarder aborts on a truncated
+upstream so a partial body never commits), and forwards to parapet (`edge/forward.go`). Refresh loops are fail-static
 (`edge/refresh.go`, `edge/wafrefresh.go`, `edge/ratelimitrefresh.go`); by default the CP's `GET /v1/events`
 SSE change stream (`edge/events.go` + `edgecp/events.go`, `EDGE_EVENTS_ENABLED`/`CP_EVENTS_ENABLED`) pokes
 them on change — a version-vector wake-up signal only, so updates land in seconds while the jittered polls
