@@ -39,6 +39,8 @@ limits:
     message: Too Many Requests
     exclude:                # optional: client CIDRs that skip this limit
       - 10.0.0.0/8
+    filter: |               # optional: CEL expression — limit applies only when true
+      request.method == "POST" && request.path.startsWith("/api/")
 ```
 
 - **`key`** lists the characteristics whose per-request values compose into the
@@ -94,6 +96,43 @@ limits:
 - **`exclude`** skips the limit for matching client IPs — size it for load
   balancer health checkers, which probe many hosts from a small shared CIDR
   and would otherwise aggregate into one `ip` bucket.
+- **`filter`** is an optional CEL expression that **scopes** the limit: empty
+  means "every request", otherwise the limit is evaluated only for requests the
+  expression matches. It is the **exact same surface as the [WAF](WAF.md)** —
+  `request.method`, `request.path`, `request.host`, `request.headers[...]`,
+  `request.country`/`request.asn`, the helpers (`ipInCidr`, `regexMatch`,
+  `containsAny`, `lower`, `urlDecode`, …) — because both compile through one
+  `waf.Predicate` and cannot drift. This is the natural way to write
+  per-route/per-method limits ("100 POSTs/min to `/api/`", "tighter cap on
+  unauthenticated `/login`") without splitting them into separate zones.
+  Semantics that matter:
+  - **`filter` scopes, `key` buckets.** The filter decides *whether* a limit
+    counts a request; the `key` decides *which bucket* it counts into. They
+    compose: `filter: request.path.startsWith("/api/")` + `key: ip` = "per-IP
+    limit, but only on `/api/`".
+  - A request the filter **excludes** passes the limit untouched and is **not
+    counted** for it (`parapet_ratelimit_total` only ever sees in-scope
+    requests). It is a scope gate, not a rejection.
+  - **`request.body` is always `""`** — unlike the WAF, rate limits run early
+    (before the body limit / upstream) and do not buffer the request body, so a
+    `filter` cannot inspect it. Everything else in the request model is present.
+  - A geo reference (`request.country`/`request.asn`) **without the GeoIP
+    database** is *not* a load error here (a geo *key* is — every client would
+    share one bucket). The field is just `""` / `0`, so the filter simply never
+    matches and the limit stays inert. Wire `WAF_GEOIP_DB`/`WAF_ASN_DB` to make
+    it match.
+  - **A runtime eval error fails OPEN** — the limit is skipped for that request,
+    never rejected. This mirrors the WAF's fail-open default: a buggy or
+    too-expensive filter can never 429 legitimate traffic. (In the controller,
+    filter cost is bounded by the same `WAF_COST_LIMIT` and macros follow
+    `WAF_DISABLE_MACROS` — one CEL surface, one operator knob; at the edge the
+    filter uses parapet's defaults, exactly as the edge WAF does.)
+  - A bad expression is rejected at **load** (all-or-nothing, like every other
+    field): the set keeps its last-good limits and the input is retried, so a
+    typo never silently disables a limit at request time.
+  - Editing only a `filter` (leaving `key`/`algorithm`/`rate`/`window`) is a
+    counter-preserving edit — the live buckets survive the reload, exactly like
+    editing `message`.
 
 `/.well-known/acme-challenge` is **never** rate limited (hard-coded, like
 `redirect-https` and `allow-remote`): platform-injected middleware must not
@@ -226,10 +265,12 @@ its last generations until the next request or until its zone is deleted.
   does not relieve this one. Edge **cache hits** never reach the controller
   (uncounted and unlimited here) but ARE limited at the edge when its
   enforcement is on, since edge limits run before its cache.
-- **No request matching.** Limits apply to every request on the bound scope;
-  path/header conditions are the WAF's job (CEL), not a second expression
-  language here. (Keying — who shares a bucket — is the `key` characteristics
-  above; a likely v2 addition is `none`, one aggregate bucket per limit.)
+- **Request matching is the `filter` field** (see the schema above). Each limit
+  may carry a CEL `filter` that scopes it to matching requests, reusing the
+  WAF's expression surface through one shared `waf.Predicate` (so there is *one*
+  expression language, not a second one). Keying — who shares a bucket — stays
+  the `key` characteristics; a likely future addition is `none` (one aggregate
+  bucket per limit).
 - **No concurrency strategies.** In-flight caps stay with the env-configured
   host limiters (`Put`/release semantics don't fit the zone model's
   hot-swapped, take-only chain).
