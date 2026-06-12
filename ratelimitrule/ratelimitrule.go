@@ -84,6 +84,18 @@ type Limit struct {
 	// Exclude lists CIDRs whose client IP skips this limit (health checkers,
 	// trusted probes).
 	Exclude []string `yaml:"exclude"`
+	// Filter is an optional CEL expression (the WAF's expression surface — same
+	// request.* variables and helper functions, via waf.NewPredicate) that gates
+	// whether this limit applies to a request: empty means "always", otherwise
+	// the limit is evaluated only when the expression is true. A request the
+	// filter excludes passes the limit untouched (and is not counted for it). A
+	// runtime eval error fails OPEN (the limit is skipped), so a buggy filter can
+	// never reject legitimate traffic. request.body is always "" here (no body
+	// buffering this early in the chain); a geo reference (request.country/asn)
+	// without the GeoIP database simply never matches, rather than being rejected
+	// at load like a country/asn KEY is. Validated and compiled by
+	// Limiter.SetLimits (a bad expression rejects the whole batch).
+	Filter string `yaml:"filter"`
 }
 
 // Parse parses one or more YAML limit documents (each ConfigMap data value is

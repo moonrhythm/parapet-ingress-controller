@@ -13,6 +13,7 @@ import (
 
 	"github.com/moonrhythm/parapet/pkg/header"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
+	"github.com/moonrhythm/parapet/pkg/waf"
 )
 
 const (
@@ -96,10 +97,14 @@ type compiledLimit struct {
 	message  string
 	exclude  []netip.Prefix
 	observe  ratelimit.ObserveFunc // nil when no Observe factory is wired
+	filter   *waf.Predicate        // nil ⇒ limit always applies (no CEL gate)
 
 	// cfgKey fingerprints the strategy-shaping config (key|algorithm|rate|window).
 	// SetLimits carries the old strategy forward when it is unchanged, so editing
-	// a limit's message — or a sibling limit — never resets live counters.
+	// a limit's message — or a sibling limit — never resets live counters. The
+	// filter is deliberately NOT part of cfgKey: it changes WHICH requests the
+	// limit applies to, not the bucket shaping, so a filter-only edit preserves
+	// live counters (a now-matching request just adds to existing buckets).
 	cfgKey string
 }
 
@@ -111,9 +116,10 @@ type set struct {
 	source      []Limit // normalized input, for introspection
 	needsIP     bool    // any limit keys on ip or carries an exclude list
 	needsCookie bool    // any limit keys on a cookie
+	needsFilter bool    // any limit carries a CEL filter (⇒ build the request snapshot)
 	knownHost   func(host string) bool
-	country     func(*http.Request) string // nil only when no limit keys on country
-	asn         func(*http.Request) int64  // nil only when no limit keys on asn
+	country     func(*http.Request) string // resolver for `country` keys and filter request.country (may be nil)
+	asn         func(*http.Request) int64  // resolver for `asn` keys and filter request.asn (may be nil)
 }
 
 // Limiter is a hot-swappable set of rate limits — the runtime for both the
@@ -154,6 +160,16 @@ type Limiter struct {
 	// WAF's request.asn resolver). nil makes SetLimits reject asn-keyed limits,
 	// for the same reason as Country.
 	ASN func(*http.Request) int64
+
+	// FilterCostLimit caps CEL evaluator cost per filter evaluation (0 ⇒ the
+	// parapet WAF default, defaultCostLimit). Mirrors WAF_COST_LIMIT — set it
+	// from the same knob so a limit filter is bounded exactly like a WAF rule.
+	FilterCostLimit uint64
+
+	// FilterDisableMacros refuses filter expressions that use CEL macros
+	// (all/exists/filter/map/comprehensions), mirroring WAF_DISABLE_MACROS for
+	// the same less-trusted-rules posture. Read at SetLimits, not per request.
+	FilterDisableMacros bool
 }
 
 // Limits returns the normalized limits of the live set (defaults resolved), in
@@ -239,6 +255,9 @@ func (l *Limiter) SetLimits(limits []Limit) error {
 		// silently never match (skip sees a nil IP).
 		if len(compiled[i].exclude) > 0 {
 			s.needsIP = true
+		}
+		if compiled[i].filter != nil {
+			s.needsFilter = true
 		}
 		for _, p := range compiled[i].keyParts {
 			switch p.kind {
@@ -328,6 +347,21 @@ func (l *Limiter) compileLimit(lim Limit) (compiledLimit, Limit, error) {
 		exclude = append(exclude, p)
 	}
 
+	// Filter compiles into a waf.Predicate over the WAF's request model. A bad
+	// expression joins errs, so an invalid filter rejects the whole batch (the
+	// last-good set stays live) — never a request-time surprise. The trimmed
+	// form is kept as the normalized source so introspection round-trips it.
+	var filter *waf.Predicate
+	lim.Filter = strings.TrimSpace(lim.Filter)
+	if lim.Filter != "" {
+		p, err := waf.NewPredicate(lim.Filter, l.filterOptions()...)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("filter: %w", err))
+		} else {
+			filter = p
+		}
+	}
+
 	if err := errors.Join(errs...); err != nil {
 		return compiledLimit{}, Limit{}, err
 	}
@@ -339,6 +373,7 @@ func (l *Limiter) compileLimit(lim Limit) (compiledLimit, Limit, error) {
 		status:   lim.Status,
 		message:  lim.Message,
 		exclude:  exclude,
+		filter:   filter,
 		// Normalized key parts can't contain "," (header/cookie names are HTTP
 		// tokens, which exclude it), so the join is unambiguous.
 		cfgKey: strings.Join(lim.Key, ",") + "|" + lim.Algorithm + "|" + strconv.Itoa(lim.Rate) + "|" + lim.Window,
@@ -357,6 +392,20 @@ func (l *Limiter) compileLimit(lim Limit) (compiledLimit, Limit, error) {
 		c.observe = l.Observe(l.NamePrefix + ":" + lim.ID)
 	}
 	return c, lim, nil
+}
+
+// filterOptions builds the waf.NewPredicate options from the Limiter's filter
+// knobs. Zero values leave the parapet WAF defaults (cost limit, macros on), so
+// an unconfigured Limiter compiles filters exactly like a default WAF rule.
+func (l *Limiter) filterOptions() []waf.PredicateOption {
+	var opts []waf.PredicateOption
+	if l.FilterCostLimit > 0 {
+		opts = append(opts, waf.WithPredicateCostLimit(l.FilterCostLimit))
+	}
+	if l.FilterDisableMacros {
+		opts = append(opts, waf.WithPredicateDisableMacros())
+	}
+	return opts
 }
 
 // compileKeys validates and normalizes a limit's key spec into compiled parts.
@@ -537,11 +586,46 @@ func (s *set) serve(w http.ResponseWriter, r *http.Request, next http.Handler) {
 		}
 	}
 
+	// The filter snapshot (the WAF's request map) is built at most once per
+	// request and shared by every filtered limit, so N filters walk the request
+	// once — not N times. Built lazily on the first filter hit: a set with no
+	// filters (needsFilter false ⇒ getInput never called) pays nothing.
+	// request.body is "" (no body buffering this early in the chain); country/asn
+	// resolve through the same GeoIP funcs the keys use (nil ⇒ "" / 0, which a
+	// geo filter simply never matches against).
+	var input waf.Input
+	inputBuilt := false
+	getInput := func() waf.Input {
+		if !inputBuilt {
+			var country string
+			if s.country != nil {
+				country = s.country(r)
+			}
+			var asn int64
+			if s.asn != nil {
+				asn = s.asn(r)
+			}
+			input = waf.NewInput(r, "", country, asn)
+			inputBuilt = true
+		}
+		return input
+	}
+
 	for i := range s.limits {
 		lim := &s.limits[i]
 
 		if lim.skip(addr) {
 			continue
+		}
+		if lim.filter != nil {
+			// Gate: a false result means the limit is out of scope for this
+			// request — it passes the limit untouched and is NOT counted for it. An
+			// eval error fails OPEN (skip the limit), the deliberate mirror of the
+			// WAF's fail-open default: a broken filter never rejects legitimate
+			// traffic. Cancellation/timeout/cost breaches surface here as errors.
+			if match, err := lim.filter.Eval(r.Context(), getInput()); err != nil || !match {
+				continue
+			}
 		}
 		key := s.bucketKey(lim, r, addr, rawIP, cookies)
 		if lim.strategy.Take(key) {

@@ -592,6 +592,14 @@ What to know before enabling:
   the WAF **or** rate limiting is enabled). Without the DB, `SetLimits`
   rejects the whole set (all-or-nothing) rather than silently bucketing
   everyone together — the edge then keeps last-good (possibly empty) limits.
+- **CEL `filter` parity**: a limit's optional `filter` (scope a limit to
+  matching requests — see [RATELIMIT.md](RATELIMIT.md)) is part of the limit
+  document, so it flows to the edge untouched (docs stay `[]string` end to end;
+  the CP neither parses nor reserializes them) and compiles through the same
+  `waf.Predicate`, evaluating against the edge's own request — so a per-route or
+  per-method limit scopes identically at the edge and the core. `request.body`
+  is `""` (no body buffering); a geo reference resolves through the edge's GeoIP
+  funcs (unwired ⇒ never matches); a filter eval error fails open (limit skipped).
 - **Host-key cardinality**: the payload's `hosts` list (every Ingress-declared
   host, scoped per edge) is wired as the Limiter's `KnownHost`, so host-keyed
   buckets for undeclared hosts collapse into one — a random-Host flood can't

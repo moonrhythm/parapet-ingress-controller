@@ -146,9 +146,16 @@ are `id`/`key` (a characteristic or a composite list: `ip`, `host`, `asn`,
 `country`, `header:<name>`, `cookie:<name>`; the GeoIP-backed keys require the
 `WAF_GEOIP_DB`/`WAF_ASN_DB` databases, which load when either the WAF or rate
 limiting is enabled) / `rate`+`window` (1s..1h) / `algorithm` (fixed, sliding)
-/ `mode` (enforce, shadow) / `status` (429, 503) / `exclude` CIDRs. Reloads are debounced, mux-decoupled, all-or-nothing
+/ `mode` (enforce, shadow) / `status` (429, 503) / `exclude` CIDRs / `filter`
+(an optional CEL expression that **scopes** the limit to matching requests,
+reusing the WAF's exact expression surface via one shared `waf.Predicate` —
+`request.method`/`path`/`headers`/`country`/`asn`, the same helpers; `key` still
+chooses the bucket. `request.body` is always `""` here; a geo reference without
+the database never matches rather than erroring; a runtime eval error **fails
+open** — the limit is skipped, never a rejection; a bad expression is rejected
+at load). Reloads are debounced, mux-decoupled, all-or-nothing
 (last-good kept), and preserve live counters for limits whose shaping config
-didn't change. `/.well-known/acme-challenge` is never limited. Counters are
+(or only the `filter`) didn't change. `/.well-known/acme-challenge` is never limited. Counters are
 per-pod. The edge proxy can opt in to enforcing the same global+zone sets
 (`EDGE_RATELIMIT_ENABLED` + `CP_RATELIMIT_ENABLED`, distributed via
 `GET /v1/ratelimit` like the WAF — see
