@@ -9,6 +9,11 @@ reused verbatim in the controller.
 > `plugin/waf.go`, `wafrule/`), gated by `WAF_ENABLED` (off by default).
 > See [`CLAUDE.md`](CLAUDE.md) and [`SPEC.md`](SPEC.md).
 
+> **Authoring:** [`tools/ruleset-editor.html`](tools/ruleset-editor.html) is a
+> dependency-free, offline editor that builds the WAF ConfigMap visually (its
+> CEL generator is byte-for-byte the deploys-app console's). The same tool also
+> generates [rate-limit](RATELIMIT.md) ConfigMaps — pick the type at the top.
+
 ## Why this shape
 
 The controller is multi-tenant: many customers, many domains, one proxy. The

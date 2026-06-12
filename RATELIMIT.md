@@ -12,6 +12,11 @@ runtime live in [`ratelimitrule/`](ratelimitrule/).
 > work). Controller-only: the edge proxy does not run these limits (see
 > [Scope](#scope-and-non-goals)).
 
+> **Authoring:** [`tools/ruleset-editor.html`](tools/ruleset-editor.html) is a
+> dependency-free, offline editor that builds these ConfigMaps visually — pick
+> *Rate limit* in the type toggle. A limit's `filter:` reuses the same visual CEL
+> builder as the WAF, so it emits exactly the surface the controller evaluates.
+
 This complements, not replaces, the existing limiters:
 
 | Layer | Configured by | What it bounds |

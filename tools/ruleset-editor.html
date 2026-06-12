@@ -3,19 +3,29 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>parapet WAF rule editor</title>
+<title>parapet ruleset editor</title>
 <!--
-  Standalone WAF firewall-rule editor for parapet-ingress-controller.
+  Standalone ruleset editor for parapet-ingress-controller. Generates BOTH the
+  WAF firewall ConfigMap and the rate-limit ConfigMap — pick the type with the
+  toggle at the top.
 
   A single, dependency-free HTML file (open it in any browser — no server, no
-  network). It is a port of the deploys-app console firewall editor: the same
-  visual condition builder and the same CEL generator (the buildExpression /
-  parseExpression logic is copied verbatim so a rule authored here is byte-for-
-  byte what the console would emit), but instead of calling an API it generates
-  the WAF ConfigMap YAML you apply to a cluster.
+  network). The WAF side is a port of the deploys-app console firewall editor:
+  the same visual condition builder and the same CEL generator (the
+  buildExpression / parseExpression logic is copied verbatim so a rule authored
+  here is byte-for-byte what the console would emit), but instead of calling an
+  API it generates the ConfigMap YAML you apply to a cluster.
 
-  Output matches WAF.md: rules map 1:1 onto waf.Rule, wrapped in a ConfigMap
-  carrying the `parapet.moonrhythm.io/waf: global|zone` marker label.
+  The rate-limit side reuses that exact same CEL builder for a limit's optional
+  `filter:` expression — the controller evaluates it through the WAF's CEL
+  surface (waf.Predicate), so a filter built here is the same surface as a rule.
+
+  Output matches the contracts:
+    - WAF.md: rules map 1:1 onto waf.Rule, wrapped in a ConfigMap carrying the
+      `parapet.moonrhythm.io/waf: global|zone` marker label (data key rules.yaml).
+    - RATELIMIT.md: limits map 1:1 onto ratelimitrule.Limit, wrapped in a
+      ConfigMap carrying `parapet.moonrhythm.io/ratelimit: global|zone`
+      (data key limits.yaml).
 -->
 <style>
   :root {
@@ -170,10 +180,14 @@
 <body>
 <div class="wrap">
   <header class="top">
-    <h1>parapet WAF rule editor</h1>
-    <p>Build firewall rules visually and generate a WAF <code class="k">ConfigMap</code> for
+    <h1>parapet ruleset editor</h1>
+    <p>Build WAF firewall rules or rate limits visually and generate the matching <code class="k">ConfigMap</code> for
       <a href="https://github.com/moonrhythm/parapet-ingress-controller" target="_blank" rel="noopener">parapet-ingress-controller</a>.
-      See <a href="../WAF.md" target="_blank" rel="noopener">WAF.md</a> for the contract. Everything runs locally — nothing is sent anywhere.</p>
+      See <a href="../WAF.md" target="_blank" rel="noopener">WAF.md</a> / <a href="../RATELIMIT.md" target="_blank" rel="noopener">RATELIMIT.md</a> for the contracts. Everything runs locally — nothing is sent anywhere.</p>
+    <div class="tabs" id="kind-tabs" style="margin-top:12px">
+      <button data-kind="waf" class="active">WAF firewall</button>
+      <button data-kind="ratelimit">Rate limit</button>
+    </div>
   </header>
 
   <div class="layout">
@@ -207,14 +221,14 @@
         <p class="helper" id="scope-help" style="margin:12px 0 0"></p>
       </div>
 
-      <!-- Rules -->
+      <!-- Rules / Limits -->
       <div class="panel">
-        <h2>Rules</h2>
+        <h2 id="rules-heading">Rules</h2>
         <div id="rules"></div>
         <div class="toolbar">
           <button class="btn primary" id="add-rule">+ Add rule</button>
           <button class="btn" id="load-examples">Load examples</button>
-          <span class="helper">Rules run top→bottom (<code class="k">priority</code> = order). Global runs before any zone.</span>
+          <span class="helper" id="rules-helper">Rules run top→bottom (<code class="k">priority</code> = order). Global runs before any zone.</span>
         </div>
       </div>
     </div>
@@ -659,11 +673,22 @@ function parseExpression (cel) {
  * ==========================================================================*/
 const DEFAULT_STATUS = 403;
 const DEFAULT_MESSAGE = 'Forbidden';
-function genId (taken) {
+function genId (taken, prefix) {
+  prefix = prefix || 'rule';
   let id;
-  do { id = 'rule-' + Math.random().toString(36).slice(2, 8); } while (taken.includes(id));
+  do { id = prefix + '-' + Math.random().toString(36).slice(2, 8); } while (taken.includes(id));
   return id;
 }
+
+// Bucket-key characteristics offered as quick-add chips for a rate limit. The
+// bounded kinds are listed; header:<name> / cookie:<name> are typed free-form.
+const RL_KEY_KINDS = [
+  { value: 'ip', label: 'ip — client IP (IPv6 per /64)' },
+  { value: 'host', label: 'host — request Host' },
+  { value: 'ip-host', label: 'ip-host — per IP per Host' },
+  { value: 'asn', label: 'asn — client ASN (needs ASN DB)' },
+  { value: 'country', label: 'country — client country (needs GeoIP DB)' }
+];
 
 /* ============================================================================
  * YAML generation  (waf.Rule + ConfigMap, per WAF.md)
@@ -721,12 +746,78 @@ function buildConfigMap (cfg, rules) {
 }
 
 /* ============================================================================
+ * YAML generation  (ratelimitrule.Limit + ConfigMap, per RATELIMIT.md)
+ * ==========================================================================*/
+// The inner `limits:` document (no leading indent). Only non-default fields are
+// emitted; id/key/rate/window are always written for legibility. The filter
+// reuses the WAF expression, single-quoted exactly like a rule expression (or a
+// literal block when the raw expression spans multiple lines).
+function buildLimitsYaml (limits) {
+  const lines = ['limits:'];
+  limits.forEach((l) => {
+    lines.push('  - id: ' + yamlScalar(l.id));
+    const keys = (l.key ?? []).map((k) => String(k).trim()).filter(Boolean);
+    const effKeys = keys.length ? keys : ['ip'];
+    if (effKeys.length === 1) {
+      lines.push('    key: ' + yamlScalar(effKeys[0]));
+    } else {
+      lines.push('    key:');
+      effKeys.forEach((k) => lines.push('      - ' + yamlScalar(k)));
+    }
+    const rate = parseInt(l.rate, 10);
+    lines.push('    rate: ' + (Number.isFinite(rate) ? rate : 0));
+    lines.push('    window: ' + yamlScalar((l.window ?? '').trim() || '1m'));
+    if ((l.algorithm || 'fixed') !== 'fixed') lines.push('    algorithm: ' + l.algorithm);
+    if ((l.mode || 'enforce') !== 'enforce') lines.push('    mode: ' + l.mode);
+    const st = parseInt(l.status, 10);
+    if (Number.isFinite(st) && st !== 429) lines.push('    status: ' + st);
+    const msg = (l.message ?? '').trim();
+    if (msg && msg !== 'Too Many Requests') lines.push('    message: ' + yamlScalar(msg));
+    const ex = (l.exclude ?? []).map((c) => String(c).trim()).filter(Boolean);
+    if (ex.length) {
+      lines.push('    exclude:');
+      ex.forEach((c) => lines.push('      - ' + yamlScalar(c)));
+    }
+    const filter = ((l.filter && l.filter.expression) ?? '').trim();
+    if (filter) {
+      if (filter.includes('\n')) {
+        lines.push('    filter: |-');
+        filter.split('\n').forEach((fl) => lines.push('      ' + fl));
+      } else {
+        lines.push('    filter: ' + yamlScalar(filter));
+      }
+    }
+  });
+  return lines.join('\n');
+}
+function buildLimitsConfigMap (cfg, limits) {
+  const inner = buildLimitsYaml(limits);
+  const indented = inner.split('\n').map((l) => (l ? '    ' + l : '')).join('\n');
+  const name = (cfg.name || '').trim() || (cfg.scope === 'global' ? 'ratelimit-global' : 'ratelimit-zone');
+  const ns = (cfg.namespace || '').trim() || 'default';
+  return [
+    'apiVersion: v1',
+    'kind: ConfigMap',
+    'metadata:',
+    '  name: ' + yamlScalar(name),
+    '  namespace: ' + yamlScalar(ns),
+    '  labels:',
+    '    parapet.moonrhythm.io/ratelimit: ' + cfg.scope,
+    'data:',
+    '  limits.yaml: |',
+    indented
+  ].join('\n') + '\n';
+}
+
+/* ============================================================================
  * UI state + rendering
  * ==========================================================================*/
 const state = {
+  kind: 'waf',                 // 'waf' | 'ratelimit'
   cfg: { scope: 'zone', name: 'acme', namespace: 'default' },
   wrap: true,
-  rules: []
+  rules: [],
+  limits: []
 };
 const $ = (sel) => document.querySelector(sel);
 function el (tag, props, ...kids) {
@@ -748,15 +839,28 @@ function newRule () {
   return { id: genId(takenIds()), description: '', expression: '', action: 'log',
     status: DEFAULT_STATUS, message: DEFAULT_MESSAGE, mode: 'visual', combinator: 'and', conditions: [] };
 }
-function canUseVisual (rule) { return parseExpression(rule.expression ?? '') !== null; }
-function syncFromVisual (rule) { rule.expression = buildGroup(rule.combinator, rule.conditions); }
-function reseedVisual (rule) {
-  const parsed = parseExpression(rule.expression ?? '');
+// A "group" is anything with { mode, combinator, conditions, expression } — both
+// a WAF rule and a limit's filter are groups, so the CEL match-section UI below
+// is shared. canUseVisual/syncFromVisual/reseedVisual operate on any group.
+function canUseVisual (group) { return parseExpression(group.expression ?? '') !== null; }
+function syncFromVisual (group) { group.expression = buildGroup(group.combinator, group.conditions); }
+function reseedVisual (group) {
+  const parsed = parseExpression(group.expression ?? '');
   if (!parsed) return false;
-  rule.combinator = parsed.combinator;
-  rule.conditions = parsed.conditions;
+  group.combinator = parsed.combinator;
+  group.conditions = parsed.conditions;
   return true;
 }
+
+/* ---- rate-limit data model ---- */
+function takenLimitIds () { return state.limits.map((l) => l.id); }
+function newFilterGroup () { return { mode: 'visual', combinator: 'and', conditions: [], expression: '' }; }
+function newLimit () {
+  return { id: genId(takenLimitIds(), 'limit'), key: ['ip'], rate: 100, window: '1m',
+    algorithm: 'fixed', mode: 'enforce', status: 429, message: 'Too Many Requests',
+    exclude: [], filter: newFilterGroup() };
+}
+function rerender () { if (state.kind === 'ratelimit') renderLimits(); else renderRules(); }
 
 /* ---- chips widget (multi-value operands) ---- */
 function chipsWidget (list, onchange, opts) {
@@ -812,9 +916,12 @@ function selectEl (value, options, onchange, attrs) {
   return s;
 }
 
-/* ---- one condition row ---- */
-function renderConditionRow (rule, ci) {
-  const cond = rule.conditions[ci];
+/* ---- one condition row ----
+   group: the rule or filter group; hooks: { sync, render, value } so the same
+   row drives a WAF rule list (render = renderRules) or a limit's filter
+   (render = renderLimits) without the row knowing which. */
+function renderConditionRow (group, ci, hooks) {
+  const cond = group.conditions[ci];
   const fieldMeta = getField(cond.field);
   const fieldType = fieldMeta?.type ?? 'string';
   const needsName = !!fieldMeta?.hasName;
@@ -824,8 +931,8 @@ function renderConditionRow (rule, ci) {
   const isMethod = fieldMeta?.value === 'method';
   const useCombobox = !!fieldMeta?.suggestions && (cond.operator === 'equals' || cond.operator === 'not_equals');
 
-  const onVisualChange = () => { syncFromVisual(rule); updateOutput(); };
-  const onStructural = () => { syncFromVisual(rule); renderRules(); };
+  const onVisualChange = () => { hooks.sync(); hooks.value(); };
+  const onStructural = () => { hooks.sync(); hooks.render(); };
 
   const ctrls = el('div', { class: 'ctrls' });
 
@@ -909,8 +1016,67 @@ function renderConditionRow (rule, ci) {
   }
 
   const remove = el('button', { class: 'btn ghost sm', type: 'button', 'aria-label': 'Remove condition', title: 'Remove condition',
-    onclick: () => { rule.conditions.splice(ci, 1); syncFromVisual(rule); renderRules(); } }, '✕');
+    onclick: () => { group.conditions.splice(ci, 1); hooks.sync(); hooks.render(); } }, '✕');
   return el('div', { class: 'cond' }, ctrls, remove);
+}
+
+/* ---- the shared "match" section: Visual/Expression tabs + builder/textarea.
+   Used by a WAF rule card and by a limit's filter, driven by hooks. Returns an
+   array of nodes. opts: { title, sub, placeholder, emptyText }. ---- */
+function buildMatchSection (group, hooks, opts) {
+  const out = [];
+  const visualOk = canUseVisual(group);
+  if (group.mode === 'visual' && !visualOk) group.mode = 'raw';
+
+  const secHead = el('div', { style: 'display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap' });
+  secHead.append(el('div', {}, el('div', { class: 'section-h' }, opts.title),
+    el('div', { class: 'section-sub' }, opts.sub)));
+  const tabs = el('div', { class: 'tabs' });
+  const vBtn = el('button', { type: 'button', class: group.mode === 'visual' ? 'active' : '', disabled: !visualOk,
+    title: visualOk ? '' : 'This expression can’t be shown in the visual editor',
+    onclick: () => { if (visualOk) { reseedVisual(group); group.mode = 'visual'; hooks.render(); } } }, 'Visual');
+  const rBtn = el('button', { type: 'button', class: group.mode === 'raw' ? 'active' : '',
+    onclick: () => { group.mode = 'raw'; hooks.render(); } }, 'Expression');
+  tabs.append(vBtn, rBtn);
+  const clearBtn = el('button', { class: 'btn sm', type: 'button', disabled: !(group.expression || '').trim(),
+    onclick: () => { group.expression = ''; group.conditions = []; group.combinator = 'and'; if (!canUseVisual(group)) group.mode = 'raw'; hooks.render(); } }, 'Clear');
+  secHead.append(el('div', { style: 'display:flex;gap:8px;align-items:center' }, tabs, clearBtn));
+  out.push(secHead);
+
+  if (group.mode === 'visual') {
+    const builder = el('div', { class: 'grid2' });
+    if ((group.conditions || []).length >= 2) {
+      const combine = el('div', { class: 'combine' });
+      combine.append(el('span', { class: 'lbl' }, 'Match when'));
+      const ct = el('div', { class: 'tabs' });
+      ct.append(el('button', { type: 'button', class: group.combinator === 'and' ? 'active' : '',
+        onclick: () => { group.combinator = 'and'; hooks.sync(); hooks.render(); } }, 'ALL (AND)'));
+      ct.append(el('button', { type: 'button', class: group.combinator === 'or' ? 'active' : '',
+        onclick: () => { group.combinator = 'or'; hooks.sync(); hooks.render(); } }, 'ANY (OR)'));
+      combine.append(ct, el('span', { class: 'lbl' }, 'of the conditions match'));
+      builder.append(combine);
+    }
+    if ((group.conditions || []).length === 0) {
+      builder.append(el('p', { class: 'empty' }, opts.emptyText || 'No conditions yet. Add one to start matching requests.'));
+    } else {
+      group.conditions.forEach((_, ci) => {
+        if (ci > 0) builder.append(el('div', { class: 'joiner' }, group.combinator === 'or' ? 'OR' : 'AND'));
+        builder.append(renderConditionRow(group, ci, hooks));
+      });
+    }
+    builder.append(el('div', {},
+      el('button', { class: 'btn sm', type: 'button',
+        onclick: () => { group.conditions.push({ field: 'path', operator: 'equals', value: '' }); hooks.sync(); hooks.render(); } }, '+ Add condition')));
+    out.push(builder);
+  } else {
+    const ta = el('textarea', { class: 'mono', rows: '4', placeholder: opts.placeholder });
+    ta.value = group.expression ?? '';
+    ta.addEventListener('input', () => { group.expression = ta.value; hooks.value(); });
+    // reseed visual availability on blur so the Visual tab re-enables when valid
+    ta.addEventListener('blur', () => hooks.render());
+    out.push(el('label', { class: 'fld' }, el('span', {}, 'Expression (CEL)'), ta));
+  }
+  return out;
 }
 
 /* ---- one rule card ---- */
@@ -941,58 +1107,13 @@ function renderRuleCard (rule, index) {
 
   body.append(el('hr'));
 
-  // condition section header + mode tabs
-  const visualOk = canUseVisual(rule);
-  if (rule.mode === 'visual' && !visualOk) rule.mode = 'raw';
-
-  const secHead = el('div', { style: 'display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap' });
-  secHead.append(el('div', {}, el('div', { class: 'section-h' }, 'When incoming requests match'),
-    el('div', { class: 'section-sub' }, 'Compose visually, or switch to Expression for raw CEL.')));
-  const tabs = el('div', { class: 'tabs' });
-  const vBtn = el('button', { type: 'button', class: rule.mode === 'visual' ? 'active' : '', disabled: !visualOk,
-    title: visualOk ? '' : 'This expression can’t be shown in the visual editor',
-    onclick: () => { if (visualOk) { reseedVisual(rule); rule.mode = 'visual'; renderRules(); } } }, 'Visual');
-  const rBtn = el('button', { type: 'button', class: rule.mode === 'raw' ? 'active' : '',
-    onclick: () => { rule.mode = 'raw'; renderRules(); } }, 'Expression');
-  tabs.append(vBtn, rBtn);
-  const clearBtn = el('button', { class: 'btn sm', type: 'button', disabled: !(rule.expression || '').trim(),
-    onclick: () => { rule.expression = ''; rule.conditions = []; rule.combinator = 'and'; if (!canUseVisual(rule)) rule.mode = 'raw'; renderRules(); } }, 'Clear');
-  secHead.append(el('div', { style: 'display:flex;gap:8px;align-items:center' }, tabs, clearBtn));
-  body.append(secHead);
-
-  if (rule.mode === 'visual') {
-    const builder = el('div', { class: 'grid2' });
-    if (rule.conditions.length >= 2) {
-      const combine = el('div', { class: 'combine' });
-      combine.append(el('span', { class: 'lbl' }, 'Match when'));
-      const ct = el('div', { class: 'tabs' });
-      ct.append(el('button', { type: 'button', class: rule.combinator === 'and' ? 'active' : '',
-        onclick: () => { rule.combinator = 'and'; syncFromVisual(rule); renderRules(); } }, 'ALL (AND)'));
-      ct.append(el('button', { type: 'button', class: rule.combinator === 'or' ? 'active' : '',
-        onclick: () => { rule.combinator = 'or'; syncFromVisual(rule); renderRules(); } }, 'ANY (OR)'));
-      combine.append(ct, el('span', { class: 'lbl' }, 'of the conditions match'));
-      builder.append(combine);
-    }
-    if (rule.conditions.length === 0) {
-      builder.append(el('p', { class: 'empty' }, 'No conditions yet. Add one to start matching requests.'));
-    } else {
-      rule.conditions.forEach((_, ci) => {
-        if (ci > 0) builder.append(el('div', { class: 'joiner' }, rule.combinator === 'or' ? 'OR' : 'AND'));
-        builder.append(renderConditionRow(rule, ci));
-      });
-    }
-    builder.append(el('div', {},
-      el('button', { class: 'btn sm', type: 'button',
-        onclick: () => { rule.conditions.push({ field: 'path', operator: 'equals', value: '' }); syncFromVisual(rule); renderRules(); } }, '+ Add condition')));
-    body.append(builder);
-  } else {
-    const ta = el('textarea', { class: 'mono', rows: '4', placeholder: 'e.g. request.path.startsWith("/admin") && request.method == "POST"' });
-    ta.value = rule.expression ?? '';
-    ta.addEventListener('input', () => { rule.expression = ta.value; updateOutput(); });
-    // reseed visual availability on blur so the Visual tab re-enables when valid
-    ta.addEventListener('blur', () => renderRules());
-    body.append(el('label', { class: 'fld' }, el('span', {}, 'Expression (CEL)'), ta));
-  }
+  // condition section (shared with the limit filter via buildMatchSection)
+  const hooks = { sync: () => syncFromVisual(rule), render: () => renderRules(), value: () => updateOutput() };
+  buildMatchSection(rule, hooks, {
+    title: 'When incoming requests match',
+    sub: 'Compose visually, or switch to Expression for raw CEL.',
+    placeholder: 'e.g. request.path.startsWith("/admin") && request.method == "POST"'
+  }).forEach((n) => body.append(n));
 
   body.append(el('hr'));
 
@@ -1031,20 +1152,149 @@ function renderRules () {
   updateOutput();
 }
 
+/* ---- one rate-limit card ---- */
+function renderLimitCard (limit, index) {
+  const card = el('div', { class: 'rule' });
+
+  // header
+  const head = el('div', { class: 'rule-head' });
+  head.append(el('span', { class: 'idx' }, '#' + (index + 1)));
+  head.append(el('span', { class: 'rid' }, limit.id || '(no id)'));
+  const mode = limit.mode || 'enforce';
+  head.append(el('span', { class: 'badge ' + (mode === 'shadow' ? 'log' : 'block') }, mode));
+  const actions = el('div', { class: 'rule-actions' });
+  actions.append(el('button', { class: 'btn ghost sm', type: 'button', title: 'Move up', disabled: index === 0,
+    onclick: () => { if (index > 0) { [state.limits[index - 1], state.limits[index]] = [state.limits[index], state.limits[index - 1]]; renderLimits(); } } }, '↑'));
+  actions.append(el('button', { class: 'btn ghost sm', type: 'button', title: 'Move down', disabled: index === state.limits.length - 1,
+    onclick: () => { if (index < state.limits.length - 1) { [state.limits[index + 1], state.limits[index]] = [state.limits[index], state.limits[index + 1]]; renderLimits(); } } }, '↓'));
+  actions.append(el('button', { class: 'btn ghost sm danger', type: 'button', title: 'Delete limit',
+    onclick: () => { state.limits.splice(index, 1); renderLimits(); } }, '🗑'));
+  head.append(actions);
+  card.append(head);
+
+  const body = el('div', { class: 'rule-body' });
+
+  // id + rate
+  const idInput = el('input', { type: 'text', class: 'mono', value: limit.id ?? '', placeholder: 'per-ip' });
+  idInput.addEventListener('input', () => { limit.id = idInput.value; head.querySelector('.rid').textContent = limit.id || '(no id)'; updateOutput(); });
+  const rateInput = el('input', { type: 'number', min: '1', value: limit.rate ?? 100, placeholder: '100', inputmode: 'numeric' });
+  rateInput.addEventListener('input', () => { limit.rate = rateInput.value; updateOutput(); });
+  body.append(el('div', { class: 'grid2 cols' },
+    el('label', { class: 'fld' }, el('span', {}, 'ID ', el('span', { class: 'hint' }, '(unique, ≤63, [A-Za-z0-9._-])')), idInput),
+    el('label', { class: 'fld' }, el('span', {}, 'Rate ', el('span', { class: 'hint' }, '(requests per window)')), rateInput)));
+
+  // window + algorithm
+  const winInput = el('input', { type: 'text', class: 'mono', value: limit.window ?? '1m', placeholder: '1m' });
+  winInput.addEventListener('input', () => { limit.window = winInput.value; updateOutput(); });
+  body.append(el('div', { class: 'grid2 cols' },
+    el('label', { class: 'fld' }, el('span', {}, 'Window ', el('span', { class: 'hint' }, '(1s..1h)')), winInput),
+    el('label', { class: 'fld' }, el('span', {}, 'Algorithm'),
+      selectEl(limit.algorithm || 'fixed', [
+        { value: 'fixed', label: 'fixed — window counter (cheapest)' },
+        { value: 'sliding', label: 'sliding — smooths boundary burst' }
+      ], (v) => { limit.algorithm = v; updateOutput(); }))));
+
+  // mode + status
+  body.append(el('div', { class: 'grid2 cols' },
+    el('label', { class: 'fld' }, el('span', {}, 'Mode'),
+      selectEl(mode, [
+        { value: 'enforce', label: 'enforce — reject over the limit' },
+        { value: 'shadow', label: 'shadow — count only, never reject' }
+      ], (v) => { limit.mode = v; renderLimits(); })),
+    el('label', { class: 'fld' }, el('span', {}, 'Status'),
+      selectEl(String(limit.status || 429), [
+        { value: '429', label: '429 Too Many Requests' },
+        { value: '503', label: '503 Service Unavailable' }
+      ], (v) => { limit.status = parseInt(v, 10); updateOutput(); }))));
+
+  // message
+  const msgInput = el('input', { type: 'text', value: limit.message ?? 'Too Many Requests', placeholder: 'Too Many Requests' });
+  msgInput.addEventListener('input', () => { limit.message = msgInput.value; updateOutput(); });
+  body.append(el('label', { class: 'fld' }, el('span', {}, 'Message ', el('span', { class: 'hint' }, '(rejection body)')), msgInput));
+
+  body.append(el('hr'));
+
+  // bucket key
+  const keyWrap = el('div', { class: 'fld' });
+  keyWrap.append(el('div', { class: 'section-h' }, 'Bucket key'));
+  keyWrap.append(el('div', { class: 'section-sub' }, 'Characteristics composed into the per-request counter key. Default ip. header:<name> / cookie:<name> are client-mintable — keep windows short.'));
+  if (!Array.isArray(limit.key)) limit.key = limit.key ? [limit.key] : [];
+  const keyAdder = selectEl('', [{ value: '', label: '+ add characteristic…' }].concat(RL_KEY_KINDS.map((k) => ({ value: k.value, label: k.label }))),
+    (v) => { if (v && !limit.key.includes(v)) { limit.key.push(v); renderLimits(); } });
+  keyWrap.append(el('div', { style: 'height:6px' }), keyAdder, el('div', { style: 'height:6px' }));
+  keyWrap.append(chipsWidget(limit.key, (lst) => { limit.key = lst; renderLimits(); }, { placeholder: 'or type header:x-api-key / cookie:session, Enter to add' }));
+  body.append(keyWrap);
+
+  // exclude CIDRs
+  if (!Array.isArray(limit.exclude)) limit.exclude = [];
+  const exWrap = el('div', { class: 'fld' });
+  exWrap.append(el('div', { class: 'section-h' }, 'Exclude CIDRs ', el('span', { class: 'hint' }, '(optional — client IPs that skip this limit)')));
+  exWrap.append(el('div', { style: 'height:6px' }));
+  exWrap.append(chipsWidget(limit.exclude, (lst) => { limit.exclude = lst; renderLimits(); }, { placeholder: 'e.g. 10.0.0.0/8, Enter to add' }));
+  body.append(exWrap);
+
+  body.append(el('hr'));
+
+  // filter (shared CEL match section; empty ⇒ the limit always applies)
+  if (!limit.filter) limit.filter = newFilterGroup();
+  const hooks = { sync: () => syncFromVisual(limit.filter), render: () => renderLimits(), value: () => updateOutput() };
+  buildMatchSection(limit.filter, hooks, {
+    title: 'Apply this limit only when',
+    sub: 'Optional — leave empty to apply to every request. Same CEL surface as the WAF; a runtime eval error fails open (the limit is skipped).',
+    placeholder: 'e.g. request.method == "POST" && request.path.startsWith("/api/")',
+    emptyText: 'No filter — this limit applies to every request. Add a condition to scope it.'
+  }).forEach((n) => body.append(n));
+
+  card.append(body);
+  return card;
+}
+
+function renderLimits () {
+  const container = $('#rules');
+  container.textContent = '';
+  if (state.limits.length === 0) {
+    container.append(el('p', { class: 'empty', style: 'margin:0 0 14px' }, 'No limits yet. Add a limit, or load the examples below.'));
+  } else {
+    state.limits.forEach((limit, i) => container.append(renderLimitCard(limit, i)));
+  }
+  updateOutput();
+}
+
 /* ---- output + validation ---- */
 function updateOutput () {
-  const yaml = state.wrap ? buildConfigMap(state.cfg, state.rules) : buildRulesYaml(state.rules) + '\n';
-  $('#output').textContent = yaml;
+  const isRL = state.kind === 'ratelimit';
+  const scope = state.cfg.scope;
+
+  // YAML
+  $('#output').textContent = isRL
+    ? (state.wrap ? buildLimitsConfigMap(state.cfg, state.limits) : buildLimitsYaml(state.limits) + '\n')
+    : (state.wrap ? buildConfigMap(state.cfg, state.rules) : buildRulesYaml(state.rules) + '\n');
+
+  // panel chrome that depends on the ruleset type
+  $('#rules-heading').textContent = isRL ? 'Limits' : 'Rules';
+  $('#add-rule').textContent = isRL ? '+ Add limit' : '+ Add rule';
+  $('#rules-helper').innerHTML = isRL
+    ? 'Limits are independent — each keeps its own counters. Global applies to all traffic; zones bind per-ingress.'
+    : 'Rules run top→bottom (<code class="k">priority</code> = order). Global runs before any zone.';
+  const wrapTabs = $('#wrap-tabs').children;
+  if (wrapTabs[1]) wrapTabs[1].textContent = isRL ? 'limits only' : 'rules only';
 
   // contextual config helpers
-  const scope = state.cfg.scope;
+  const feature = isRL ? 'parapet.moonrhythm.io/ratelimit' : 'parapet.moonrhythm.io/waf';
+  const zoneAnno = isRL ? 'parapet.moonrhythm.io/ratelimit-zone' : 'parapet.moonrhythm.io/waf-zone';
   $('#name-label').innerHTML = scope === 'global'
     ? 'Name'
-    : 'Name <span class="hint">(zone id — what an ingress binds via parapet.moonrhythm.io/waf-zone)</span>';
-  $('#label-preview').textContent = 'parapet.moonrhythm.io/waf: ' + scope;
-  $('#scope-help').innerHTML = scope === 'global'
-    ? 'Global rules must live in the controller’s own namespace (<code class="k">POD_NAMESPACE</code>) and are always-on for every request. Platform-team only.'
-    : 'A zone is bound per-ingress with <code class="k">parapet.moonrhythm.io/waf-zone: ' + (escapeHtml((state.cfg.name || 'acme').trim()) || 'acme') + '</code>. Place it in the tenant’s namespace.';
+    : 'Name <span class="hint">(zone id — what an ingress binds via ' + zoneAnno + ')</span>';
+  $('#label-preview').textContent = feature + ': ' + scope;
+  if (isRL) {
+    $('#scope-help').innerHTML = scope === 'global'
+      ? 'Global limits must live in the controller’s own namespace (<code class="k">POD_NAMESPACE</code>) and apply to all traffic. Platform-team only.'
+      : 'A zone is bound per-ingress with <code class="k">' + zoneAnno + ': ' + (escapeHtml((state.cfg.name || 'acme').trim()) || 'acme') + '</code>. Place it in the tenant’s namespace — rate-limit zones are <strong>same-namespace only</strong> (zones carry shared counters).';
+  } else {
+    $('#scope-help').innerHTML = scope === 'global'
+      ? 'Global rules must live in the controller’s own namespace (<code class="k">POD_NAMESPACE</code>) and are always-on for every request. Platform-team only.'
+      : 'A zone is bound per-ingress with <code class="k">' + zoneAnno + ': ' + (escapeHtml((state.cfg.name || 'acme').trim()) || 'acme') + '</code>. Place it in the tenant’s namespace.';
+  }
 
   // notes
   const notes = $('#notes');
@@ -1052,11 +1302,54 @@ function updateOutput () {
   const add = (cls, msg) => notes.append(el('div', { class: 'note ' + cls }, msg));
   if (!(state.cfg.name || '').trim()) add('warn', 'ConfigMap name is empty — using a placeholder. ' + (scope === 'zone' ? 'The name is the zone id.' : ''));
   if (!(state.cfg.namespace || '').trim()) add('warn', 'Namespace is empty — defaulting to "default".');
+  if (isRL) rlNotes(add); else wafNotes(add);
+}
+function wafNotes (add) {
   const empties = state.rules.filter((r) => !(r.expression || '').trim());
   if (empties.length) add('err', empties.length + ' rule(s) have an empty expression and will be dropped — add at least one complete condition.');
   const ids = takenIds();
   if (new Set(ids).size !== ids.length) add('err', 'Duplicate rule ids — each id must be unique within a ruleset.');
   if (state.rules.length && !empties.length && new Set(ids).size === ids.length) add('ok', state.rules.length + ' rule(s) ready. Apply with: kubectl apply -f <file>.yaml');
+}
+function rlNotes (add) {
+  const limits = state.limits;
+  const idRe = /^[A-Za-z0-9._-]{1,63}$/;
+  const noId = limits.filter((l) => !(l.id || '').trim());
+  if (noId.length) add('err', noId.length + ' limit(s) have no id — id is required and labels the metric series.');
+  const badId = limits.filter((l) => (l.id || '').trim() && !idRe.test(l.id.trim()));
+  if (badId.length) add('err', badId.length + ' limit id(s) are invalid — use [A-Za-z0-9._-], at most 63 chars (no "/" or ":").');
+  const ids = limits.map((l) => (l.id || '').trim()).filter(Boolean);
+  const dupes = new Set(ids).size !== ids.length;
+  if (dupes) add('err', 'Duplicate limit ids — each id must be unique within a set.');
+  const badRate = limits.filter((l) => !(parseInt(l.rate, 10) > 0));
+  if (badRate.length) add('err', badRate.length + ' limit(s) need a rate greater than 0.');
+  // window bounds 1s..1h
+  let winErr = 0, winWarn = 0;
+  for (const l of limits) {
+    const w = (l.window || '').trim();
+    const m = /^(\d+)(s|m|h)$/.exec(w);
+    if (!m) { winWarn++; continue; }
+    const secs = parseInt(m[1], 10) * (m[2] === 's' ? 1 : m[2] === 'm' ? 60 : 3600);
+    if (secs < 1 || secs > 3600) winErr++;
+  }
+  if (winErr) add('err', winErr + ' limit(s) have a window outside 1s..1h.');
+  if (winWarn) add('warn', winWarn + ' limit(s) use a window that isn’t a simple 30s / 5m / 1h form — make sure it parses as a Go duration within 1s..1h.');
+  // key sanity
+  const keyRe = /^(ip|host|ip-host|asn|country)$|^(header|cookie):.+$/;
+  let keyWarn = 0, geo = false, clientKeyed = false;
+  for (const l of limits) {
+    for (const k of (l.key || [])) {
+      const kk = String(k).trim();
+      if (!keyRe.test(kk)) keyWarn++;
+      if (kk === 'asn' || kk === 'country') geo = true;
+      if (/^(header|cookie):/.test(kk)) clientKeyed = true;
+    }
+  }
+  if (keyWarn) add('warn', keyWarn + ' key characteristic(s) are unrecognised — valid: ip, host, ip-host, asn, country, header:<name>, cookie:<name>.');
+  if (geo) add('warn', 'asn / country keys require the GeoIP databases (WAF_ASN_DB / WAF_GEOIP_DB) — a limit keyed on them is rejected at load when the DB is missing.');
+  if (clientKeyed) add('warn', 'A header:/cookie: key is client-mintable — keep the window short and prefer mode: shadow first (see RATELIMIT.md’s cardinality warning).');
+  const clean = !noId.length && !badId.length && !dupes && !badRate.length && !winErr;
+  if (limits.length && clean) add('ok', limits.length + ' limit(s) ready. Apply with: kubectl apply -f <file>.yaml');
 }
 function escapeHtml (s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 
@@ -1083,6 +1376,27 @@ function loadExamples () {
   renderRules();
 }
 
+// Build the rate-limit examples. Does NOT touch state.cfg, so it can seed the
+// limit list on first switch without clobbering a name/namespace set in the WAF
+// view; loadLimitExamples (the button) resets cfg like loadExamples does.
+function makeLimitExamples () {
+  const withFilter = (conds) => { const f = newFilterGroup(); f.conditions = conds; syncFromVisual(f); return f; };
+  return [
+    Object.assign(newLimit(), { id: 'per-ip', key: ['ip'], rate: 100, window: '1m', algorithm: 'fixed', mode: 'enforce' }),
+    Object.assign(newLimit(), { id: 'login-burst', key: ['ip'], rate: 5, window: '1m', algorithm: 'sliding', mode: 'enforce',
+      filter: withFilter([{ field: 'method', operator: 'equals', value: 'POST' }, { field: 'path', operator: 'starts_with', value: '/login' }]) }),
+    Object.assign(newLimit(), { id: 'per-api-key', key: ['header:x-api-key'], rate: 1000, window: '1m', mode: 'shadow' })
+  ];
+}
+function loadLimitExamples () {
+  state.cfg = { scope: 'zone', name: 'acme', namespace: 'acme-prod' };
+  $('#cfg-scope').value = 'zone';
+  $('#cfg-name').value = 'acme';
+  $('#cfg-namespace').value = 'acme-prod';
+  state.limits = makeLimitExamples();
+  renderLimits();
+}
+
 function init () {
   ensureDatalists();
   // config inputs
@@ -1093,8 +1407,22 @@ function init () {
   $('#cfg-name').addEventListener('input', (e) => { state.cfg.name = e.target.value; updateOutput(); });
   $('#cfg-namespace').addEventListener('input', (e) => { state.cfg.namespace = e.target.value; updateOutput(); });
 
-  $('#add-rule').addEventListener('click', () => { state.rules.push(newRule()); renderRules(); });
-  $('#load-examples').addEventListener('click', loadExamples);
+  // ruleset type toggle — seed the rate-limit examples the first time the user
+  // switches to it (without clobbering cfg) so the view isn't empty.
+  let rlSeeded = false;
+  $('#kind-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.kind = b.dataset.kind;
+    for (const x of $('#kind-tabs').children) x.classList.toggle('active', x === b);
+    if (state.kind === 'ratelimit' && !rlSeeded && state.limits.length === 0) { rlSeeded = true; state.limits = makeLimitExamples(); }
+    rerender();
+  });
+
+  $('#add-rule').addEventListener('click', () => {
+    if (state.kind === 'ratelimit') { state.limits.push(newLimit()); renderLimits(); }
+    else { state.rules.push(newRule()); renderRules(); }
+  });
+  $('#load-examples').addEventListener('click', () => { if (state.kind === 'ratelimit') loadLimitExamples(); else loadExamples(); });
 
   // output wrap tabs
   $('#wrap-tabs').addEventListener('click', (e) => {
@@ -1111,7 +1439,10 @@ function init () {
     const c = $('#copied'); c.hidden = false; setTimeout(() => (c.hidden = true), 1600);
   });
   $('#download-btn').addEventListener('click', () => {
-    const name = ((state.cfg.name || '').trim() || (state.cfg.scope === 'global' ? 'waf-global' : 'waf-zone'));
+    const fallback = state.kind === 'ratelimit'
+      ? (state.cfg.scope === 'global' ? 'ratelimit-global' : 'ratelimit-zone')
+      : (state.cfg.scope === 'global' ? 'waf-global' : 'waf-zone');
+    const name = ((state.cfg.name || '').trim() || fallback);
     const blob = new Blob([$('#output').textContent], { type: 'text/yaml' });
     const a = el('a', { href: URL.createObjectURL(blob), download: name + '.yaml' });
     document.body.append(a); a.click(); a.remove(); URL.revokeObjectURL(a.href);
