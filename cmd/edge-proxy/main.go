@@ -71,6 +71,10 @@ func main() {
 	upstreamAddr := envOr("EDGE_UPSTREAM_ADDR", "parapet:80")
 	upstreamTLS := envOr("EDGE_UPSTREAM_TLS", "false") == "true"
 	upstreamSNI := envOr("EDGE_UPSTREAM_SNI", "")
+	// Default on: h2c on the plaintext hop, ALPN h2 (HTTP/1.1 fallback) on re-encrypt.
+	// Set EDGE_UPSTREAM_HTTP2=false to force HTTP/1.1 — e.g. a core that predates H2C
+	// on :80, or an L4 in front of :443 that can't ALPN.
+	upstreamHTTP2 := envOr("EDGE_UPSTREAM_HTTP2", "true") == "true"
 	dataplaneMTLS := envOr("EDGE_DATAPLANE_MTLS", "false") == "true"
 	if dataplaneMTLS && !upstreamTLS {
 		slog.Error("EDGE_DATAPLANE_MTLS=true requires EDGE_UPSTREAM_TLS=true (a client cert can only ride TLS)")
@@ -124,6 +128,7 @@ func main() {
 		"cp_endpoint", cpEndpoint,
 		"upstream_addr", upstreamAddr,
 		"upstream_tls", upstreamTLS,
+		"upstream_http2", upstreamHTTP2,
 		"serve_all", serveAll,
 		"domains", len(domains),
 		"waf_enabled", wafEnabled,
@@ -372,7 +377,7 @@ func main() {
 		// fires a (non-blocking) reactive re-mint. nil when mTLS is off.
 		onCertReject = func() { remintCoord.Trigger("reactive") }
 	}
-	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamSNI, getClientCert, onCertReject)
+	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamHTTP2, upstreamSNI, getClientCert, onCertReject)
 
 	if metricsListen != "" {
 		go func() {
