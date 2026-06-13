@@ -96,6 +96,13 @@ func main() {
 	}
 	wafEnabled := envOr("EDGE_WAF_ENABLED", "false") == "true"
 	ratelimitEnabled := envOr("EDGE_RATELIMIT_ENABLED", "false") == "true"
+	cacheEnabled := envOr("EDGE_CACHE_ENABLED", "false") == "true"
+	cacheOverrideEnabled := envOr("EDGE_CACHE_OVERRIDE_ENABLED", "false") == "true"
+	if cacheOverrideEnabled && !cacheEnabled {
+		// Overrides only steer the cache; with no cache there is nothing to steer.
+		slog.Warn("EDGE_CACHE_OVERRIDE_ENABLED=true has no effect without EDGE_CACHE_ENABLED=true; ignoring")
+		cacheOverrideEnabled = false
+	}
 	disableLog := envOr("DISABLE_LOG", "false") == "true"
 	waitBeforeShutdown := time.Duration(envInt64("WAIT_BEFORE_SHUTDOWN", 30)) * time.Second
 	domains := splitDomains(os.Getenv("EDGE_DOMAINS"))
@@ -216,7 +223,7 @@ func main() {
 	var ewaf *edge.EdgeWAF
 	var country func(*http.Request) string
 	var asn func(*http.Request) int64
-	if wafEnabled || ratelimitEnabled {
+	if wafEnabled || ratelimitEnabled || cacheOverrideEnabled {
 		country, asn = loadGeoResolvers()
 	}
 	if wafEnabled {
@@ -243,13 +250,29 @@ func main() {
 		go edge.RunRateLimitRefresh(ctx, cp, erl, refreshInterval, rlPoke)
 	}
 
+	// Optional cache overrides (ConfigMap-driven global + zone sets fetched from
+	// the control plane). They feed the response cache's two per-request hooks
+	// (Cacheable for bypass rules, Override for force rules); wired into the cache
+	// Options below. Requires EDGE_CACHE_ENABLED (validated above).
+	var eco *edge.EdgeCacheOverride
+	if cacheOverrideEnabled {
+		eco = edge.NewEdgeCacheOverride(country, asn)
+		edge.RefreshCacheOverrideOnce(cp, eco)
+		var cachePoke chan struct{}
+		if eventsEnabled {
+			cachePoke = make(chan struct{}, 1)
+			pokes.Cache = cachePoke
+		}
+		go edge.RunCacheOverrideRefresh(ctx, cp, eco, refreshInterval, cachePoke)
+	}
+
 	// Optional response cache (off by default), from parapet/pkg/cache. The
 	// backend is disk (default; survives restarts, bounded by on-disk bytes) or
 	// memory (EDGE_CACHE_BACKEND=memory; bodies in RAM, lost on restart).
 	var respCache *cache.Cache
 	var purgeTable *edge.PurgeTable
 	var purgeStorage cache.Storage // the live backend, for the reaper's Range sweep
-	if envOr("EDGE_CACHE_ENABLED", "false") == "true" {
+	if cacheEnabled {
 		maxSize := envInt64("EDGE_CACHE_MAX_SIZE", 1<<30)
 		maxFile := envInt64("EDGE_CACHE_MAX_FILE_SIZE", 8<<20)
 		var storage cache.Storage
@@ -288,6 +311,18 @@ func main() {
 					cacheMetrics(r, info)
 					cache.LogResult(r, info)
 				},
+			}
+			// Fleet-wide RFC 5861 stale serving for honor-origin entries that lack the
+			// directive (independent of overrides; an explicit response directive or a
+			// per-rule stale_* still wins). 0 forces nothing.
+			opts.DefaultStaleWhileRevalidate = time.Duration(envInt64("EDGE_CACHE_DEFAULT_SWR", 0)) * time.Second
+			opts.DefaultStaleIfError = time.Duration(envInt64("EDGE_CACHE_DEFAULT_SIE", 0)) * time.Second
+			// Cache overrides drive the two per-request decision hooks: Cacheable
+			// (bypass rules) and Override (force rules). nil when EDGE_CACHE_OVERRIDE_ENABLED
+			// is off, leaving the cache strictly honor-origin.
+			if eco != nil {
+				opts.Cacheable = eco.Cacheable
+				opts.Override = eco.Override
 			}
 			// Cache-purge: an invalidation table fed from the control plane gates each
 			// hit (parapet's Options.InvalidatedAfter). On by default with the cache; the

@@ -14,9 +14,11 @@ import (
 // counter), so an edge must only ever compare them for INEQUALITY against the
 // previous event on the SAME stream — never persist or order them.
 type EventsSnapshot struct {
-	// WAF/RateLimit are the stores' content etags ("" when distribution is off).
+	// WAF/RateLimit/Cache are the stores' content etags ("" when distribution is
+	// off).
 	WAF       string `json:"waf,omitempty"`
 	RateLimit string `json:"ratelimit,omitempty"`
+	Cache     string `json:"cache,omitempty"`
 	// Hosts is the known-host store's content etag ("" when off). A host change
 	// pokes only the edge's hosts refresh — it doesn't affect WAF/ratelimit.
 	Hosts string `json:"hosts,omitempty"`

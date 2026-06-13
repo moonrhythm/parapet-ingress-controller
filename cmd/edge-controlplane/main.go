@@ -96,6 +96,7 @@ func main() {
 	tokensFile := os.Getenv("CP_TOKENS_FILE")            // alternative: path to that JSON
 	wafEnabled := os.Getenv("CP_WAF_ENABLED") == "true"
 	ratelimitEnabled := os.Getenv("CP_RATELIMIT_ENABLED") == "true"
+	cacheEnabled := os.Getenv("CP_CACHE_ENABLED") == "true"
 	caCertPath := os.Getenv("EDGE_CA_CERT")                 // provided-mode edge CA cert (with EDGE_CA_KEY → enable issuance)
 	caKeyPath := os.Getenv("EDGE_CA_KEY")                   // provided-mode edge CA private key
 	caSecret := os.Getenv("EDGE_CA_SECRET")                 // managed-mode edge CA Secret in POD_NAMESPACE; "" + no provided files = issuance off
@@ -318,6 +319,7 @@ func main() {
 	// fetch sees the full payload, not a half-populated store.
 	var wafStore *edgecp.WafStore
 	var rlStore *edgecp.RateLimitStore
+	var cacheStore *edgecp.CacheStore
 	var hostsStore *edgecp.HostsStore
 	if wafEnabled {
 		wafStore = edgecp.NewWafStore()
@@ -339,6 +341,19 @@ func main() {
 		server = server.WithRateLimit(rlStore)
 		slog.Info("edge control plane: ratelimit distribution enabled", "pod_namespace", podNamespace)
 	}
+	// Cache-override distribution (GET /v1/cache): the same global+zone model
+	// under its own label/annotation, sharing the one Ingress watch (cross-namespace
+	// zone binding allowed — overrides are stateless config).
+	if cacheEnabled {
+		cacheStore = edgecp.NewCacheStore()
+		cacheReloader := edgecp.NewCacheReloader(cacheStore, watchNamespace, podNamespace)
+		if err := cacheReloader.LoadOnce(ctx); err != nil {
+			slog.Error("edgecp: initial cache load failed", "err", err)
+		}
+		go cacheReloader.Watch(ctx)
+		server = server.WithCache(cacheStore)
+		slog.Info("edge control plane: cache-override distribution enabled", "pod_namespace", podNamespace)
+	}
 	// Standalone known-host distribution (GET /v1/hosts) — the edge request
 	// metric's host oracle. On by default and independent of WAF/ratelimit, since
 	// the metric is always on; it only rides the same Ingress watch.
@@ -347,8 +362,8 @@ func main() {
 		server = server.WithHosts(hostsStore)
 		slog.Info("edge control plane: hosts distribution enabled")
 	}
-	if wafStore != nil || rlStore != nil || hostsStore != nil {
-		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore).WithHosts(hostsStore)
+	if wafStore != nil || rlStore != nil || cacheStore != nil || hostsStore != nil {
+		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore).WithCache(cacheStore).WithHosts(hostsStore)
 		if err := ingReloader.LoadOnce(ctx); err != nil {
 			slog.Error("edgecp: initial ingress load failed", "err", err)
 		}
@@ -388,6 +403,9 @@ func main() {
 			}
 			if rlStore != nil {
 				snap.RateLimit = rlStore.Version()
+			}
+			if cacheStore != nil {
+				snap.Cache = cacheStore.Version()
 			}
 			if hostsStore != nil {
 				snap.Hosts = hostsStore.Version()
@@ -457,7 +475,7 @@ func main() {
 	if tlsEnabled {
 		srv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
-	slog.Info("edge control plane listening", "addr", addr, "tokens", len(tokens), "waf", wafEnabled, "ratelimit", ratelimitEnabled, "tls", tlsEnabled)
+	slog.Info("edge control plane listening", "addr", addr, "tokens", len(tokens), "waf", wafEnabled, "ratelimit", ratelimitEnabled, "cache", cacheEnabled, "tls", tlsEnabled)
 
 	if tlsEnabled {
 		err = srv.ListenAndServeTLS(tlsCert, tlsKey)

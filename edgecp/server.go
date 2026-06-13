@@ -27,6 +27,10 @@ type Server struct {
 	// /v1/ratelimit → 404). Same scoping/ETag model as the WAF endpoint.
 	ratelimit *RateLimitStore
 
+	// cache is the optional cache-override distribution store (nil = disabled,
+	// /v1/cache → 404). Same scoping/ETag model as the WAF endpoint.
+	cache *CacheStore
+
 	// hosts is the optional standalone known-host distribution store (nil =
 	// /v1/hosts → 404). It feeds the edge request metric's host oracle; same
 	// scoping/ETag model. Standalone because the metric is always on and a stale
@@ -143,6 +147,13 @@ func (s *Server) WithRateLimit(rl *RateLimitStore) *Server {
 	return s
 }
 
+// WithCache enables the cache-override distribution endpoint (GET /v1/cache).
+// Returns the server for chaining.
+func (s *Server) WithCache(c *CacheStore) *Server {
+	s.cache = c
+	return s
+}
+
 // WithHosts enables the standalone known-host endpoint (GET /v1/hosts). Returns
 // the server for chaining.
 func (s *Server) WithHosts(hosts *HostsStore) *Server {
@@ -232,6 +243,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/certs", s.handleCert)
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
 	mux.HandleFunc("GET /v1/ratelimit", s.handleRateLimit)
+	mux.HandleFunc("GET /v1/cache", s.handleCache)
 	mux.HandleFunc("GET /v1/hosts", s.handleHosts)
 	mux.HandleFunc("GET /v1/purges", s.handlePurges)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
@@ -439,6 +451,62 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 		RouteZoneMap: snap.routeZone,
 		HostZoneMap:  snap.hostZone,
 		Hosts:        snap.hosts,
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	// Generation zeroed in the validator for the same reason as handleWAF:
+	// process-local counters must not defeat 304 revalidation across replicas.
+	etagResp := resp
+	etagResp.Generation = 0
+	etagBody, err := json.Marshal(etagResp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	etag := etagOfString(string(etagBody))
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// cacheResponse is the GET /v1/cache payload. Documents are arrays of YAML
+// strings (one per ConfigMap data value) — cacherule.Parse takes one document
+// per string and does not split "---". No legacy host_zone_map: cache overrides
+// are a new feature, so only the path-aware route binding is served.
+type cacheResponse struct {
+	Generation      uint64              `json:"generation"`
+	GlobalOverrides []string            `json:"global_overrides"`
+	Zones           map[string][]string `json:"zones"`
+	RouteZoneMap    map[string]string   `json:"route_zone_map"`
+}
+
+// handleCache serves the cache-override payload scoped to the edge's allowed
+// domains: the global baseline (identical for every edge) plus only the zones
+// and route→zone bindings for hosts this token may serve. ETag is computed over
+// the scoped payload — the same model as handleRateLimit.
+func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.cache == nil {
+		http.Error(w, "cache distribution disabled", http.StatusNotFound)
+		return
+	}
+	snap := s.cache.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
+	resp := cacheResponse{
+		Generation:      snap.generation,
+		GlobalOverrides: snap.global,
+		Zones:           snap.zones,
+		RouteZoneMap:    snap.routeZone,
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {
