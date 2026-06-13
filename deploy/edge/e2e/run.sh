@@ -52,7 +52,7 @@ wait_for_port() {
   done
   # Surface the process logs so a startup crash is diagnosable in CI (not just a
   # bare "did not come up").
-  for log in "$WORK/cp.log" "$WORK/edge.log"; do
+  for log in "$WORK/cp.log" "$WORK/edge.log" "$WORK/upstream.log"; do
     [ -s "$log" ] && { echo "----- $(basename "$log") -----" >&2; cat "$log" >&2; }
   done
   fail "$name did not come up on :$port"
@@ -184,28 +184,14 @@ say "3. build binaries (Go edge + Go control plane)"
   || fail "go build control plane"
 ( cd "$REPO" && go build -o "$WORK/parapet-edge" ./cmd/edge-proxy ) \
   || fail "go build edge"
+# Dummy upstream is a Go h2c-capable origin (stands in for parapet's H2C=true :80),
+# so the edge's default h2c upstream hop is actually exercised end-to-end.
+( cd "$REPO" && go build -o "$WORK/upstream" ./deploy/edge/e2e/upstream ) \
+  || fail "go build upstream"
 
 # ---------------------------------------------------------------------------
-say "4. start dummy upstream (stands in for parapet)"
-python3 -c "
-import http.server, socketserver
-class H(http.server.BaseHTTPRequestHandler):
-    protocol_version = 'HTTP/1.1'
-    def do_GET(self):
-        if self.path == '/cacheme':
-            body=b'cacheable-body'
-            self.send_response(200); self.send_header('content-length',str(len(body)))
-            self.send_header('cache-control','public, max-age=60')
-            self.end_headers(); self.wfile.write(body); return
-        body=b'hello-from-upstream'
-        self.send_response(200); self.send_header('content-length',str(len(body)))
-        # Echo the proto the edge forwarded so the test can assert http vs https.
-        self.send_header('x-seen-forwarded-proto', self.headers.get('x-forwarded-proto',''))
-        self.end_headers()
-        self.wfile.write(body)
-    def log_message(self,*a): pass
-socketserver.TCPServer(('127.0.0.1',$UP_PORT),H).serve_forever()
-" & PIDS+=($!)
+say "4. start dummy upstream (Go h2c origin, stands in for parapet)"
+UPSTREAM_ADDR="127.0.0.1:$UP_PORT" "$WORK/upstream" > "$WORK/upstream.log" 2>&1 & PIDS+=($!)
 wait_for_port "$UP_PORT" upstream
 
 say "5. start the Go control plane (fs backend, WAF enabled)"
@@ -244,7 +230,11 @@ OUT="$(curl -sS -D "$WORK/https.hdr" --cacert "$WORK/ca.crt" --resolve "$DOMAIN:
 # The TLS listener must forward X-Forwarded-Proto: https (echoed back by upstream).
 grep -qiE "^x-seen-forwarded-proto: https[[:space:]]*$" "$WORK/https.hdr" \
   || { cat "$WORK/https.hdr" >&2; fail "TLS listener did not forward X-Forwarded-Proto: https"; }
-echo "  ✓ TLS terminated with control-plane-fetched cert; / forwarded to upstream (proto=https)"
+# The edge→upstream hop defaults to h2c (EDGE_UPSTREAM_HTTP2 unset ⇒ on); the upstream
+# echoes the HTTP major version it saw, so 2 proves h2c was negotiated by default.
+grep -qiE "^x-seen-proto-major: 2[[:space:]]*$" "$WORK/https.hdr" \
+  || { cat "$WORK/https.hdr" >&2; fail "edge did not forward to upstream over h2c (want proto-major 2)"; }
+echo "  ✓ TLS terminated with control-plane-fetched cert; / forwarded to upstream over h2c (proto=https)"
 
 # Phase 1b: the plaintext HTTP listener forwards to upstream WITHOUT redirecting,
 # tagging the hop X-Forwarded-Proto: http so the in-cluster core (not the edge)
@@ -255,7 +245,9 @@ HTTP_OUT="$(curl -sS -D "$WORK/http.hdr" -H "Host: $DOMAIN" \
 [ "$HTTP_OUT" = "hello-from-upstream" ] || fail "unexpected body over http: $HTTP_OUT"
 grep -qiE "^x-seen-forwarded-proto: http[[:space:]]*$" "$WORK/http.hdr" \
   || { cat "$WORK/http.hdr" >&2; fail "HTTP listener did not forward X-Forwarded-Proto: http"; }
-echo "  ✓ plaintext HTTP listener forwarded to upstream (proto=http, no edge redirect)"
+grep -qiE "^x-seen-proto-major: 2[[:space:]]*$" "$WORK/http.hdr" \
+  || { cat "$WORK/http.hdr" >&2; fail "edge did not forward to upstream over h2c (want proto-major 2)"; }
+echo "  ✓ plaintext HTTP listener forwarded to upstream over h2c (proto=http, no edge redirect)"
 
 # Phase 2: the global WAF rule blocks /blocked AT THE EDGE with 403 (never upstream).
 CODE="$(curl -s -o "$WORK/blocked.body" -w '%{http_code}' --cacert "$WORK/ca.crt" \

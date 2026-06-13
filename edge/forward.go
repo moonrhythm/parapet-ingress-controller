@@ -5,20 +5,23 @@ import (
 	"crypto/tls"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/upstream"
 )
 
 // Forwarder is the terminal middleware that forwards a request to the in-cluster
-// parapet. It uses plaintext h2c by default, or re-encrypts with TLS when
-// EDGE_UPSTREAM_TLS=true (presenting EDGE_UPSTREAM_SNI as the SNI/Host for the
-// handshake). It does NOT rewrite the HTTP Host — the original client Host is
-// forwarded.
+// parapet. By default it speaks h2c on the plaintext hop and ALPN-negotiated h2
+// (with HTTP/1.1 fallback) on the re-encrypt hop; set EDGE_UPSTREAM_HTTP2=false to
+// force HTTP/1.1 on either. It re-encrypts with TLS when EDGE_UPSTREAM_TLS=true
+// (presenting EDGE_UPSTREAM_SNI as the SNI/Host for the handshake). It does NOT
+// rewrite the HTTP Host — the original client Host is forwarded.
 //
 // The X-Forwarded-For / X-Real-Ip / X-Forwarded-Proto headers are set by the
 // parapet server's own inbound proxy layer. By default the edge is the first hop
@@ -31,22 +34,37 @@ type Forwarder struct {
 	rp *httputil.ReverseProxy
 }
 
-// NewForwarder builds a forwarder to addr (host:port). useTLS selects re-encrypt
-// (TLS) vs plaintext HTTP/1.1; sni is the SNI/Host presented when re-encrypting
-// (ignored otherwise; "" lets the transport default to addr's host). getClientCert,
-// when non-nil (and useTLS), presents the edge's data-plane mTLS client cert on the
-// re-encrypt handshake so the core can CA-only-trust this edge (EDGE_DATAPLANE_MTLS).
+// NewForwarder builds a forwarder to addr (host:port).
 //
-// The plaintext hop is HTTP/1.1 (not h2c); parapet's :80 accepts it.
-// Re-encrypt uses TLS with InsecureSkipVerify (a cluster-internal hop,
-// matching the controller's upstream posture) — the edge authenticates ITSELF to
-// the core with its client cert; it does not yet verify the core's server cert.
-// onCertReject, when non-nil, fires when the CORE rejects the edge's data-plane client
-// cert in the re-encrypt TLS handshake — the reactive force-re-mint floor. It is the
-// coordinator's reactive Trigger; nil when data-plane mTLS is off.
-func NewForwarder(addr string, useTLS bool, sni string, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error), onCertReject func()) *Forwarder {
+// useTLS selects re-encrypt (TLS) vs plaintext; sni is the SNI/Host presented when
+// re-encrypting (ignored otherwise; "" lets the transport default to addr's host).
+//
+// enableHTTP2 (default on; EDGE_UPSTREAM_HTTP2) picks the upstream protocol within
+// each mode. The core accepts both upgraded protocols out of the box — parapet's :80
+// server runs with H2C=true and its :443 server offers h2 via ALPN:
+//   - plaintext  → h2c prior-knowledge via parapet's upstream.H2CTransport;
+//     HTTP/1.1 when disabled.
+//   - re-encrypt → ALPN-negotiated h2 with HTTP/1.1 fallback via a ForceAttemptHTTP2
+//     http.Transport (h2TLSTransport); HTTP/1.1-over-TLS when disabled.
+//
+// WebSocket/Upgrade requests always ride HTTP/1.1 regardless: httputil.ReverseProxy
+// has no HTTP/2 upgrade path (no RFC 8441) and an h2 connection rejects the
+// Connection/Upgrade request headers. H2CTransport downgrades them itself; the
+// re-encrypt path routes them to a dedicated HTTP/1.1-over-TLS transport.
+//
+// getClientCert, when non-nil (and useTLS), presents the edge's data-plane mTLS
+// client cert on the re-encrypt handshake so the core can CA-only-trust this edge
+// (EDGE_DATAPLANE_MTLS); it rides h2 or HTTP/1.1 identically. Re-encrypt uses TLS
+// with InsecureSkipVerify (a cluster-internal hop, matching the controller's upstream
+// posture) — the edge authenticates ITSELF to the core with its client cert; it does
+// not yet verify the core's server cert. onCertReject, when non-nil, fires when the
+// CORE rejects the edge's data-plane client cert in the re-encrypt TLS handshake — the
+// reactive force-re-mint floor. It is the coordinator's reactive Trigger; nil when
+// data-plane mTLS is off.
+func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error), onCertReject func()) *Forwarder {
 	var tr http.RoundTripper
-	if useTLS {
+	switch {
+	case useTLS:
 		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true} //nolint:gosec // cluster-internal hop, matches the controller's upstream posture
 		if sni != "" {
 			tlsConfig.ServerName = sni
@@ -54,19 +72,36 @@ func NewForwarder(addr string, useTLS bool, sni string, getClientCert func(*tls.
 		if getClientCert != nil {
 			tlsConfig.GetClientCertificate = getClientCert
 		}
-		// HTTPSTransport sets r.URL.Scheme = "https" and dials r.URL.Host with TLS.
-		tr = &upstream.HTTPSTransport{TLSClientConfig: tlsConfig}
-	} else {
+		// HTTPSTransport sets r.URL.Scheme = "https" and dials r.URL.Host with TLS,
+		// HTTP/1.1 only (net/http won't auto-enable h2 with a custom TLS config).
+		h1 := &upstream.HTTPSTransport{TLSClientConfig: tlsConfig}
+		if enableHTTP2 {
+			tr = newH2TLSTransport(tlsConfig, h1)
+		} else {
+			tr = h1
+		}
+	case enableHTTP2:
+		// Plaintext h2c (prior-knowledge) to the core's H2C=true :80 listener.
+		// H2CTransport sets r.URL.Scheme = "http" and downgrades Upgrade/WebSocket
+		// requests to HTTP/1.1.
+		tr = &upstream.H2CTransport{}
+	default:
 		// HTTPTransport sets r.URL.Scheme = "http" and speaks HTTP/1.1.
 		tr = &upstream.HTTPTransport{}
 	}
 
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
+
 	rp := &httputil.ReverseProxy{
-		// The transport sets the scheme; the Director only needs the host. The
-		// path/query and Host header are forwarded verbatim (parapet routes on
-		// them). RemoteAddr is cleared in ServeHandler so ReverseProxy doesn't
+		// The Director sets the scheme + host. The upstream.* transports also set the
+		// scheme, but the plain http.Transport behind h2TLSTransport does not, so the
+		// Director must. The path/query and Host header are forwarded verbatim (parapet
+		// routes on them). RemoteAddr is cleared in ServeHandler so ReverseProxy doesn't
 		// re-append X-Forwarded-For — the parapet server already set the true one.
-		Director:   func(r *http.Request) { r.URL.Host = addr },
+		Director:   func(r *http.Request) { r.URL.Scheme = scheme; r.URL.Host = addr },
 		Transport:  tr,
 		BufferPool: bufferPool,
 		ErrorLog:   slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn),
@@ -124,6 +159,49 @@ func isClientCertRejected(err error) bool {
 		}
 	}
 	return false
+}
+
+// h2TLSTransport forwards over re-encrypted TLS, preferring ALPN-negotiated HTTP/2
+// for ordinary requests while keeping WebSocket/Upgrade requests on HTTP/1.1 — an
+// HTTP/2 connection rejects the Connection/Upgrade request headers, so they need a
+// dedicated HTTP/1.1 transport (this mirrors parapet's upstream.H2CTransport for the
+// plaintext hop). Both transports share one tls.Config (same mTLS client cert / SNI),
+// so the data-plane-mTLS handshake is identical on either protocol.
+type h2TLSTransport struct {
+	h2 http.RoundTripper // ForceAttemptHTTP2: negotiates h2, falls back to HTTP/1.1
+	h1 http.RoundTripper // HTTP/1.1-over-TLS, for Upgrade requests
+}
+
+func newH2TLSTransport(tlsConfig *tls.Config, h1 http.RoundTripper) *h2TLSTransport {
+	return &h2TLSTransport{
+		// ForceAttemptHTTP2 makes net/http wire up the bundled http2 transport even
+		// though we supply a custom TLSClientConfig + DialContext (which otherwise trips
+		// net/http's conservative "don't surprise me" opt-out — see Transport.protocols).
+		// ALPN then negotiates h2, falling back to HTTP/1.1 if the core only offers it.
+		// Fields mirror upstream.HTTPSTransport's defaults so only the protocol changes;
+		// DisableCompression keeps the proxy hop byte-transparent (no auto-gzip).
+		h2: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+			TLSClientConfig:       tlsConfig,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConnsPerHost:   32,
+			IdleConnTimeout:       10 * time.Minute,
+			TLSHandshakeTimeout:   5 * time.Second,
+			ResponseHeaderTimeout: time.Minute,
+			DisableCompression:    true,
+		},
+		h1: h1,
+	}
+}
+
+// RoundTrip routes Upgrade requests to HTTP/1.1 and everything else to the
+// h2-preferring transport. r.URL.Scheme is already "https" (set by the Director).
+func (t *h2TLSTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Header.Get("Upgrade") != "" {
+		return t.h1.RoundTrip(r)
+	}
+	return t.h2.RoundTrip(r)
 }
 
 // ServeHandler implements parapet.Middleware. It is terminal — the next handler

@@ -76,7 +76,7 @@ caches responses via `parapet/pkg/cache` (memory or disk backend,
 selected by `EDGE_CACHE_BACKEND`; `EDGE_CACHE_CHUNKED` (default on) also caches
 no-`Content-Length` chunked/on-the-fly-compressed bodies by buffering to derive a
 length — safe because the `httputil.ReverseProxy` forwarder aborts on a truncated
-upstream so a partial body never commits), and forwards to parapet (`edge/forward.go`). Refresh loops are fail-static
+upstream so a partial body never commits), and forwards to parapet (`edge/forward.go`) — **HTTP/2 by default**: h2c on the plaintext `:80` hop, ALPN-negotiated h2 (HTTP/1.1 fallback) on the re-encrypt `:443` hop, `EDGE_UPSTREAM_HTTP2=false` forces HTTP/1.1; WebSocket/Upgrade always rides HTTP/1.1 (`H2CTransport` downgrades it, the re-encrypt path routes it to a dedicated h1 transport). Refresh loops are fail-static
 (`edge/refresh.go`, `edge/wafrefresh.go`, `edge/ratelimitrefresh.go`); by default the CP's `GET /v1/events`
 SSE change stream (`edge/events.go` + `edgecp/events.go`, `EDGE_EVENTS_ENABLED`/`CP_EVENTS_ENABLED`) pokes
 them on change — a version-vector wake-up signal only, so updates land in seconds while the jittered polls

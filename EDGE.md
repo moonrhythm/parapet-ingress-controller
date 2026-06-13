@@ -70,7 +70,7 @@ client ──TLS──► edge (Go/parapet, outside k8s)                        
                   │          Ingresses                                    │
                   │   refreshed on a timer; cached in memory only         │
                   │                                                       │
-                  └── data: HTTP/1.1 :80 / re-encrypt :443 ─► parapet ─► svc│
+                  └── data: h2c :80 / re-encrypt h2 :443 ─► parapet ─► svc│
                         (sets X-Forwarded-For/-Proto/-Country/-ASN)        │
                         parapet re-runs WAF authoritatively + routes       │
                               └──────────────────────────────────────────┘
@@ -80,7 +80,7 @@ client ──TLS──► edge (Go/parapet, outside k8s)                        
 
 | Channel | From → to | Protocol | Exposure |
 |---|---|---|---|
-| **Data plane** | edge → parapet `:80`/`:443` | HTTP/1.1 or re-encrypted TLS | private path |
+| **Data plane** | edge → parapet `:80`/`:443` | h2c, or re-encrypted TLS with ALPN h2 (`EDGE_UPSTREAM_HTTP2=false` ⇒ HTTP/1.1) | private path |
 | **Control plane** | edge → controlplane `:8443` | HTTPS GET (server-TLS + bearer token) | private path, edge sources only |
 
 Separate ports on separate Services. The control plane distributes **private
@@ -102,7 +102,10 @@ keys**, so it must never be on the public LoadBalancer. See
   `edge/cp.go`), runs global + zone WAF (`edge/waf.go`), optionally caches
   responses via `parapet/pkg/cache` (memory or disk, selected by
   `EDGE_CACHE_BACKEND`), and forwards to parapet with `X-Forwarded-*`
-  (`edge/forward.go`). Keys live in memory only, never on disk.
+  (`edge/forward.go`). The upstream hop is **HTTP/2 by default** — h2c on the
+  plaintext `:80` hop, ALPN-negotiated h2 (HTTP/1.1 fallback) on the re-encrypt
+  `:443` hop; `EDGE_UPSTREAM_HTTP2=false` forces HTTP/1.1. Keys live in memory
+  only, never on disk.
 
 ## Authorization (bearer token, two endpoints)
 
@@ -869,8 +872,8 @@ change is a natural later addition.
 ```
 edge           :443   public TLS (terminated locally)       EDGE_HTTPS_LISTEN
                :80    public plaintext (on; ""=disable)     EDGE_HTTP_LISTEN
-parapet        :80    data (HTTP/1.1 from edge)            unchanged role, now behind edge
-               :443   data (re-encrypt from edge)
+parapet        :80    data (h2c from edge; H2C=true)        unchanged role, now behind edge
+               :443   data (re-encrypt h2 from edge)
                :9187  metrics
 controlplane   :8443  HTTPS GET (server-TLS + bearer)       NEW — Go, own Service
                       (or plaintext HTTP on a trusted private network — TLS off)
@@ -879,6 +882,39 @@ controlplane   :8443  HTTPS GET (server-TLS + bearer)       NEW — Go, own Serv
                :9187  metrics (CP_METRICS_LISTEN) — the CP's own convergence
                       metrics MERGED with every pushed edge snapshot (below)
 ```
+
+### Upstream protocol (edge → parapet)
+
+The edge→parapet hop runs **HTTP/2 by default**, matching the multiplexing the
+core already accepts (`edge/forward.go`):
+
+```
+EDGE_UPSTREAM_ADDR   parapet host:port (default parapet:80)
+EDGE_UPSTREAM_TLS    re-encrypt the hop with TLS (default false)
+EDGE_UPSTREAM_SNI    SNI/Host on the re-encrypt handshake (default: addr's host)
+EDGE_UPSTREAM_HTTP2  HTTP/2 on the hop (default true — opt-out)
+```
+
+- **Plaintext hop (`EDGE_UPSTREAM_TLS=false`)** → **h2c** prior-knowledge, via
+  parapet's `upstream.H2CTransport`. The core's `:80` server runs with `H2C=true`
+  (`p.SetHTTP1(true)` + `p.SetUnencryptedHTTP2(true)`), so it accepts the h2c
+  preface directly.
+- **Re-encrypt hop (`EDGE_UPSTREAM_TLS=true`)** → **ALPN-negotiated h2 with an
+  HTTP/1.1 fallback**. `net/http` won't auto-enable h2 alongside a custom
+  `tls.Config`/dialer, so the edge sets `ForceAttemptHTTP2` on the transport; the
+  core's `:443` server offers `h2` via ALPN and negotiation lands on h2 (falling
+  back to HTTP/1.1 if a core ever only offers it). Data-plane mTLS
+  (`EDGE_DATAPLANE_MTLS`) rides h2 or HTTP/1.1 identically — the client cert is
+  presented in the TLS handshake either way.
+
+**WebSocket / `Upgrade` requests always ride HTTP/1.1.** `httputil.ReverseProxy`
+has no HTTP/2 upgrade path (no RFC 8441) and an h2 connection rejects the
+`Connection`/`Upgrade` request headers: `H2CTransport` downgrades them itself, and
+the re-encrypt path routes them to a dedicated HTTP/1.1-over-TLS transport.
+
+**Opt-out (`EDGE_UPSTREAM_HTTP2=false`)** forces HTTP/1.1 on both hops. Use it for
+a core that predates `H2C=true` on `:80`, or a dumb L4 in front of `:443` that
+can't ALPN.
 
 ### Edge metrics push (scrape the CP, not the fleet)
 
