@@ -273,6 +273,60 @@ func (c *CpClient) FetchRateLimit(currentEtag string) (RateLimitFetch, error) {
 	}
 }
 
+// CacheFetch is the outcome of a cache-override config fetch.
+type CacheFetch struct {
+	// Unchanged is true on a 304.
+	Unchanged bool
+	// On a 200: the generation, global override documents, per-zone documents,
+	// path-aware route→zone bindings, and the ETag. Documents are []string (one
+	// YAML document per ConfigMap data value — cacherule.Parse's contract; never
+	// "---"-joined). There is no legacy host→zone map: cache overrides are a new
+	// feature, so only the path-aware format is ever served.
+	Generation      uint64
+	GlobalOverrides []string
+	Zones           map[string][]string
+	RouteZoneMap    map[string]string
+	Etag            string
+}
+
+type cacheBody struct {
+	Generation      uint64              `json:"generation"`
+	GlobalOverrides []string            `json:"global_overrides"`
+	Zones           map[string][]string `json:"zones"`
+	RouteZoneMap    map[string]string   `json:"route_zone_map"`
+}
+
+// FetchCache fetches the cache-override payload (global documents + zones +
+// route→zone map) scoped to the edge's token, with ETag revalidation. A 404
+// ("cache distribution disabled") is treated like any other non-200/304: an
+// error the caller handles fail-static (keeps last-good).
+func (c *CpClient) FetchCache(currentEtag string) (CacheFetch, error) {
+	resp, err := c.do(c.base+"/v1/cache", currentEtag)
+	if err != nil {
+		return CacheFetch{}, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return CacheFetch{Unchanged: true}, nil
+	case http.StatusOK:
+		var body cacheBody
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxWafBody)).Decode(&body); err != nil {
+			return CacheFetch{}, fmt.Errorf("decode: %w", err)
+		}
+		return CacheFetch{
+			Generation:      body.Generation,
+			GlobalOverrides: body.GlobalOverrides,
+			Zones:           body.Zones,
+			RouteZoneMap:    body.RouteZoneMap,
+			Etag:            resp.Header.Get("ETag"),
+		}, nil
+	default:
+		return CacheFetch{}, fmt.Errorf("control plane returned %d for /v1/cache", resp.StatusCode)
+	}
+}
+
 // HostsFetch is the outcome of a known-host fetch (the request metric's host
 // oracle). Scoped to the edge's token.
 type HostsFetch struct {

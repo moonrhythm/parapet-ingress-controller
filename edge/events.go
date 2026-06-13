@@ -17,6 +17,7 @@ import (
 type eventsSnapshot struct {
 	WAF       string `json:"waf"`
 	RateLimit string `json:"ratelimit"`
+	Cache     string `json:"cache"`
 	Hosts     string `json:"hosts"`
 	Certs     string `json:"certs"`
 	Purges    uint64 `json:"purges"`
@@ -29,6 +30,7 @@ type eventsSnapshot struct {
 type EventPokes struct {
 	WAF       chan<- struct{}
 	RateLimit chan<- struct{}
+	Cache     chan<- struct{}
 	Hosts     chan<- struct{}
 	Certs     chan<- struct{}
 	Purges    chan<- struct{}
@@ -50,6 +52,7 @@ func (p EventPokes) poke(ch chan<- struct{}) {
 func (p EventPokes) pokeAll() {
 	p.poke(p.WAF)
 	p.poke(p.RateLimit)
+	p.poke(p.Cache)
 	p.poke(p.Hosts)
 	p.poke(p.Certs)
 	p.poke(p.Purges)
@@ -183,6 +186,9 @@ func runEventsOnce(ctx context.Context, cp *CpClient, pokes EventPokes) (deliver
 					}
 					if snap.RateLimit != last.RateLimit {
 						pokes.poke(pokes.RateLimit)
+					}
+					if snap.Cache != last.Cache {
+						pokes.poke(pokes.Cache)
 					}
 					if snap.Hosts != last.Hosts {
 						pokes.poke(pokes.Hosts)

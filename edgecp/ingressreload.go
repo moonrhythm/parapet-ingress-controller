@@ -27,6 +27,7 @@ import (
 type IngressReloader struct {
 	store          *WafStore       // optional (nil = WAF host→zone derivation off)
 	rl             *RateLimitStore // optional (nil = rate-limit derivation off)
+	cache          *CacheStore     // optional (nil = cache-override derivation off)
 	hosts          *HostsStore     // optional (nil = /v1/hosts distribution off)
 	watchNamespace string
 	debounce       time.Duration
@@ -40,6 +41,14 @@ func NewIngressReloader(store *WafStore, watchNamespace string) *IngressReloader
 // its host→zone binding and known-host list. Returns the reloader for chaining.
 func (r *IngressReloader) WithRateLimit(rl *RateLimitStore) *IngressReloader {
 	r.rl = rl
+	return r
+}
+
+// WithCache wires the cache-override store so the Ingress reload also derives
+// its path-aware route→zone binding (cache-zone annotation, cross-namespace
+// allowed — the WAF model). Returns the reloader for chaining.
+func (r *IngressReloader) WithCache(cache *CacheStore) *IngressReloader {
+	r.cache = cache
 	return r
 }
 
@@ -108,6 +117,12 @@ func (r *IngressReloader) reload(ctx context.Context) error {
 	}
 	if r.rl != nil {
 		r.rl.SetIngressDerived(buildRateLimitHostZone(ings), buildZoneRoutes(ings, RateLimitZoneAnnotation, true), collectIngressHosts(ings))
+	}
+	if r.cache != nil {
+		// Cross-namespace allowed (sameNamespaceOnly=false), the WAF model: an
+		// override set is stateless config, so a cross-namespace bind applies the
+		// policy to the binding ingress's own traffic only.
+		r.cache.SetIngressDerived(buildZoneRoutes(ings, CacheZoneAnnotation, false))
 	}
 	if r.hosts != nil {
 		r.hosts.SetHosts(collectIngressHosts(ings))
