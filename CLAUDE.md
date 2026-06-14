@@ -108,6 +108,8 @@ Routes are keyed as `host + path` strings (e.g. `"www.example.com/api/"`). PathT
 
 Endpoint lookup is round-robin (`route.RRLB`). Bad addresses (dial errors) are marked and skipped temporarily.
 
+**ExternalName Services** (`spec.type: ExternalName`) are supported via a separate `route.Table` map (`addrToExternalName`, set by `reloadServiceDebounced` via `SetExternalNameRoutes` — full-replace, so it never races the incremental endpoint host-route path). They have no Endpoints, so `Table.Lookup` falls back to dialing `spec.externalName` (resolved by the dialer's `net.Resolver`) on the **service port** the ingress references (no `targetPort` indirection; no RRLB/bad-addr — single target). A pod-backed host route takes precedence over an ExternalName one (only transiently overlapping during a type change). See [`SPEC.md`](SPEC.md).
+
 ### TLS
 TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.Table` provides `GetCertificate` for SNI-based lookup (exact match, then a single-label wildcard climb), plugged directly into `tls.Config`. By default only secrets referenced by an Ingress's `spec.tls.secretName` are loaded; set `LOAD_ALL_CERTS=true` to index every TLS-typed secret in the watch namespace (lets a wildcard cert serve SNI without per-ingress wiring).
 

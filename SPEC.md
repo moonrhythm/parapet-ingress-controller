@@ -25,6 +25,17 @@ Endpoint selection is **round-robin**; an address that fails to dial is marked
 **bad for 2s** and skipped (reactive health — no active probing). Host is
 lowercased and port-stripped before matching.
 
+A Service of `type: ExternalName` is also supported: it has no Endpoints, so the
+backend is dialed at its `spec.externalName` (an external DNS name, resolved at
+connect time) on the **Service port the ingress references** (`targetPort` is a
+pod concept and does not apply to a DNS CNAME — the port the ingress addresses is
+used as-is). The referenced port must still be declared in the Service's
+`spec.ports` (as for any backend). No round-robin/bad-address tracking applies
+(a single target); `https`/`appProtocol` on the port work as usual, and the
+`upstream-host` annotation overrides the forwarded `Host` (the client `Host` is
+forwarded by default). A pod-backed route always wins over an ExternalName one
+for the same Service host (only briefly possible across a type change).
+
 **Retry is connection-only**: a dial failure — or a
 connection broken before any response — is retried up to 5× with backoff,
 marking the pod bad and round-robining to another. An upstream that *responds* —
