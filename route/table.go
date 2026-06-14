@@ -6,11 +6,12 @@ import (
 )
 
 type Table struct {
-	mu               sync.RWMutex
-	onceStartBgJob   sync.Once
-	addrToTargetHost map[string]*RRLB
-	addrToTargetPort map[string]string
-	badAddr          badAddrTable
+	mu                 sync.RWMutex
+	onceStartBgJob     sync.Once
+	addrToTargetHost   map[string]*RRLB
+	addrToTargetPort   map[string]string
+	addrToExternalName map[string]string
+	badAddr            badAddrTable
 }
 
 func (t *Table) runBackgroundJob() {
@@ -30,20 +31,34 @@ func (t *Table) Lookup(addr string) string {
 
 	t.mu.RLock()
 	targetHost, okHost := t.addrToTargetHost[host]
+	externalName, okExt := t.addrToExternalName[host]
 	targetPort, okPort := t.addrToTargetPort[addr]
 	t.mu.RUnlock()
 
-	if !okHost || !okPort {
-		// host or port not found in table
+	if !okPort {
+		// port not found in table
 		return ""
 	}
 
-	hostIP := targetHost.Get(&t.badAddr)
-	if hostIP == "" {
-		// not found any pod
-		return ""
+	if okHost {
+		// pod-backed service: round-robin a healthy pod IP.
+		hostIP := targetHost.Get(&t.badAddr)
+		if hostIP == "" {
+			// not found any pod
+			return ""
+		}
+		return hostIP + ":" + targetPort
 	}
-	return hostIP + ":" + targetPort
+
+	if okExt {
+		// ExternalName service: dial the external DNS name directly — the dialer's
+		// net.Resolver resolves it at connect time. No RRLB/badAddr: there is a
+		// single target, and transient failures are handled by the retry path.
+		return externalName + ":" + targetPort
+	}
+
+	// neither a pod route nor an externalName route for this host
+	return ""
 }
 
 // SetHostRoutes sets route from host to RRLB (IPs)
@@ -78,6 +93,19 @@ func (t *Table) SetHostRoute(host string, lb *RRLB) {
 func (t *Table) SetPortRoutes(routes map[string]string) {
 	t.mu.Lock()
 	t.addrToTargetPort = routes
+	t.mu.Unlock()
+}
+
+// SetExternalNameRoutes sets route from a service's host
+// (service.namespace.svc.cluster.local) to its spec.externalName — an external
+// DNS name dialed directly instead of a pod IP. It is a full replace, mirroring
+// SetPortRoutes, and is owned solely by the service reload, so it never races the
+// incremental endpoint host-route path (SetHostRoute). A host present here but not
+// in addrToTargetHost (an ExternalName service has no Endpoints) resolves via the
+// externalName branch in Lookup.
+func (t *Table) SetExternalNameRoutes(routes map[string]string) {
+	t.mu.Lock()
+	t.addrToExternalName = routes
 	t.mu.Unlock()
 }
 

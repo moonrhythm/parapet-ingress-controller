@@ -195,6 +195,85 @@ func endpointsNamedPort(namespace, name, ip, portName string, port int) *v1.Endp
 	}
 }
 
+func externalNameService(namespace, name, externalName string, ports ...int) *v1.Service {
+	sp := make([]v1.ServicePort, 0, len(ports))
+	for _, p := range ports {
+		sp = append(sp, v1.ServicePort{Port: int32(p)})
+	}
+	return &v1.Service{
+		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+		Spec: v1.ServiceSpec{
+			Type:         v1.ServiceTypeExternalName,
+			ExternalName: externalName,
+			Ports:        sp,
+		},
+	}
+}
+
+func TestReloadServiceExternalName(t *testing.T) {
+	t.Run("resolves to the external DNS name on the service port (no Endpoints)", func(t *testing.T) {
+		ctrl := New("", proxy.New())
+		ctrl.watchedServices.Store("default/ext",
+			externalNameService("default", "ext", "api.example.com", 443))
+
+		ctrl.reloadServiceDebounced()
+		// An ExternalName service has no Endpoints object, yet it still resolves.
+		assert.Equal(t, "api.example.com:443",
+			ctrl.routeTable.Lookup("ext.default.svc.cluster.local:443"))
+	})
+
+	t.Run("each declared port dials the external host on that port", func(t *testing.T) {
+		ctrl := New("", proxy.New())
+		ctrl.watchedServices.Store("default/ext",
+			externalNameService("default", "ext", "api.example.com", 80, 443))
+
+		ctrl.reloadServiceDebounced()
+		assert.Equal(t, "api.example.com:80",
+			ctrl.routeTable.Lookup("ext.default.svc.cluster.local:80"))
+		assert.Equal(t, "api.example.com:443",
+			ctrl.routeTable.Lookup("ext.default.svc.cluster.local:443"))
+	})
+
+	t.Run("a trailing dot in spec.externalName is trimmed", func(t *testing.T) {
+		ctrl := New("", proxy.New())
+		ctrl.watchedServices.Store("default/ext",
+			externalNameService("default", "ext", "api.example.com.", 443))
+
+		ctrl.reloadServiceDebounced()
+		assert.Equal(t, "api.example.com:443",
+			ctrl.routeTable.Lookup("ext.default.svc.cluster.local:443"))
+	})
+
+	t.Run("empty spec.externalName produces no route and does not panic", func(t *testing.T) {
+		ctrl := New("", proxy.New())
+		ctrl.watchedServices.Store("default/ext",
+			externalNameService("default", "ext", "", 443))
+
+		assert.NotPanics(t, func() { ctrl.reloadServiceDebounced() })
+		assert.Empty(t, ctrl.routeTable.Lookup("ext.default.svc.cluster.local:443"))
+	})
+
+	t.Run("flipping ClusterIP->ExternalName drops the stale pod route", func(t *testing.T) {
+		ctrl := New("", proxy.New())
+		// Start as a ClusterIP service with one endpoint.
+		ctrl.watchedServices.Store("default/svc", clusterIPService("default", "svc", 80, 8080))
+		ctrl.watchedEndpoints.Store("default/svc", &v1.Endpoints{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "svc"},
+			Subsets:    []v1.EndpointSubset{{Addresses: []v1.EndpointAddress{{IP: "10.0.0.1"}}}},
+		})
+		ctrl.reloadServiceDebounced()
+		ctrl.reloadEndpointDebounced()
+		assert.Equal(t, "10.0.0.1:8080", ctrl.routeTable.Lookup("svc.default.svc.cluster.local:80"))
+
+		// Flip to ExternalName; the endpoints controller removes the Endpoints object.
+		ctrl.watchedServices.Store("default/svc", externalNameService("default", "svc", "api.example.com", 80))
+		ctrl.watchedEndpoints.Delete("default/svc")
+		ctrl.reloadServiceDebounced()
+		ctrl.reloadEndpointDebounced()
+		assert.Equal(t, "api.example.com:80", ctrl.routeTable.Lookup("svc.default.svc.cluster.local:80"))
+	})
+}
+
 func TestReloadServiceNamedTargetPort(t *testing.T) {
 	// A named targetPort ("http") carries no number in the Service; it must be
 	// resolved from the matching EndpointPort, not read as IntVal (which is 0 and

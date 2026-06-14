@@ -655,9 +655,30 @@ func (ctrl *Controller) reloadServiceDebounced() {
 	}()
 
 	addrToPort := make(map[string]string, endpointSizeHint)
+	externalNames := make(map[string]string)
 
 	ctrl.watchedServices.Range(func(_, value any) bool {
 		s := value.(*v1.Service)
+
+		// ExternalName services have no selector and thus no Endpoints object, so
+		// they never get a pod-IP host route. Map the service host to its external
+		// DNS name (dialed directly, resolved by the dialer) and map each declared
+		// service port to itself — the external host is contacted on the port the
+		// ingress references (targetPort is a pod concept and does not apply to a
+		// DNS CNAME).
+		if s.Spec.Type == v1.ServiceTypeExternalName {
+			extName := strings.TrimSuffix(strings.TrimSpace(s.Spec.ExternalName), ".")
+			if extName == "" {
+				slog.Error("externalName service has empty spec.externalName", "namespace", s.Namespace, "name", s.Name)
+				return true
+			}
+			externalNames[buildHost(s.Namespace, s.Name)] = extName
+			for _, p := range s.Spec.Ports {
+				addr := buildHostPort(s.Namespace, s.Name, int(p.Port))
+				addrToPort[addr] = strconv.Itoa(int(p.Port))
+			}
+			return true
+		}
 
 		// build route target port
 		for _, p := range s.Spec.Ports {
@@ -676,7 +697,8 @@ func (ctrl *Controller) reloadServiceDebounced() {
 	})
 
 	ctrl.routeTable.SetPortRoutes(addrToPort)
-	slog.Info("reloaded services", "ports", len(addrToPort))
+	ctrl.routeTable.SetExternalNameRoutes(externalNames)
+	slog.Info("reloaded services", "ports", len(addrToPort), "externalNames", len(externalNames))
 }
 
 // resolveTargetPort returns the concrete numeric pod port (as a string) a

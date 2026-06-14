@@ -73,6 +73,47 @@ func TestTable(t *testing.T) {
 	})
 }
 
+func TestTableExternalName(t *testing.T) {
+	t.Parallel()
+
+	tb := Table{}
+	tb.SetExternalNameRoutes(map[string]string{
+		"ext.default.svc.cluster.local": "api.example.com",
+	})
+	tb.SetPortRoutes(map[string]string{
+		"ext.default.svc.cluster.local:443": "443",
+		"ext.default.svc.cluster.local:80":  "80",
+	})
+
+	t.Run("resolves to the external DNS name and port", func(t *testing.T) {
+		assert.Equal(t, "api.example.com:443",
+			tb.Lookup("ext.default.svc.cluster.local:443"))
+		assert.Equal(t, "api.example.com:80",
+			tb.Lookup("ext.default.svc.cluster.local:80"))
+	})
+
+	t.Run("missing port misses even with an externalName host", func(t *testing.T) {
+		assert.Empty(t, tb.Lookup("ext.default.svc.cluster.local:8443"))
+	})
+
+	t.Run("unknown host misses", func(t *testing.T) {
+		assert.Empty(t, tb.Lookup("other.default.svc.cluster.local:443"))
+	})
+
+	t.Run("a pod host route takes precedence over externalName", func(t *testing.T) {
+		// Both maps can briefly hold the same host during a Service type change;
+		// the real pod endpoints win, and once they are gone Lookup falls back to
+		// the externalName.
+		tb.SetHostRoutes(map[string]*RRLB{
+			"ext.default.svc.cluster.local": {IPs: []string{"10.0.0.9"}},
+		})
+		assert.Equal(t, "10.0.0.9:443", tb.Lookup("ext.default.svc.cluster.local:443"))
+
+		tb.SetHostRoutes(map[string]*RRLB{})
+		assert.Equal(t, "api.example.com:443", tb.Lookup("ext.default.svc.cluster.local:443"))
+	})
+}
+
 // hostIPs reads back the IP set the table currently holds for each host so two
 // tables built different ways can be compared for equality.
 func hostIPs(t *Table) map[string][]string {
