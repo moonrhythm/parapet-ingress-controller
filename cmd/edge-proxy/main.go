@@ -154,7 +154,7 @@ func main() {
 	// refreshes single-flight per resource.
 	eventsEnabled := envOr("EDGE_EVENTS_ENABLED", "true") == "true"
 	var pokes edge.EventPokes
-	var certPoke, wafPoke, rlPoke, hostsPoke, purgePoke chan struct{}
+	var certPoke, wafPoke, rlPoke, hostsPoke, gatedHostsPoke, purgePoke chan struct{}
 	if eventsEnabled {
 		certPoke = make(chan struct{}, 1)
 		pokes.Certs = certPoke
@@ -171,6 +171,21 @@ func main() {
 		pokes.Hosts = hostsPoke
 	}
 	go edge.RunHostsRefresh(ctx, cp, edgeHosts, refreshInterval, hostsPoke)
+
+	// Forward-auth-gated host set (GET /v1/gated-hosts) — the edge response-cache
+	// bypass set. The cache key ignores Cookie, so a cached 200 for a forward-auth-
+	// gated host would leak pre-auth content; the cache MUST never serve-from or
+	// store a response for these hosts. Always fetched (the bypass is a security
+	// invariant), independent of WAF/ratelimit; fail-static (keeps last-good), and a
+	// 404 from a CP without the endpoint just leaves no host bypassing — the
+	// in-cluster forward-auth gate stays authoritative regardless.
+	edgeGatedHosts := edge.NewEdgeGatedHosts()
+	edge.RefreshGatedHostsOnce(cp, edgeGatedHosts)
+	if eventsEnabled {
+		gatedHostsPoke = make(chan struct{}, 1)
+		pokes.GatedHosts = gatedHostsPoke
+	}
+	go edge.RunGatedHostsRefresh(ctx, cp, edgeGatedHosts, refreshInterval, gatedHostsPoke)
 
 	// Optional data-plane mTLS: fetch a CP-issued client cert (CA-only trust), hold it
 	// in memory (never on disk), and present it on the re-encrypt hop. The re-mint
@@ -325,9 +340,22 @@ func main() {
 			// Cache overrides drive the two per-request decision hooks: Cacheable
 			// (bypass rules) and Override (force rules). nil when EDGE_CACHE_OVERRIDE_ENABLED
 			// is off, leaving the cache strictly honor-origin.
+			//
+			// Gated hosts (forward-auth) must NEVER be served from or stored in the
+			// edge cache: the cache key ignores Cookie, so a cached copy would leak
+			// pre-auth content. The in-cluster forward-auth gate stays authoritative;
+			// this closes the edge-cache bypass of that gate. Active whenever the
+			// cache is on, independent of cache overrides.
+			ecoCacheable := func(r *http.Request) bool { return true }
 			if eco != nil {
-				opts.Cacheable = eco.Cacheable
+				ecoCacheable = eco.Cacheable
 				opts.Override = eco.Override
+			}
+			opts.Cacheable = func(r *http.Request) bool {
+				if edgeGatedHosts.IsGatedHost(r.Host) {
+					return false
+				}
+				return ecoCacheable(r)
 			}
 			// Cache-purge: an invalidation table fed from the control plane gates each
 			// hit (parapet's Options.InvalidatedAfter). On by default with the cache; the

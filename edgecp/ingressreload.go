@@ -13,6 +13,12 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 )
 
+// ForwardAuthAnnotation marks an Ingress as forward-auth-gated (a non-empty value
+// enables the in-cluster forward-auth plugin — see plugin/auth.go). The edge-proxy
+// bypasses its response cache for every host of such an Ingress, so a cached copy
+// can't leak pre-auth content (the cache key ignores Cookie).
+const ForwardAuthAnnotation = "parapet.moonrhythm.io/forward-auth"
+
 // IngressReloader derives the zone bindings from Ingress objects: for each
 // Ingress carrying the `parapet.moonrhythm.io/waf-zone` annotation, every route
 // pattern its rules register at the controller maps to the resolved zone key
@@ -25,10 +31,11 @@ import (
 // known-host list the edge wires as its host-key collapser. store may be
 // nil when only the rate-limit side is enabled.
 type IngressReloader struct {
-	store          *WafStore       // optional (nil = WAF host→zone derivation off)
-	rl             *RateLimitStore // optional (nil = rate-limit derivation off)
-	cache          *CacheStore     // optional (nil = cache-override derivation off)
-	hosts          *HostsStore     // optional (nil = /v1/hosts distribution off)
+	store          *WafStore        // optional (nil = WAF host→zone derivation off)
+	rl             *RateLimitStore  // optional (nil = rate-limit derivation off)
+	cache          *CacheStore      // optional (nil = cache-override derivation off)
+	hosts          *HostsStore      // optional (nil = /v1/hosts distribution off)
+	gated          *GatedHostsStore // optional (nil = /v1/gated-hosts distribution off)
 	watchNamespace string
 	debounce       time.Duration
 }
@@ -57,6 +64,14 @@ func (r *IngressReloader) WithCache(cache *CacheStore) *IngressReloader {
 // the reloader for chaining.
 func (r *IngressReloader) WithHosts(hosts *HostsStore) *IngressReloader {
 	r.hosts = hosts
+	return r
+}
+
+// WithGatedHosts wires the forward-auth-gated host store (served at
+// /v1/gated-hosts) so the same Ingress reload also derives the host set the
+// edge-proxy bypasses its response cache for. Returns the reloader for chaining.
+func (r *IngressReloader) WithGatedHosts(gated *GatedHostsStore) *IngressReloader {
+	r.gated = gated
 	return r
 }
 
@@ -127,6 +142,9 @@ func (r *IngressReloader) reload(ctx context.Context) error {
 	if r.hosts != nil {
 		r.hosts.SetHosts(collectIngressHosts(ings))
 	}
+	if r.gated != nil {
+		r.gated.SetHosts(collectGatedHosts(ings))
+	}
 	return nil
 }
 
@@ -191,6 +209,34 @@ func buildRateLimitHostZone(ings []networking.Ingress) map[string]string {
 func collectIngressHosts(ings []networking.Ingress) []string {
 	seen := map[string]struct{}{}
 	for i := range ings {
+		for _, rule := range ings[i].Spec.Rules {
+			host := strings.ToLower(strings.TrimSpace(rule.Host))
+			if host == "" {
+				continue
+			}
+			seen[host] = struct{}{}
+		}
+	}
+	hosts := make([]string, 0, len(seen))
+	for h := range seen {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	return hosts
+}
+
+// collectGatedHosts returns every host declared by an Ingress that carries a
+// non-empty `parapet.moonrhythm.io/forward-auth` annotation (lowercased, deduped,
+// sorted — the order feeds the store fingerprint, exactly like
+// collectIngressHosts). The edge-proxy bypasses its response cache for these
+// hosts so a cached copy can't leak pre-auth content (the cache key ignores
+// Cookie); the in-cluster forward-auth gate stays authoritative.
+func collectGatedHosts(ings []networking.Ingress) []string {
+	seen := map[string]struct{}{}
+	for i := range ings {
+		if strings.TrimSpace(ings[i].Annotations[ForwardAuthAnnotation]) == "" {
+			continue // not forward-auth-gated
+		}
 		for _, rule := range ings[i].Spec.Rules {
 			host := strings.ToLower(strings.TrimSpace(rule.Host))
 			if host == "" {
