@@ -7,6 +7,9 @@ name: edge-build
 #   edge-<sha>          — the Go edge proxy    (Dockerfile.edge)
 # See EDGE.md. Triggered when the Go module or the edge manifests change.
 # Auth/registries mirror go-build.
+# Both images are multi-arch manifests (linux/amd64 + linux/arm64). They are pure
+# Go (CGO_ENABLED=0), so buildx cross-compiles each arch natively on the runner —
+# no QEMU/binfmt needed (see the $BUILDPLATFORM build stages in the Dockerfiles).
 on:
   push:
     branches:
@@ -48,12 +51,13 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         with:
           version: latest
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
       - uses: docker/build-push-action@v6
         with:
           provenance: false
           context: .
           file: Dockerfile.edge-controlplane
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             VERSION=${{ github.sha }}
@@ -85,12 +89,13 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         with:
           version: latest
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
       - uses: docker/build-push-action@v6
         with:
           provenance: false
           context: .
           file: Dockerfile.edge
+          platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
             VERSION=${{ github.sha }}

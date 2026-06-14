@@ -1040,6 +1040,16 @@ and `:edge-<sha>`); `edge-e2e.yaml` runs the cluster-free smoke test
 (`deploy/edge/e2e/run.sh`). Image tag prefixes are component-keyed (not
 language-keyed), so `:edge-<sha>` carried over the Rust→Go migration unchanged.
 
+Both images are **multi-arch manifests** (`linux/amd64` + `linux/arm64`): one tag
+serves either CPU and the registry resolves the right variant per `docker pull` /
+node arch. Because both binaries are pure Go (`CGO_ENABLED=0`), the Dockerfiles
+pin the build stage to `$BUILDPLATFORM` and cross-compile to `$TARGETARCH`, so the
+arm64 variant is produced **without QEMU emulation** — buildx compiles both arches
+natively on the runner (the edge's GeoIP-download stage is likewise pinned to
+`$BUILDPLATFORM`, since the MMDBs are arch-neutral data). The in-cluster
+controller image is a separate story: it links `libbrotli` via CGO, so an arm64
+variant there would need QEMU (or a cross-toolchain) and has not been enabled.
+
 ## Implementation history
 
 The edge was originally **Rust/Pingora**; it was rewritten in **Go** on the
