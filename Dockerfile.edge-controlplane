@@ -5,10 +5,17 @@
 # over HTTPS REST. See EDGE.md. Build context is the repo root:
 #
 #     docker build -f Dockerfile.edge-controlplane -t parapet-edge-controlplane .
-FROM golang:1.26.4-trixie AS build
+#
+# Multi-arch (linux/amd64 + linux/arm64): the build stage is pinned to
+# $BUILDPLATFORM and Go cross-compiles to $TARGETARCH, so the arm64 image is
+# produced WITHOUT QEMU emulation (pure Go, CGO_ENABLED=0). GOAMD64 is honored
+# only for amd64 (Go ignores it when GOARCH=arm64).
+FROM --platform=$BUILDPLATFORM golang:1.26.4-trixie AS build
 
 ARG VERSION
 ARG GOAMD64
+ARG TARGETOS
+ARG TARGETARCH
 
 ENV CGO_ENABLED=0
 ENV GOAMD64=$GOAMD64
@@ -18,7 +25,7 @@ ADD go.mod go.sum ./
 RUN go mod download
 
 ADD . .
-RUN go build \
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
 		-o edge-controlplane \
 		-ldflags "-w -s -X main.version=$VERSION" \
 		./cmd/edge-controlplane

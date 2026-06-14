@@ -60,6 +60,7 @@ Dockerfile.edge                   # edge proxy image (pure Go, distroless/static
 # also at repo root: deploy/  WAF.md  RATELIMIT.md  SPEC.md  EDGE.md  conformance/
 # .github/workflows/: go-test / go-build / go-release .yaml (path-filtered to **/*.go + go.mod/go.sum);
 #   edge-build / edge-e2e .yaml build + smoke-test the edge + control-plane images
+#   (edge-build images are multi-arch: linux/amd64 + linux/arm64, cross-compiled, no QEMU)
 ```
 
 ### Edge proxy (`cmd/edge-proxy` + `edge/`)
