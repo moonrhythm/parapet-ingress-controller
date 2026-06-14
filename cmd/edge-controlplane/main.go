@@ -321,6 +321,7 @@ func main() {
 	var rlStore *edgecp.RateLimitStore
 	var cacheStore *edgecp.CacheStore
 	var hostsStore *edgecp.HostsStore
+	var gatedHostsStore *edgecp.GatedHostsStore
 	if wafEnabled {
 		wafStore = edgecp.NewWafStore()
 		wafReloader := edgecp.NewWafReloader(wafStore, watchNamespace, podNamespace)
@@ -362,8 +363,18 @@ func main() {
 		server = server.WithHosts(hostsStore)
 		slog.Info("edge control plane: hosts distribution enabled")
 	}
-	if wafStore != nil || rlStore != nil || cacheStore != nil || hostsStore != nil {
-		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore).WithCache(cacheStore).WithHosts(hostsStore)
+	// Forward-auth-gated host distribution (GET /v1/gated-hosts) — the edge-proxy
+	// bypasses its response cache for these hosts so a cached copy can't leak
+	// pre-auth content. ON BY DEFAULT (a security feature): the in-cluster
+	// forward-auth gate stays authoritative, but with this off a cached 200 for a
+	// gated host would be served to anonymous users. Rides the same Ingress watch.
+	if envOr("CP_GATED_HOSTS_ENABLED", "true") == "true" {
+		gatedHostsStore = edgecp.NewGatedHostsStore()
+		server = server.WithGatedHosts(gatedHostsStore)
+		slog.Info("edge control plane: gated-hosts distribution enabled")
+	}
+	if wafStore != nil || rlStore != nil || cacheStore != nil || hostsStore != nil || gatedHostsStore != nil {
+		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore).WithCache(cacheStore).WithHosts(hostsStore).WithGatedHosts(gatedHostsStore)
 		if err := ingReloader.LoadOnce(ctx); err != nil {
 			slog.Error("edgecp: initial ingress load failed", "err", err)
 		}
@@ -409,6 +420,9 @@ func main() {
 			}
 			if hostsStore != nil {
 				snap.Hosts = hostsStore.Version()
+			}
+			if gatedHostsStore != nil {
+				snap.GatedHosts = gatedHostsStore.Version()
 			}
 			if purgeStore != nil {
 				snap.Purges = purgeStore.LastSeq()

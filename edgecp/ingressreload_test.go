@@ -73,6 +73,28 @@ func TestBuildZoneRoutes(t *testing.T) {
 	}
 }
 
+// collectGatedHosts returns the hosts of ingresses carrying a non-empty
+// forward-auth annotation only — lowercased, deduped, sorted.
+func TestCollectGatedHosts(t *testing.T) {
+	ings := []networking.Ingress{
+		// Forward-auth-gated: contributes its hosts (lowercased).
+		routedIngress("cust1", "gated", map[string]string{ForwardAuthAnnotation: "http://authz/auth"},
+			httpRule("GATED.com", networking.HTTPIngressPath{Path: "/", PathType: pt(networking.PathTypePrefix)}),
+			httpRule("app.gated.com", networking.HTTPIngressPath{Path: "/", PathType: pt(networking.PathTypePrefix)})),
+		// No forward-auth annotation: contributes nothing.
+		routedIngress("cust2", "public", map[string]string{WAFZoneAnnotation: "z"},
+			httpRule("public.com", networking.HTTPIngressPath{Path: "/", PathType: pt(networking.PathTypePrefix)})),
+		// Forward-auth annotation present but whitespace-only (disabled): nothing.
+		routedIngress("cust3", "blank", map[string]string{ForwardAuthAnnotation: "  "},
+			httpRule("blank.com", networking.HTTPIngressPath{Path: "/", PathType: pt(networking.PathTypePrefix)})),
+	}
+	got := collectGatedHosts(ings)
+	want := []string{"app.gated.com", "gated.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestBuildZoneRoutesSameNamespaceOnly(t *testing.T) {
 	ings := []networking.Ingress{
 		routedIngress("cust1", "own", map[string]string{RateLimitZoneAnnotation: "basic"},

@@ -15,12 +15,13 @@ import (
 // only ever compared for inequality against the previous event on the SAME
 // stream, never persisted or ordered.
 type eventsSnapshot struct {
-	WAF       string `json:"waf"`
-	RateLimit string `json:"ratelimit"`
-	Cache     string `json:"cache"`
-	Hosts     string `json:"hosts"`
-	Certs     string `json:"certs"`
-	Purges    uint64 `json:"purges"`
+	WAF        string `json:"waf"`
+	RateLimit  string `json:"ratelimit"`
+	Cache      string `json:"cache"`
+	Hosts      string `json:"hosts"`
+	GatedHosts string `json:"gatedHosts"`
+	Certs      string `json:"certs"`
+	Purges     uint64 `json:"purges"`
 }
 
 // EventPokes carries the wake-up channels for the resource refresh loops. Each
@@ -28,12 +29,13 @@ type eventsSnapshot struct {
 // (size 1); sends are non-blocking, so a poke arriving while a refresh is
 // already pending coalesces.
 type EventPokes struct {
-	WAF       chan<- struct{}
-	RateLimit chan<- struct{}
-	Cache     chan<- struct{}
-	Hosts     chan<- struct{}
-	Certs     chan<- struct{}
-	Purges    chan<- struct{}
+	WAF        chan<- struct{}
+	RateLimit  chan<- struct{}
+	Cache      chan<- struct{}
+	Hosts      chan<- struct{}
+	GatedHosts chan<- struct{}
+	Certs      chan<- struct{}
+	Purges     chan<- struct{}
 }
 
 func (p EventPokes) poke(ch chan<- struct{}) {
@@ -54,6 +56,7 @@ func (p EventPokes) pokeAll() {
 	p.poke(p.RateLimit)
 	p.poke(p.Cache)
 	p.poke(p.Hosts)
+	p.poke(p.GatedHosts)
 	p.poke(p.Certs)
 	p.poke(p.Purges)
 }
@@ -192,6 +195,9 @@ func runEventsOnce(ctx context.Context, cp *CpClient, pokes EventPokes) (deliver
 					}
 					if snap.Hosts != last.Hosts {
 						pokes.poke(pokes.Hosts)
+					}
+					if snap.GatedHosts != last.GatedHosts {
+						pokes.poke(pokes.GatedHosts)
 					}
 					if snap.Certs != last.Certs {
 						pokes.poke(pokes.Certs)

@@ -371,6 +371,51 @@ func (c *CpClient) FetchHosts(currentEtag string) (HostsFetch, error) {
 	}
 }
 
+// GatedHostsFetch is the outcome of a forward-auth-gated host fetch (the edge
+// response-cache bypass set). Scoped to the edge's token.
+type GatedHostsFetch struct {
+	// Unchanged is true on a 304.
+	Unchanged  bool
+	Generation uint64
+	Hosts      []string
+	Etag       string
+}
+
+type gatedHostsBody struct {
+	Generation uint64   `json:"generation"`
+	Hosts      []string `json:"hosts"`
+}
+
+// FetchGatedHosts fetches the forward-auth-gated host list scoped to the edge's
+// token, with ETag revalidation. A 404 ("gated-hosts distribution disabled" — an
+// old CP, or CP_GATED_HOSTS_ENABLED=false) is treated like any other non-200/304:
+// an error the caller handles fail-static (keeps last-good — the edge keeps
+// bypassing the cache for the hosts it already knows are gated).
+func (c *CpClient) FetchGatedHosts(currentEtag string) (GatedHostsFetch, error) {
+	resp, err := c.do(c.base+"/v1/gated-hosts", currentEtag)
+	if err != nil {
+		return GatedHostsFetch{}, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return GatedHostsFetch{Unchanged: true}, nil
+	case http.StatusOK:
+		var body gatedHostsBody
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxWafBody)).Decode(&body); err != nil {
+			return GatedHostsFetch{}, fmt.Errorf("decode: %w", err)
+		}
+		return GatedHostsFetch{
+			Generation: body.Generation,
+			Hosts:      body.Hosts,
+			Etag:       resp.Header.Get("ETag"),
+		}, nil
+	default:
+		return GatedHostsFetch{}, fmt.Errorf("control plane returned %d for /v1/gated-hosts", resp.StatusCode)
+	}
+}
+
 // PurgeFetch is the outcome of a cache-purge poll.
 type PurgeFetch struct {
 	// Disabled is true on a 404 ("purge distribution disabled" at the CP): a clean,

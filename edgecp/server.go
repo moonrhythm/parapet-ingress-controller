@@ -37,6 +37,13 @@ type Server struct {
 	// list only over-collapses the metric label (no atomicity with waf/ratelimit).
 	hosts *HostsStore
 
+	// gatedHosts is the optional forward-auth-gated host distribution store (nil =
+	// /v1/gated-hosts → 404). The edge-proxy bypasses its response cache for these
+	// hosts so a cached copy can't leak pre-auth content (the cache key ignores
+	// Cookie); the in-cluster forward-auth gate stays authoritative. Same
+	// scoping/ETag model.
+	gatedHosts *GatedHostsStore
+
 	// purge is the optional cache-purge journal (nil = purge distribution disabled,
 	// /v1/purges → 404). purgeAdminToken gates POST /v1/purges — a STRONGER credential
 	// than the per-edge read tokens (an edge can read its purges but not issue them).
@@ -161,6 +168,13 @@ func (s *Server) WithHosts(hosts *HostsStore) *Server {
 	return s
 }
 
+// WithGatedHosts enables the forward-auth-gated host endpoint (GET /v1/gated-hosts).
+// Returns the server for chaining.
+func (s *Server) WithGatedHosts(gatedHosts *GatedHostsStore) *Server {
+	s.gatedHosts = gatedHosts
+	return s
+}
+
 // WithEvents enables the change-notification stream (GET /v1/events). Returns
 // the server for chaining; the caller runs hub.Run in its own goroutine.
 func (s *Server) WithEvents(hub *EventsHub) *Server {
@@ -245,6 +259,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/ratelimit", s.handleRateLimit)
 	mux.HandleFunc("GET /v1/cache", s.handleCache)
 	mux.HandleFunc("GET /v1/hosts", s.handleHosts)
+	mux.HandleFunc("GET /v1/gated-hosts", s.handleGatedHosts)
 	mux.HandleFunc("GET /v1/purges", s.handlePurges)
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/purges", s.handlePurgeAdmin)
@@ -553,6 +568,45 @@ func (s *Server) handleHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	generation, hosts := s.hosts.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
+	resp := hostsResponse{Generation: generation, Hosts: hosts}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	etagResp := resp
+	etagResp.Generation = 0
+	etagBody, err := json.Marshal(etagResp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	etag := etagOfString(string(etagBody))
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// handleGatedHosts serves the forward-auth-gated host list scoped to the edge's
+// allowed domains. The edge-proxy bypasses its response cache for these hosts so
+// a cached copy can't leak pre-auth content. ETag is over the scoped payload with
+// the generation zeroed, the same model as handleHosts/handleWAF. Reuses
+// hostsResponse — the {generation, hosts} shape is identical.
+func (s *Server) handleGatedHosts(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.gatedHosts == nil {
+		http.Error(w, "gated-hosts distribution disabled", http.StatusNotFound)
+		return
+	}
+	generation, hosts := s.gatedHosts.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
 	resp := hostsResponse{Generation: generation, Hosts: hosts}
 	body, err := json.Marshal(resp)
 	if err != nil {

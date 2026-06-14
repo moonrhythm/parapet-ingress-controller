@@ -213,6 +213,24 @@ GET /v1/hosts         Authorization: Bearer <token>   [If-None-Match: "<etag>"]
        (ETag over the scoped payload with the generation excluded, like /v1/waf)
   401 (no/invalid token)   404 (hosts distribution disabled / older CP)
 
+GET /v1/gated-hosts   Authorization: Bearer <token>   [If-None-Match: "<etag>"]
+  200 {"generation": N, "hosts":["…"]}
+       hosts          : every host of an Ingress carrying the
+                        `parapet.moonrhythm.io/forward-auth` annotation (non-empty),
+                        scoped to the token's domains (sorted, deduped). The edge-proxy
+                        bypasses its RESPONSE CACHE for these hosts — never serves from
+                        nor stores a response — because the cache key ignores Cookie, so
+                        a cached 200 for a forward-auth-gated host would leak pre-auth
+                        content to anonymous users (Options.Cacheable → false).
+       STANDALONE and CP-DERIVED from the same Ingress watch (the apiserver does NOT
+       push it; the forward-auth annotation the deployer renders IS the signal). The
+       in-cluster forward-auth gate stays authoritative regardless, so a stale/empty
+       set or an older CP (404) cannot bypass AUTH — only briefly serve a cached copy
+       until the next poll/events poke; the change wakes edges via the events `gatedHosts`
+       vector. Served by default (CP_GATED_HOSTS_ENABLED, default true).
+       (ETag over the scoped payload with the generation excluded, like /v1/hosts)
+  401 (no/invalid token)   404 (gated-hosts distribution disabled / older CP)
+
 GET /v1/purges?since=<seq>   Authorization: Bearer <token>
   200 {"entries":[{"seq":N,"scope":"url|host|prefix|tag|flush-all","host":"…","uri":"…","tag":"…"}],
        "max_seq": N, "flush_required": false}
@@ -246,7 +264,7 @@ POST /v1/purges       Authorization: Bearer <ADMIN token>   ← stronger cred th
 GET /v1/events        Authorization: Bearer <token>   (SSE; long-lived)
   200 Content-Type: text/event-stream — change-notification stream. Each event:
        event: change
-       data: {"waf":"<etag>","ratelimit":"<etag>","hosts":"<etag>","certs":"<fp>","purges":<seq>}
+       data: {"waf":"<etag>","ratelimit":"<etag>","hosts":"<etag>","gatedHosts":"<etag>","certs":"<fp>","purges":<seq>}
        The payload is a VERSION VECTOR (opaque, CP-process-local) — a wake-up
        signal only, never content. The first event is the current vector (a
        reconnecting edge covers its disconnected window); after that, one event

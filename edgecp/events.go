@@ -22,6 +22,10 @@ type EventsSnapshot struct {
 	// Hosts is the known-host store's content etag ("" when off). A host change
 	// pokes only the edge's hosts refresh — it doesn't affect WAF/ratelimit.
 	Hosts string `json:"hosts,omitempty"`
+	// GatedHosts is the forward-auth-gated host store's content etag ("" when off).
+	// A change pokes only the edge's gated-hosts refresh, which drives the edge
+	// response-cache bypass — it doesn't affect WAF/ratelimit.
+	GatedHosts string `json:"gatedHosts,omitempty"`
 	// Certs is a fingerprint over the cert store's full (name, etag) index.
 	Certs string `json:"certs,omitempty"`
 	// Purges is the purge journal's last issued seq (0 = none/off).
