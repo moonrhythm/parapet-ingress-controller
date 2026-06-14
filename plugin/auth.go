@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/moonrhythm/parapet/pkg/authn"
+	"github.com/moonrhythm/parapet/pkg/headers"
 	"gopkg.in/yaml.v3"
 )
 
@@ -58,6 +59,17 @@ func ForwardAuth(ctx Context) {
 	if err != nil {
 		return
 	}
+	// Make every response on a forward-auth-gated ingress non-cacheable at the
+	// out-of-cluster edge response cache. That cache is honor-origin and its key
+	// ignores Cookie, so a cached 200 for a gated host would be served to
+	// anonymous users (forward-auth gates the request path, not a cache hit that
+	// answers before the request ever reaches here). Cache-Control: private
+	// makes the edge (a shared cache) refuse to store or serve it — and the edge
+	// honors private even under an aggressive cache-override, so a force-cache
+	// rule can't defeat it. Installed BEFORE the authenticator so it is
+	// outermost: it overrides whatever Cache-Control the upstream sent and also
+	// covers the auth deny/redirect response.
+	ctx.Use(headers.SetResponse("Cache-Control", "private"))
 	ctx.Use(authn.ForwardAuthenticator{
 		URL:                 u,
 		Client:              authHTTPClient,
