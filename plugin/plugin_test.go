@@ -468,3 +468,58 @@ func TestStripPrefix(t *testing.T) {
 	})).ServeHTTP(w, r)
 	assert.True(t, called)
 }
+
+func TestForwardAuthCacheControl(t *testing.T) {
+	t.Parallel()
+
+	// Auth endpoint that allows every request (200).
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer authSrv.Close()
+
+	// An upstream that tries to make its response publicly cacheable — exactly
+	// the leak the override must defeat at the edge.
+	upstream := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=600")
+		w.WriteHeader(http.StatusOK)
+	})
+
+	t.Run("gated ingress forces private and overrides the upstream", func(t *testing.T) {
+		ctx := Context{
+			Middlewares: &parapet.Middlewares{},
+			Ingress: &networking.Ingress{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"parapet.moonrhythm.io/forward-auth": "url: " + authSrv.URL,
+					},
+				},
+			},
+		}
+		ForwardAuth(ctx)
+
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		ctx.ServeHandler(upstream).ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusOK, w.Code)
+		// private wins, the upstream's public/max-age is gone (clean override).
+		assert.Equal(t, "private", w.Header().Get("Cache-Control"))
+	})
+
+	t.Run("non-gated ingress leaves the upstream Cache-Control untouched", func(t *testing.T) {
+		ctx := Context{
+			Middlewares: &parapet.Middlewares{},
+			Ingress: &networking.Ingress{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}},
+			},
+		}
+		ForwardAuth(ctx)
+
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		ctx.ServeHandler(upstream).ServeHTTP(w, r)
+
+		assert.Equal(t, "public, max-age=600", w.Header().Get("Cache-Control"))
+	})
+}

@@ -361,6 +361,18 @@ rule increments at **request** time. The `id` is bounded to `[A-Za-z0-9._-]`
 - **No request-Cache-Control honoring.** Like a CDN, the cache ignores a
   client's `no-cache`/`no-store` by design (a shared-cache DoS vector); overrides
   don't change that — they are operator policy, not client-driven.
+- **Forward-auth-gated ingresses are forced non-cacheable.** An ingress with the
+  `parapet.moonrhythm.io/forward-auth` annotation has every response stamped
+  `Cache-Control: private` by the in-cluster controller (`plugin.ForwardAuth`).
+  The edge cache is honor-origin and its key ignores `Cookie`, so without this a
+  cached `200` for a gated host would be served to anonymous users (the forward-
+  auth subrequest gates the request path, but a cache **hit** answers before the
+  request ever reaches the controller). `private` makes the shared edge cache
+  refuse to store/serve it, and it is honored even under an aggressive override
+  (a store-sensitivity refusal a force-cache rule cannot defeat — see
+  `parapet/pkg/cache` `policy.go`). This is the deployment-access edge-cache
+  bypass (SPEC §9): the override travels **with the response**, so there is no
+  separate gated-host list to distribute and no propagation window.
 - **No new CEL surface.** Request matching is the `filter` field, the WAF's
   expression surface through the one shared `waf.Predicate`; response narrowing
   is the non-CEL `status` list. There is no `response.*` CEL surface (the
