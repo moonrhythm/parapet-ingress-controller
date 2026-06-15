@@ -13,6 +13,14 @@ import (
 
 var authHTTPClient = &http.Client{
 	Timeout: 10 * time.Second,
+	// A forward-auth probe treats the auth server's response status as the
+	// verdict (2xx allows; anything else is relayed to the client). It must
+	// therefore NOT follow redirects: an auth server that denies by sending
+	// "302 -> login page" would otherwise be followed to the login page's 200,
+	// which reads as a 2xx "allow" and bypasses auth for every gated request.
+	CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
 	Transport: &http.Transport{
 		MaxIdleConnsPerHost:   10,
 		MaxConnsPerHost:       100,

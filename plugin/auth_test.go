@@ -125,3 +125,46 @@ authRequestHeaders:
 		assert.False(t, called)
 	})
 }
+
+// TestForwardAuthDoesNotFollowRedirect guards against a fail-open: an auth
+// server that denies by redirecting to a login page (the access.deploys.app
+// gate) must have its 302 relayed, never followed. Following "302 -> login"
+// to the login page's 200 would read as an "allow" and let every gated
+// request through. authHTTPClient must not follow redirects.
+func TestForwardAuthDoesNotFollowRedirect(t *testing.T) {
+	t.Parallel()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("login page"))
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer ts.Close()
+
+	config := fmt.Sprintf("\nurl: %s/verify\n", ts.URL)
+
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/forward-auth": config,
+				},
+			},
+		},
+	}
+	ForwardAuth(ctx)
+
+	var called bool
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})).ServeHTTP(w, r)
+
+	assert.False(t, called, "upstream must not be reached when auth redirects to login")
+	assert.Equal(t, http.StatusFound, w.Code, "auth 302 must be relayed, not followed to a 200")
+}
