@@ -178,7 +178,7 @@ fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
 
 All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`):
 - **Push & PR touching Go files** → `go-test.yaml`: `go vet` + `go test -race`
-- **Push to `main`** → `go-build.yaml`: pushes two images tagged with `$GITHUB_SHA` (`:$sha` GOAMD64=v3, `:$sha-amd64v1` GOAMD64=v1). Docker build context is the repo root.
+- **Push to `main`** → `go-build.yaml`: pushes two images tagged with `$GITHUB_SHA` — `:$sha` is a **multi-arch manifest** (linux/amd64 GOAMD64=v3 + linux/arm64; pure-Go cross-compile, no QEMU), and `:$sha-amd64v1` is the amd64-only GOAMD64=v1 compatibility image (no arm64 — GOAMD64 levels are amd64-only). Docker build context is the repo root.
 - **Push a tag** → `go-release.yaml`: same plus `:latest` and `:{tag}`
 - Registries: `us-docker.pkg.dev/moonrhythm-containers/gcr.io/` and `asia-southeast3-docker.pkg.dev/moonrhythm-core/public/`
 

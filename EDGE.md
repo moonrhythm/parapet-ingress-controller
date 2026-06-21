@@ -1049,8 +1049,10 @@ natively on the runner (the edge's GeoIP-download stage is likewise pinned to
 `$BUILDPLATFORM`, since the MMDBs are arch-neutral data). The in-cluster
 controller image now follows the same pure-Go (`CGO_ENABLED=0`) model — it
 dropped its `libbrotli`/CGO dependency along with brotli response compression —
-so it cross-compiles to arm64 without QEMU as well (CI currently still publishes
-only the amd64 v3/v1 compatibility split).
+so it too is multi-arch: its default tags (`:<sha>`, `:latest`, `:<tag>`) are
+amd64 (GOAMD64=v3) + arm64 manifests, while the `-amd64v1` GOAMD64=v1
+compatibility image stays amd64-only (GOAMD64 microarch levels are an amd64
+concept).
 
 ## Implementation history
 
