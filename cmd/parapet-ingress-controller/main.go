@@ -317,7 +317,6 @@ func main() {
 	m.Use(state.Middleware(!disableLog))
 	m.Use(metric.Requests(ctrl.IsKnownHost))
 	m.Use(compress.Gzip())
-	m.Use(compress.BrWithQuality(4))
 	m.Use(compress.Zstd())
 	if wafConfig.Enabled {
 		// Global WAF runs just before routing: blocks are access-logged and
