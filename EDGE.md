@@ -1047,8 +1047,10 @@ pin the build stage to `$BUILDPLATFORM` and cross-compile to `$TARGETARCH`, so t
 arm64 variant is produced **without QEMU emulation** — buildx compiles both arches
 natively on the runner (the edge's GeoIP-download stage is likewise pinned to
 `$BUILDPLATFORM`, since the MMDBs are arch-neutral data). The in-cluster
-controller image is a separate story: it links `libbrotli` via CGO, so an arm64
-variant there would need QEMU (or a cross-toolchain) and has not been enabled.
+controller image now follows the same pure-Go (`CGO_ENABLED=0`) model — it
+dropped its `libbrotli`/CGO dependency along with brotli response compression —
+so it cross-compiles to arm64 without QEMU as well (CI currently still publishes
+only the amd64 v3/v1 compatibility split).
 
 ## Implementation history
 

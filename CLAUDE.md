@@ -54,7 +54,7 @@ edgecp/                           # edge control-plane lib (cert store, authz, r
 cmd/edge-controlplane/            # edge control-plane binary (see EDGE.md)
 edge/                             # edge proxy lib: certstore, cp (CP client), waf, ratelimit, refresh, forward (cache is parapet/pkg/cache)
 cmd/edge-proxy/                   # out-of-cluster edge proxy binary (parapet framework; see EDGE.md)
-Dockerfile                        # controller image (multi-stage Go build, CGO + cbrotli)
+Dockerfile                        # controller image (multi-stage Go build, pure Go / no CGO, distroless/static)
 Dockerfile.edge-controlplane      # control-plane image (pure Go, distroless/static)
 Dockerfile.edge                   # edge proxy image (pure Go, distroless/static + baked GeoIP)
 # also at repo root: deploy/  WAF.md  RATELIMIT.md  SPEC.md  EDGE.md  conformance/
@@ -159,10 +159,9 @@ go test ./...
 # Build Docker image via buildctl
 make go-build-dev
 
-# Build binary directly
-go build -o parapet-ingress-controller \
+# Build binary directly (pure Go, no CGO)
+CGO_ENABLED=0 go build -o parapet-ingress-controller \
   -ldflags "-w -s -X main.version=$(git describe --tags)" \
-  -tags=cbrotli \
   ./cmd/parapet-ingress-controller
 ```
 
@@ -171,9 +170,9 @@ fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
 `make test` target.
 
 ### Docker image
-- Builder: `golang:1.26.4-trixie` with `libbrotli-dev` (CGO enabled, `-tags=cbrotli`)
-- Runtime: `debian:trixie-slim` with `libbrotli1` and `ca-certificates`
-- Build args: `VERSION` (injected as `main.version`), `GOAMD64` (v3 default, v1 for compatibility image)
+- Builder: `golang:1.26.4-trixie` (pure Go, `CGO_ENABLED=0`) — cross-compiles, so the image is multi-arch-capable (linux/amd64 + linux/arm64) without QEMU like the edge images
+- Runtime: `gcr.io/distroless/static-debian12` (static binary; root variant so it can bind privileged :80/:443)
+- Build args: `VERSION` (injected as `main.version`), `GOAMD64` (v3 default, v1 for compatibility image; honored only for amd64)
 
 ## CI / Release
 
