@@ -27,11 +27,17 @@ jobs:
     - uses: docker/setup-buildx-action@v3
       with:
         version: latest
-        platforms: linux/amd64
+        platforms: linux/amd64,linux/arm64
+    # Default tags: a multi-arch manifest (linux/amd64 GOAMD64=v3 + linux/arm64).
+    # The controller is pure Go (CGO_ENABLED=0), so buildx cross-compiles each
+    # arch natively on the runner — no QEMU/binfmt (see the $BUILDPLATFORM build
+    # stage in the Dockerfile). GOAMD64 applies to amd64 only; Go ignores it for
+    # arm64.
     - uses: docker/build-push-action@v6
       with:
         provenance: false
         context: .
+        platforms: linux/amd64,linux/arm64
         build-args: |
           VERSION=${{ github.ref_name }}
           GOAMD64=v3
@@ -41,10 +47,13 @@ jobs:
           us-docker.pkg.dev/moonrhythm-containers/gcr.io/parapet-ingress-controller:latest
           asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:${{ github.ref_name }}
           asia-southeast3-docker.pkg.dev/moonrhythm-core/public/parapet-ingress-controller:latest
+    # Compatibility image: amd64-only, GOAMD64=v1 for older CPUs. No arm64 variant
+    # (GOAMD64 microarch levels are an amd64 concept).
     - uses: docker/build-push-action@v6
       with:
         provenance: false
         context: .
+        platforms: linux/amd64
         build-args: |
           VERSION=${{ github.ref_name }}
           GOAMD64=v1
