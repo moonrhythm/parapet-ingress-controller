@@ -63,15 +63,18 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 | `basic-auth` | `user:pass` | HTTP Basic Auth |
 | `forward-auth` | YAML (`url`, `authRequestHeaders`, `authResponseHeaders`) | Delegate auth to an external service |
 | `waf-zone` | zone id, or `ns/id` | Bind the Ingress to a WAF zone (see [WAF.md](WAF.md)) |
+| `coraza-zone` | zone id, or `ns/id` | Bind the Ingress to a Coraza (OWASP CRS / SecLang) zone (see [CORAZA.md](CORAZA.md)); inert when `CORAZA_ENABLED` is off. Cross-namespace refs allowed (the WAF model — rulesets are stateless) |
 | `ratelimit-zone` | zone id (same-namespace only) | Bind the Ingress to a rate-limit zone (see [RATELIMIT.md](RATELIMIT.md)); inert when `RATELIMIT_ENABLED` is off. Cross-namespace refs are NOT honored (zones carry shared counter state) |
 | `operations-trace` / `-project` / `-sampler` | `"true"` / project id / float ratio | Cloud Trace |
 
 ### Per-request order
 
 1. host normalization → `/healthz` (IP-host only) → host/country concurrency limits
-2. **global WAF** → **global rate limits** (`RATELIMIT_ENABLED`) (before routing)
-3. routing → per-route: `allow-remote` → **zone WAF** → `redirect-https` → **zone rate limits** → annotation rate limits → body limit → basic-auth → forward-auth
+2. **global WAF** → **global Coraza** (`CORAZA_ENABLED`) → **global rate limits** (`RATELIMIT_ENABLED`) (before routing)
+3. routing → per-route: `allow-remote` → **zone WAF** → **zone Coraza** → `redirect-https` → **zone rate limits** → annotation rate limits → body limit → basic-auth → forward-auth
 4. upstream proxy (with retry on connection failure + bad-addr skip)
+
+The Coraza steps are an independent OWASP CRS / SecLang signature firewall layered after the CEL WAF and before rate limiting (so a Coraza block never burns rate budget). They have no validated-proxy skip — the core always re-runs them (see [CORAZA.md](CORAZA.md)).
 
 When `WAF_VALIDATED_PROXY` matches the request's peer **and** the request
 carries the edge's `X-Parapet-Waf` claim (stamped after the edge's WAF
@@ -263,6 +266,8 @@ invariants:
 | `DISABLE_LOG` | `false` | Suppress the access log |
 | `WAF_ENABLED` | `false` | Master switch for the WAF |
 | `RATELIMIT_ENABLED` | `false` | Master switch for ConfigMap-driven rate limiting (global + zone sets; see [RATELIMIT.md](RATELIMIT.md)) |
+| `CORAZA_ENABLED` | `false` | Master switch for the Coraza (OWASP CRS / SecLang) firewall (global + zone rulesets; see [CORAZA.md](CORAZA.md)). Global is active iff a global ConfigMap exists; each zone iff its ConfigMap exists |
+| `CORAZA_REQUEST_BODY_LIMIT` | `0` | Bytes of request body Coraza inspects (`0` = URI + headers only; no body buffered). When set, up to this many bytes feed Coraza and the body is rebuilt so the upstream still receives it in full. Response-body inspection is never enabled |
 | `WAF_FAIL_MODE` | `open` | `open` (skip on rule error) / `closed` (500) |
 | `WAF_EVAL_TIMEOUT` | `5ms` | Per-request ruleset deadline |
 | `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); sets `request.country` and serves rate-limit `country` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.country` `""`); a missing explicit path is an error |
@@ -292,6 +297,8 @@ Prometheus, served on `:9187`.
 | `parapet_waf_matches{rule_id,action,scope}` | note: **no** `_total` suffix |
 | `parapet_waf_skips{scope}` | requests that bypassed WAF evaluation via `WAF_VALIDATED_PROXY` (already validated at the edge); `scope` = `global\|zone`, no `_total` suffix |
 | `parapet_waf_eval_duration_seconds{outcome,scope}` | histogram of per-request rule-eval latency; `outcome` = `pass\|allow\|block\|error`, fired once per evaluated request — the pass path `parapet_waf_matches` can't see |
+| `parapet_coraza_matches{rule_id,severity,scope}` | Coraza (OWASP CRS / SecLang) rule matches; `scope` = `global\|zone`, no `_total` suffix |
+| `parapet_coraza_eval_duration_seconds{outcome,scope}` | histogram of per-request Coraza request-phase eval latency; `outcome` = `pass\|block` |
 | `parapet_ratelimit_total{name,result}` | `result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names |
 | `parapet_connections{state}` | per-state connection gauge |
 | `go_*` runtime, `process_*` (client_golang), Cloud Profiler/Trace | |

@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/cache"
 	"github.com/moonrhythm/parapet/pkg/healthz"
@@ -99,6 +100,7 @@ func main() {
 		refreshInterval = 300 * time.Second
 	}
 	wafEnabled := envOr("EDGE_WAF_ENABLED", "false") == "true"
+	corazaEnabled := envOr("EDGE_CORAZA_ENABLED", "false") == "true"
 	ratelimitEnabled := envOr("EDGE_RATELIMIT_ENABLED", "false") == "true"
 	cacheEnabled := envOr("EDGE_CACHE_ENABLED", "false") == "true"
 	cacheOverrideEnabled := envOr("EDGE_CACHE_OVERRIDE_ENABLED", "false") == "true"
@@ -132,6 +134,7 @@ func main() {
 		"serve_all", serveAll,
 		"domains", len(domains),
 		"waf_enabled", wafEnabled,
+		"coraza_enabled", corazaEnabled,
 		"ratelimit_enabled", ratelimitEnabled,
 		"trust_proxy", trustProxySpec,
 		"refresh_interval", refreshInterval,
@@ -154,7 +157,7 @@ func main() {
 	// refreshes single-flight per resource.
 	eventsEnabled := envOr("EDGE_EVENTS_ENABLED", "true") == "true"
 	var pokes edge.EventPokes
-	var certPoke, wafPoke, rlPoke, hostsPoke, purgePoke chan struct{}
+	var certPoke, wafPoke, corazaPoke, rlPoke, hostsPoke, purgePoke chan struct{}
 	if eventsEnabled {
 		certPoke = make(chan struct{}, 1)
 		pokes.Certs = certPoke
@@ -239,6 +242,21 @@ func main() {
 			pokes.WAF = wafPoke
 		}
 		go edge.RunWafRefresh(ctx, cp, ewaf, refreshInterval, remintCoord, wafPoke)
+	}
+
+	// Optional edge Coraza (SecLang/CRS early-drop layer; parapet stays
+	// authoritative — defense-in-depth, no validated-proxy claim). Independent of
+	// the CEL WAF: either can run alone. RootFS is the embedded OWASP CRS so a
+	// ruleset can `Include @owasp_crs`.
+	var ecoraza *edge.EdgeCoraza
+	if corazaEnabled {
+		ecoraza = edge.NewEdgeCoraza(coreruleset.FS, int(envInt64("EDGE_CORAZA_REQUEST_BODY_LIMIT", 0)))
+		edge.RefreshCorazaOnce(cp, ecoraza)
+		if eventsEnabled {
+			corazaPoke = make(chan struct{}, 1)
+			pokes.Coraza = corazaPoke
+		}
+		go edge.RunCorazaRefresh(ctx, cp, ecoraza, refreshInterval, corazaPoke)
 	}
 
 	// Optional edge rate limiting (ConfigMap-driven global + zone sets fetched
@@ -435,6 +453,13 @@ func main() {
 		// Past both rulesets: stamp the claim the core's WAF_VALIDATED_PROXY
 		// requires (only once a CP snapshot has landed — see ClaimStamp).
 		m.Use(ewaf.ClaimStamp())
+	}
+	if ecoraza != nil {
+		// Coraza runs right after the CEL WAF — a second signature-based firewall
+		// layer, before rate limiting so blocked traffic never burns rate budget.
+		// Defense-in-depth: the core re-runs its own Coraza (no claim stamped).
+		m.Use(ecoraza.Global())
+		m.Use(ecoraza.Zone())
 	}
 	if erl != nil {
 		// Rate limits run after the WAF — WAF-blocked traffic never burns rate

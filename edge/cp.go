@@ -213,6 +213,57 @@ func (c *CpClient) FetchWaf(currentEtag string) (WafFetch, error) {
 	}
 }
 
+// CorazaFetch is the outcome of a Coraza ruleset fetch.
+type CorazaFetch struct {
+	// Unchanged is true on a 304.
+	Unchanged bool
+	// On a 200: the generation, global directives, per-zone directives, the
+	// path-aware route→zone binding, and the ETag.
+	Generation   uint64
+	GlobalRules  string
+	Zones        map[string]string
+	RouteZoneMap map[string]string
+	Etag         string
+}
+
+type corazaBody struct {
+	Generation   uint64            `json:"generation"`
+	GlobalRules  string            `json:"global_rules"`
+	Zones        map[string]string `json:"zones"`
+	RouteZoneMap map[string]string `json:"route_zone_map"`
+}
+
+// FetchCoraza fetches the Coraza payload (global directives + zones + route→zone
+// map) scoped to the edge's token, with ETag revalidation. A 404 ("coraza
+// distribution disabled") is treated like any other non-200/304: an error the
+// caller handles fail-static (keeps last-good).
+func (c *CpClient) FetchCoraza(currentEtag string) (CorazaFetch, error) {
+	resp, err := c.do(c.base+"/v1/coraza", currentEtag)
+	if err != nil {
+		return CorazaFetch{}, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNotModified:
+		return CorazaFetch{Unchanged: true}, nil
+	case http.StatusOK:
+		var body corazaBody
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxWafBody)).Decode(&body); err != nil {
+			return CorazaFetch{}, fmt.Errorf("decode: %w", err)
+		}
+		return CorazaFetch{
+			Generation:   body.Generation,
+			GlobalRules:  body.GlobalRules,
+			Zones:        body.Zones,
+			RouteZoneMap: body.RouteZoneMap,
+			Etag:         resp.Header.Get("ETag"),
+		}, nil
+	default:
+		return CorazaFetch{}, fmt.Errorf("control plane returned %d for /v1/coraza", resp.StatusCode)
+	}
+}
+
 // RateLimitFetch is the outcome of a rate-limit config fetch.
 type RateLimitFetch struct {
 	// Unchanged is true on a 304.

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/profiler"
+	coreruleset "github.com/corazawaf/coraza-coreruleset/v4"
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/compress"
 	"github.com/moonrhythm/parapet/pkg/header"
@@ -53,6 +54,26 @@ func main() {
 	autoH2CTTL := config.DurationDefault("UPSTREAM_AUTO_H2C_TTL", 10*time.Minute)
 
 	rateLimitEnabled := config.Bool("RATELIMIT_ENABLED")
+
+	// Coraza (OWASP CRS / SecLang) firewall — an independent signature layer
+	// alongside the CEL WAF, same global+zone model. ClientIP/RootFS wired below.
+	corazaConfig := controller.CorazaConfig{
+		Enabled:          config.Bool("CORAZA_ENABLED"),
+		RequestBodyLimit: config.Int("CORAZA_REQUEST_BODY_LIMIT"), // 0 = headers/URI only
+	}
+	if corazaConfig.Enabled {
+		// Embedded OWASP Core Rule Set, so a ruleset can `Include @owasp_crs`
+		// (and `Include @crs-setup`) without shipping rule files in the ConfigMap.
+		corazaConfig.RootFS = coreruleset.FS
+		// Resolve the true client IP with the same precedence the CEL WAF uses, so
+		// Coraza's REMOTE_ADDR / connection match the WAF and the access log.
+		corazaConfig.ClientIP = func(r *http.Request) string {
+			if ip := geoip.ClientIP(r); ip != nil {
+				return ip.String()
+			}
+			return ""
+		}
+	}
 
 	wafConfig := controller.WAFConfig{
 		Enabled:       config.Bool("WAF_ENABLED"),
@@ -142,6 +163,7 @@ func main() {
 		"waf_enabled", wafConfig.Enabled,
 		"waf_validated_proxy", config.String("WAF_VALIDATED_PROXY"),
 		"ratelimit_enabled", rateLimitEnabled,
+		"coraza_enabled", corazaConfig.Enabled,
 	)
 
 	if enableProfiler {
@@ -278,10 +300,17 @@ func main() {
 		FilterDisableMacros: wafConfig.DisableMacros,
 	}
 	ctrl.InitRateLimit()
+	ctrl.CorazaConfig = corazaConfig
+	ctrl.InitCoraza()
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)
 	if wafConfig.Enabled {
 		ctrl.Use(plugin.WAFZone(ctrl.LookupZone, wafConfig.SkipValidated))
+	}
+	if corazaConfig.Enabled {
+		// Coraza zone runs right after the CEL WAF zone — both firewalls before
+		// rate limiting, so blocked traffic never burns rate budget.
+		ctrl.Use(plugin.CorazaZone(ctrl.LookupCorazaZone))
 	}
 	ctrl.Use(plugin.RedirectHTTPS)
 	ctrl.Use(plugin.InjectHSTS)
@@ -324,6 +353,14 @@ func main() {
 		// runs inside the per-ingress chain (plugin.WAFZone). Requests matched
 		// by WAF_VALIDATED_PROXY (already validated at the edge) skip both.
 		m.Use(ctrl.GlobalWAF())
+	}
+	if corazaConfig.Enabled {
+		// Global Coraza runs right after the global CEL WAF: a second,
+		// signature-based firewall layer. Its blocks are access-logged and counted
+		// above, and it runs before the global rate limit so blocked traffic never
+		// burns rate budget. Per-zone Coraza runs inside the per-ingress chain
+		// (plugin.CorazaZone).
+		m.Use(ctrl.GlobalCoraza())
 	}
 	if rateLimitEnabled {
 		// Global rate limits run after the global WAF, deliberately: WAF-blocked

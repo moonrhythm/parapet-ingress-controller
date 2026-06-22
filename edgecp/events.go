@@ -19,6 +19,8 @@ type EventsSnapshot struct {
 	WAF       string `json:"waf,omitempty"`
 	RateLimit string `json:"ratelimit,omitempty"`
 	Cache     string `json:"cache,omitempty"`
+	// Coraza is the Coraza store's content etag ("" when distribution is off).
+	Coraza string `json:"coraza,omitempty"`
 	// Hosts is the known-host store's content etag ("" when off). A host change
 	// pokes only the edge's hosts refresh — it doesn't affect WAF/ratelimit.
 	Hosts string `json:"hosts,omitempty"`

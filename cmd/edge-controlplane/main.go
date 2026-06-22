@@ -95,6 +95,7 @@ func main() {
 	tokensJSON := os.Getenv("CP_TOKENS")                 // {"<token>":["acme.com",...]} or {"<token>":{"id","domains","disabled"}}
 	tokensFile := os.Getenv("CP_TOKENS_FILE")            // alternative: path to that JSON
 	wafEnabled := os.Getenv("CP_WAF_ENABLED") == "true"
+	corazaEnabled := os.Getenv("CP_CORAZA_ENABLED") == "true"
 	ratelimitEnabled := os.Getenv("CP_RATELIMIT_ENABLED") == "true"
 	cacheEnabled := os.Getenv("CP_CACHE_ENABLED") == "true"
 	caCertPath := os.Getenv("EDGE_CA_CERT")                 // provided-mode edge CA cert (with EDGE_CA_KEY → enable issuance)
@@ -318,6 +319,7 @@ func main() {
 	// stores exist. Stores load synchronously before serving so the first edge
 	// fetch sees the full payload, not a half-populated store.
 	var wafStore *edgecp.WafStore
+	var corazaStore *edgecp.CorazaStore
 	var rlStore *edgecp.RateLimitStore
 	var cacheStore *edgecp.CacheStore
 	var hostsStore *edgecp.HostsStore
@@ -341,6 +343,19 @@ func main() {
 		server = server.WithRateLimit(rlStore)
 		slog.Info("edge control plane: ratelimit distribution enabled", "pod_namespace", podNamespace)
 	}
+	// Coraza (SecLang/CRS) distribution (GET /v1/coraza): the same global+zone
+	// model as the WAF under its own label/annotation, sharing the one Ingress
+	// watch (cross-namespace zone binding allowed — rulesets are stateless config).
+	if corazaEnabled {
+		corazaStore = edgecp.NewCorazaStore()
+		corazaReloader := edgecp.NewCorazaReloader(corazaStore, watchNamespace, podNamespace)
+		if err := corazaReloader.LoadOnce(ctx); err != nil {
+			slog.Error("edgecp: initial coraza load failed", "err", err)
+		}
+		go corazaReloader.Watch(ctx)
+		server = server.WithCoraza(corazaStore)
+		slog.Info("edge control plane: Coraza distribution enabled", "pod_namespace", podNamespace)
+	}
 	// Cache-override distribution (GET /v1/cache): the same global+zone model
 	// under its own label/annotation, sharing the one Ingress watch (cross-namespace
 	// zone binding allowed — overrides are stateless config).
@@ -362,8 +377,8 @@ func main() {
 		server = server.WithHosts(hostsStore)
 		slog.Info("edge control plane: hosts distribution enabled")
 	}
-	if wafStore != nil || rlStore != nil || cacheStore != nil || hostsStore != nil {
-		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithRateLimit(rlStore).WithCache(cacheStore).WithHosts(hostsStore)
+	if wafStore != nil || corazaStore != nil || rlStore != nil || cacheStore != nil || hostsStore != nil {
+		ingReloader := edgecp.NewIngressReloader(wafStore, watchNamespace).WithCoraza(corazaStore).WithRateLimit(rlStore).WithCache(cacheStore).WithHosts(hostsStore)
 		if err := ingReloader.LoadOnce(ctx); err != nil {
 			slog.Error("edgecp: initial ingress load failed", "err", err)
 		}
@@ -400,6 +415,9 @@ func main() {
 			snap.Certs = store.Version()
 			if wafStore != nil {
 				snap.WAF = wafStore.Version()
+			}
+			if corazaStore != nil {
+				snap.Coraza = corazaStore.Version()
 			}
 			if rlStore != nil {
 				snap.RateLimit = rlStore.Version()
