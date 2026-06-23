@@ -216,8 +216,8 @@ Out-of-cluster TLS-terminating proxy. See [EDGE.md](EDGE.md).
 | `EDGE_CACHE_ENABLED` | `false` | Enable the HTTP response cache |
 | `EDGE_CACHE_BACKEND` | `disk` | `disk` or `memory` |
 | `EDGE_CACHE_DIR` | `/var/cache/parapet-edge` | Cache root (disk backend only) |
-| `EDGE_CACHE_MAX_SIZE` | `1073741824` (1 GiB) | Total bytes cap, LRU-evicted |
-| `EDGE_CACHE_MAX_FILE_SIZE` | `8388608` (8 MiB) | Per-object bytes cap |
+| `EDGE_CACHE_MAX_SIZE` | `1GiB` | Total size cap, LRU-evicted. Accepts a unit suffix — bare number = bytes, or `kb`/`mb`/`gb`/`tb` (decimal) / `kib`/`mib`/`gib`/`tib` (binary), e.g. `2gib`, `512mb` |
+| `EDGE_CACHE_MAX_FILE_SIZE` | `8MiB` | Per-object size cap (same unit suffixes) |
 | `EDGE_CACHE_CHUNKED` | `true` | Cache GET responses with no `Content-Length` (chunked / on-the-fly-compressed bodies — gzip/br/zstd) by buffering to derive a length; the cap is still enforced mid-stream, SSE is never buffered, and a truncated upstream is never committed. `false` caches only `Content-Length`'d responses |
 | `EDGE_CACHE_PURGE_ENABLED` | `true` | Poll for + apply cache purges (needs `CP_PURGE_ENABLED`) |
 | `EDGE_CACHE_PURGE_POLL_INTERVAL` | `10` (s) | Poll `GET /v1/purges` cadence |

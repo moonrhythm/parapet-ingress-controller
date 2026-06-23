@@ -669,7 +669,8 @@ cacheable object locally removes a full origin round trip. Enabled with
   **streamed** to a temp file, so it survives restarts and isn't bounded by RSS,
   which matters given the edge's memory-pressure history) and **`memory`** (bodies
   in RAM, lost on restart). Total size is bounded by an **LRU** keyed on body
-  bytes (`EDGE_CACHE_MAX_SIZE`); per-object size by `EDGE_CACHE_MAX_FILE_SIZE`. A
+  bytes (`EDGE_CACHE_MAX_SIZE`); per-object size by `EDGE_CACHE_MAX_FILE_SIZE`.
+  Both accept a unit suffix (`2gib`, `512mb`, …) as well as a bare byte count. A
   `Content-Length` over the cap is simply not cached (the client still gets the
   full response). A GET is cached **only with a `Content-Length`** and committed
   only once written bytes == `Content-Length` — so a truncated response (client
@@ -753,8 +754,11 @@ authorization-sensitive responses publicly cacheable.
 EDGE_CACHE_ENABLED       on/off (default false)
 EDGE_CACHE_BACKEND       disk | memory (default disk)
 EDGE_CACHE_DIR           cache root, disk backend only (default /var/cache/parapet-edge)
-EDGE_CACHE_MAX_SIZE      total bytes cap, LRU-evicted (default 1073741824 = 1 GiB)
-EDGE_CACHE_MAX_FILE_SIZE per-object bytes cap (default 8388608 = 8 MiB)
+EDGE_CACHE_MAX_SIZE      total size cap, LRU-evicted (default 1 GiB). Accepts a
+                         unit suffix: a bare number is bytes, or use kb/mb/gb/tb
+                         (decimal, 1000ⁿ) or kib/mib/gib/tib (binary, 1024ⁿ),
+                         e.g. "2gib", "512mb", "1.5gb" (case-insensitive)
+EDGE_CACHE_MAX_FILE_SIZE per-object size cap (default 8 MiB; same unit suffixes)
 EDGE_CACHE_CHUNKED       cache GET responses with no Content-Length (chunked /
                          on-the-fly-compressed bodies — gzip/br/zstd) by buffering
                          to derive a length (default true; the cap is enforced

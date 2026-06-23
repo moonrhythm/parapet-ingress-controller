@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -306,8 +307,8 @@ func main() {
 	var purgeTable *edge.PurgeTable
 	var purgeStorage cache.Storage // the live backend, for the reaper's Range sweep
 	if cacheEnabled {
-		maxSize := envInt64("EDGE_CACHE_MAX_SIZE", 1<<30)
-		maxFile := envInt64("EDGE_CACHE_MAX_FILE_SIZE", 8<<20)
+		maxSize := envBytes("EDGE_CACHE_MAX_SIZE", 1<<30)
+		maxFile := envBytes("EDGE_CACHE_MAX_FILE_SIZE", 8<<20)
 		var storage cache.Storage
 		var purgeStatePath string // disk backend persists purge state alongside the cache
 		switch envOr("EDGE_CACHE_BACKEND", "disk") {
@@ -673,6 +674,79 @@ func envFloat(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+// envBytes reads a byte-size env var that may carry a human-readable unit suffix
+// (e.g. "2gib", "512mb", "1.5 GiB"). A bare number is bytes, so existing numeric
+// values keep working. On a parse error it logs and falls back to def, matching
+// envInt64's lenient posture.
+func envBytes(key string, def int64) int64 {
+	v, ok := os.LookupEnv(key)
+	if !ok {
+		return def
+	}
+	n, err := parseBytes(v)
+	if err != nil {
+		slog.Warn("edge: invalid byte size; using default", "key", key, "value", v, "default", def, "error", err)
+		return def
+	}
+	return n
+}
+
+// parseBytes parses a size like "10", "10b", "2kb", "2kib", "512mb", "1gib",
+// "1.5gb". Units are case-insensitive; decimal (kb/mb/gb/tb = 1000ⁿ) and binary
+// (kib/mib/gib/tib = 1024ⁿ) suffixes are both accepted, and a missing unit means
+// bytes. The result is rounded to the nearest byte and must be ≥ 1.
+func parseBytes(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty size")
+	}
+	// Split into the leading numeric literal and the trailing unit.
+	i := 0
+	for i < len(s) && (s[i] >= '0' && s[i] <= '9' || s[i] == '.' || s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	num, err := strconv.ParseFloat(s[:i], 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid size %q: %w", s, err)
+	}
+	mult, ok := byteUnit(strings.ToLower(strings.TrimSpace(s[i:])))
+	if !ok {
+		return 0, fmt.Errorf("unknown size unit in %q", s)
+	}
+	v := num * mult
+	if v < 1 {
+		return 0, fmt.Errorf("size %q must be >= 1 byte", s)
+	}
+	return int64(v + 0.5), nil
+}
+
+// byteUnit maps a (lowercased) size suffix to its byte multiplier. "" / "b" are
+// bytes; k/m/g/t are decimal (1000ⁿ), ki/mi/gi/ti (with optional trailing "b")
+// are binary (1024ⁿ).
+func byteUnit(u string) (float64, bool) {
+	switch u {
+	case "", "b":
+		return 1, true
+	case "k", "kb":
+		return 1e3, true
+	case "ki", "kib":
+		return 1 << 10, true
+	case "m", "mb":
+		return 1e6, true
+	case "mi", "mib":
+		return 1 << 20, true
+	case "g", "gb":
+		return 1e9, true
+	case "gi", "gib":
+		return 1 << 30, true
+	case "t", "tb":
+		return 1e12, true
+	case "ti", "tib":
+		return 1 << 40, true
+	}
+	return 0, false
 }
 
 // splitDomains parses the comma-separated EDGE_DOMAINS list, trimming entries
