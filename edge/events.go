@@ -16,6 +16,7 @@ import (
 // stream, never persisted or ordered.
 type eventsSnapshot struct {
 	WAF       string `json:"waf"`
+	Coraza    string `json:"coraza"`
 	RateLimit string `json:"ratelimit"`
 	Cache     string `json:"cache"`
 	Hosts     string `json:"hosts"`
@@ -29,6 +30,7 @@ type eventsSnapshot struct {
 // already pending coalesces.
 type EventPokes struct {
 	WAF       chan<- struct{}
+	Coraza    chan<- struct{}
 	RateLimit chan<- struct{}
 	Cache     chan<- struct{}
 	Hosts     chan<- struct{}
@@ -51,6 +53,7 @@ func (p EventPokes) poke(ch chan<- struct{}) {
 // Cheap: each refresh is an ETag-revalidated fetch (steady state one 304 each).
 func (p EventPokes) pokeAll() {
 	p.poke(p.WAF)
+	p.poke(p.Coraza)
 	p.poke(p.RateLimit)
 	p.poke(p.Cache)
 	p.poke(p.Hosts)
@@ -183,6 +186,9 @@ func runEventsOnce(ctx context.Context, cp *CpClient, pokes EventPokes) (deliver
 				if !first {
 					if snap.WAF != last.WAF {
 						pokes.poke(pokes.WAF)
+					}
+					if snap.Coraza != last.Coraza {
+						pokes.poke(pokes.Coraza)
 					}
 					if snap.RateLimit != last.RateLimit {
 						pokes.poke(pokes.RateLimit)

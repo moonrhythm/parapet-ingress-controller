@@ -21,7 +21,9 @@ cmd/parapet-ingress-controller/   # binary entry-point (main.go, config.go)
 controller.go                     # Controller struct — watch/reload logic (generic watchResource)
 controller_waf.go                 # WAF wiring: global instance + zone registry, ConfigMap watch
 controller_ratelimit.go           # rate-limit wiring: global set + zone registry, 2nd ConfigMap watch
+controller_coraza.go              # Coraza (OWASP CRS/SecLang) wiring: global + zone registry, 3rd ConfigMap watch
 retry.go                          # retryMiddleware — retries idempotent requests on upstream failure
+corazawaf/                        # OWASP Coraza engine wrapper: hot-swap coraza.WAF + request-phase middleware (pure, edge-importable)
 wafrule/                          # WAF rule YAML DTO + parser (-> []waf.Rule)
 wafclaim/                         # edge→core X-Parapet-Waf claim header (wire contract shared by core + edge)
 ratelimitrule/                    # rate-limit YAML DTO + parser + runtime (hot-swap Limiter, fixed/sliding strategies)
@@ -31,6 +33,7 @@ plugin/                           # annotation-driven middleware plugins
   auth.go                         # BasicAuth, ForwardAuth
   waf.go                          # WAFZone — bind ingress to a WAF zone by reference
   ratelimitzone.go                # RateLimitZone — bind ingress to a rate-limit zone (same-ns only)
+  corazazone.go                   # CorazaZone — bind ingress to a Coraza zone by reference (cross-ns allowed)
   zone.go                         # ZoneKey — shared zone-reference annotation resolver
   trace.go                        # OpenTelemetry tracing
 proxy/                            # reverse-proxy implementation
@@ -45,19 +48,19 @@ cert/                             # TLS certificate table (SNI lookup)
 k8s/                              # Kubernetes client helpers
   k8s.go, cluster.go, fs.go      # in-cluster / local kubeconfig init + list/watch helpers
 metric/                           # Prometheus metrics
-  requests.go, backendconns.go, host.go, reload.go, waf.go
+  requests.go, backendconns.go, host.go, reload.go, waf.go, coraza.go
   cache.go                        # generic lock+map cache for per-label-set metric handles
 state/                            # per-request state map (passed via context)
 trustcidr/                        # TRUST_PROXY spec -> parapet trust Conditional (CIDRs + cloudflare/google/bunny); shared by controller + edge
 debounce/                         # debounce helper used for reload coalescing
 edgecp/                           # edge control-plane lib (cert store, authz, reload, REST server)
 cmd/edge-controlplane/            # edge control-plane binary (see EDGE.md)
-edge/                             # edge proxy lib: certstore, cp (CP client), waf, ratelimit, refresh, forward (cache is parapet/pkg/cache)
+edge/                             # edge proxy lib: certstore, cp (CP client), waf, coraza, ratelimit, refresh, forward (cache is parapet/pkg/cache)
 cmd/edge-proxy/                   # out-of-cluster edge proxy binary (parapet framework; see EDGE.md)
 Dockerfile                        # controller image (multi-stage Go build, pure Go / no CGO, distroless/static)
 Dockerfile.edge-controlplane      # control-plane image (pure Go, distroless/static)
 Dockerfile.edge                   # edge proxy image (pure Go, distroless/static + baked GeoIP)
-# also at repo root: deploy/  WAF.md  RATELIMIT.md  SPEC.md  EDGE.md  conformance/
+# also at repo root: deploy/  WAF.md  RATELIMIT.md  CORAZA.md  SPEC.md  EDGE.md  conformance/
 # .github/workflows/: go-test / go-build / go-release .yaml (path-filtered to **/*.go + go.mod/go.sum);
 #   edge-build / edge-e2e .yaml build + smoke-test the edge + control-plane images
 #   (edge-build images are multi-arch: linux/amd64 + linux/arm64, cross-compiled, no QEMU)
@@ -91,7 +94,7 @@ and the upstream hop.
 ## Key concepts
 
 ### Controller lifecycle
-`Controller.Watch()` starts four goroutines that continuously watch Ingress, Service, Secret, and Endpoints resources (plus a fifth, WAF ConfigMaps, when `WAF_ENABLED=true`, and a sixth, rate-limit ConfigMaps, when `RATELIMIT_ENABLED=true`). Changes are coalesced through a 300 ms `debounce.Debounce` before triggering a reload. On reload, a new `http.ServeMux` is built and swapped in atomically (`atomic.Pointer[routeState]`) — zero downtime. WAF and rate-limit ConfigMap changes are the exception: they recompile their rulesets/limit sets without rebuilding the mux (see the WAF and rate-limit concepts below).
+`Controller.Watch()` starts four goroutines that continuously watch Ingress, Service, Secret, and Endpoints resources (plus a fifth, WAF ConfigMaps, when `WAF_ENABLED=true`, a sixth, rate-limit ConfigMaps, when `RATELIMIT_ENABLED=true`, and a seventh, Coraza ConfigMaps, when `CORAZA_ENABLED=true`). Changes are coalesced through a 300 ms `debounce.Debounce` before triggering a reload. On reload, a new `http.ServeMux` is built and swapped in atomically (`atomic.Pointer[routeState]`) — zero downtime. WAF, rate-limit, and Coraza ConfigMap changes are the exception: they recompile their rulesets/limit sets without rebuilding the mux (see the WAF, rate-limit, and Coraza concepts below).
 
 ### Plugins
 A `Plugin` is `func(ctx plugin.Context)` where `Context` carries:
@@ -134,6 +137,13 @@ ConfigMap-driven request-rate limits mirroring the WAF's zone model under their 
 - **Zones** (`rlZones atomic.Pointer[map[string]*ratelimitrule.Limiter]`, key `<namespace>/<name>`) — bound via `parapet.moonrhythm.io/ratelimit-zone`, **same-namespace only** (deliberate divergence from `waf-zone`: zones carry shared counter state, so a cross-ns bind would be a cross-tenant DoS channel; `plugin.RateLimitZone` warns and ignores cross-ns refs).
 
 Limits: `id` / `key` (a characteristic or composite list — `ip` with IPv6-/64 bucketing, `host` with unknown-Host collapsing, `asn`/`country` from the shared GeoIP resolvers (`RateLimitConfig.ASN/Country`; the WAF_GEOIP_DB/WAF_ASN_DB databases load when WAF **or** ratelimit is enabled, and SetLimits rejects geo keys when the resolver is missing), `header:<name>`/`cookie:<name>` with 128-byte value truncation but client-mintable cardinality — see RATELIMIT.md's warning) / `rate`+`window` (1s..1h) / `algorithm` (`fixed` = parapet `FixedWindowStrategy` directly — requires parapet ≥ v0.18.1, whose `After` computes the reset on the epoch grid (parapet#244; an epoch-grid canary test pins the floor); `sliding` = own two-generation-map reimplementation of parapet's math, retained after parapet v0.18.1 fixed the janitor leak (parapet#243) for its zero-goroutine storage, O(1) generation eviction, and stricter backward-clock semantics) / `mode` (`enforce|shadow`) / `status` (429|503) / `exclude` CIDRs / `filter` (optional CEL expression scoping the limit to matching requests — the WAF's exact expression surface via `waf.Predicate`, an additive export from `parapet/pkg/waf` reusing its `newCELEnv`+`buildRequestMap` so the two CEL surfaces can't drift; `key` still buckets, `filter` only gates; built once per request and shared across filtered limits; `request.body` always `""`; geo-ref without DB never matches (not a load error, unlike a geo *key*); eval error fails **open** (limit skipped); bad expr rejected at load; filter-only edits preserve counters since `filter` is out of `cfgKey`). `/.well-known/acme-challenge` is never limited. Reload mirrors the WAF (`rlReloadMu` for the debounce-overlap hazard, fingerprint skip, all-or-nothing `SetLimits` keeps last-good) and additionally **preserves live counters**: unchanged input isn't reapplied, and `SetLimits` carries strategies over when a limit's shaping config didn't change. Decisions count in `parapet_ratelimit_total{name,result}` with names `global:<id>` / `zone:<ns>/<name>:<id>` (the `zone:` prefix avoids colliding with the annotation limiters' `<ns>/<ingress>:<s|m|h>`). **Edge enforcement is opt-in** (`EDGE_RATELIMIT_ENABLED` on the edge + `CP_RATELIMIT_ENABLED` on the CP): the CP distributes the same ConfigMap sets via `GET /v1/ratelimit` (`edgecp/ratelimitstore.go` + `ratelimitreload.go`; path-aware route→zone bindings from `ratelimit-zone` same-ns only — the controller's own route keys, matched at the edge on a real `http.ServeMux` (`edge/zoneroute.go`, shared with the edge WAF; legacy host→zone still shipped for old edges) — plus a known-hosts list for host-key collapse; documents ship as `[]string` — `ratelimitrule.Parse` takes one YAML doc per string, never `"---"`-joined), and the edge runs them via `edge/ratelimit.go` (reuses `ratelimitrule.Limiter` with `metric/observe.RateLimit` — the leaf package, keeping the edge binaries off `metric`) after the edge WAF and before the cache; counters are per edge. See EDGE.md. Code: `controller_ratelimit.go`, `plugin/ratelimitzone.go`, `ratelimitrule/`, `edge/ratelimit.go`, `edgecp/ratelimitstore.go`.
+
+### Coraza firewall (opt-in, `CORAZA_ENABLED=true`)
+A second, **signature-based** WAF built on [OWASP Coraza](https://github.com/corazawaf/coraza) (ModSecurity SecLang + embedded OWASP CRS, pure-Go/no-CGO), **independent of and complementary to** the CEL WAF — both can run together or alone. Same global+zone model under its own label (`parapet.moonrhythm.io/coraza: global|zone`), watched as a 7th resource (separate label/store/debounce — selectors can't OR, and SecLang ≠ CEL). **Full design in [`CORAZA.md`](CORAZA.md).**
+- **Global** (`globalCoraza`, mounted right after the global CEL WAF and before the global rate limit) — only honored from `POD_NAMESPACE`. Active iff a global ConfigMap exists.
+- **Zones** (`corazaZones atomic.Pointer[map[string]*corazawaf.Instance]`, key `<namespace>/<name>`) — bound via `parapet.moonrhythm.io/coraza-zone`, **cross-namespace allowed** (the WAF model — rulesets are stateless config, unlike rate-limit zones). Active iff the zone ConfigMap exists, so "global off, one zone on" = no global ConfigMap + one bound zone.
+
+The engine lives in `corazawaf/` (a pure, edge-importable package): a `coraza.WAF` is immutable, so `SetDirectives` builds a new one and swaps it via `atomic.Pointer` (empty input → nil → pass-through); all-or-nothing keeps last-good. The middleware runs **request phases only** (URI + headers always; request body opt-in via `CORAZA_REQUEST_BODY_LIMIT`, rebuilt so the upstream still gets the full body) — **response-body inspection is never enabled** (it would break streaming/cache/HTTP2). Matches come from `tx.MatchedRules()` (not the error callback, which only fires for logged rules) → `metric.CorazaMatch` / `parapet_coraza_matches{rule_id,severity,scope}` + `observe.CorazaEval`. Reload mirrors the WAF exactly (`corazaReloadMu` overlap guard, fingerprint skip, decoupled from the mux). **Edge enforcement** (`EDGE_CORAZA_ENABLED` + `CP_CORAZA_ENABLED`): the CP distributes rulesets via `GET /v1/coraza` (`edgecp/corazastore.go` + `corazareload.go`, route→zone bindings via `edge/zoneroute.go` — **no legacy host map**, Coraza is new), the edge runs them (`edge/coraza.go`, `corazarefresh.go`) as **defense-in-depth with no validated-proxy claim** — the core always re-runs its own Coraza (parapet stays authoritative). Code: `controller_coraza.go`, `corazawaf/`, `plugin/corazazone.go`, `metric/coraza.go`, `edge/coraza.go`, `edgecp/corazastore.go`.
 
 **GeoIP** (`request.country`): `WAF_GEOIP_DB` defaults to the baked `/geoip/ip-to-country.mmdb` (set `""` to disable; a missing file at the default path is a quiet no-op, a missing explicit path logs an error). `main.go` opens it (`geoip/`, `maxminddb-golang`, flat `country_code` schema, not MaxMind's nested `country.iso_code`) and sets `WAFConfig.Country` to a resolver (client IP via `geoip.ClientIP`, parapet precedence → ISO code, else `"XX"`). `newWAF` assigns it to every WAF's `waf.WAF.Country` (the parapet hook added in v0.15.1), so `request.country` is set on the global and zone rulesets. nil resolver (no DB) → `request.country == ""`.
 

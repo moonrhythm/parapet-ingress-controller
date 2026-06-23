@@ -26,6 +26,7 @@ import (
 // nil when only the rate-limit side is enabled.
 type IngressReloader struct {
 	store          *WafStore       // optional (nil = WAF host→zone derivation off)
+	coraza         *CorazaStore    // optional (nil = Coraza route→zone derivation off)
 	rl             *RateLimitStore // optional (nil = rate-limit derivation off)
 	cache          *CacheStore     // optional (nil = cache-override derivation off)
 	hosts          *HostsStore     // optional (nil = /v1/hosts distribution off)
@@ -41,6 +42,14 @@ func NewIngressReloader(store *WafStore, watchNamespace string) *IngressReloader
 // its host→zone binding and known-host list. Returns the reloader for chaining.
 func (r *IngressReloader) WithRateLimit(rl *RateLimitStore) *IngressReloader {
 	r.rl = rl
+	return r
+}
+
+// WithCoraza wires the Coraza store so the Ingress reload also derives its
+// path-aware route→zone binding (coraza-zone annotation, cross-namespace allowed
+// — the WAF model). Returns the reloader for chaining.
+func (r *IngressReloader) WithCoraza(coraza *CorazaStore) *IngressReloader {
+	r.coraza = coraza
 	return r
 }
 
@@ -114,6 +123,11 @@ func (r *IngressReloader) reload(ctx context.Context) error {
 	}
 	if r.store != nil {
 		r.store.SetIngressDerived(buildHostZone(ings), buildZoneRoutes(ings, WAFZoneAnnotation, false))
+	}
+	if r.coraza != nil {
+		// Cross-namespace allowed (sameNamespaceOnly=false), the WAF model — a
+		// Coraza ruleset is stateless config like the CEL WAF.
+		r.coraza.SetIngressDerived(buildZoneRoutes(ings, CorazaZoneAnnotation, false))
 	}
 	if r.rl != nil {
 		r.rl.SetIngressDerived(buildRateLimitHostZone(ings), buildZoneRoutes(ings, RateLimitZoneAnnotation, true), collectIngressHosts(ings))

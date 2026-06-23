@@ -615,6 +615,39 @@ What to know before enabling:
   `:9187`, same names as the controller (`global:<id>` / `zone:<ns>/<name>:<id>`)
   on a different scrape target.
 
+## Coraza (OWASP CRS) at the edge
+
+Opt-in (`EDGE_CORAZA_ENABLED=true` on the edge, `CP_CORAZA_ENABLED=true` on the
+control plane): the edge runs the same Coraza (SecLang / OWASP CRS) rulesets the
+controller does (see [CORAZA.md](CORAZA.md)), reusing the `corazawaf` engine, so a
+rule blocks identically by construction. It is an **independent** layer from the
+CEL WAF — either can run at the edge alone.
+
+Distribution mirrors the WAF: the CP watches `parapet.moonrhythm.io/coraza`
+ConfigMaps (global honored only from `POD_NAMESPACE`) and derives the path-aware
+`route → zoneKey` binding from the `coraza-zone` annotation (**cross-namespace
+allowed** — rulesets are stateless config, the WAF model). The edge polls
+`GET /v1/coraza` on `EDGE_REFRESH_INTERVAL`, fail-static. There is **no legacy
+host-level binding** (Coraza is new — no old edges).
+
+Per-request order: **after the edge WAF and before rate limiting** — a Coraza
+block never burns rate budget. Request phases only (URI + headers; request body
+opt-in via `EDGE_CORAZA_REQUEST_BODY_LIMIT`); response-body inspection is never
+enabled (it would break the response cache / streaming / HTTP2).
+
+What to know before enabling:
+
+- **Defense-in-depth, NOT an offload.** Unlike the CEL WAF's
+  `WAF_VALIDATED_PROXY`, the edge Coraza stamps **no claim** and the **core always
+  re-runs its own Coraza** — parapet stays authoritative. The edge is purely an
+  early-drop layer.
+- **Per-edge match logging** is debug-only; the edge stays off the `metric`
+  package, so there is no `parapet_coraza_matches` on the edge's `:9187` (only the
+  `observe`-based `parapet_coraza_eval_duration_seconds`). Per-rule match counters
+  are the core's job.
+- **Zone resolution is path-aware** (`route_zone_map`), like the edge WAF — the
+  controller's own route keys on a real `http.ServeMux`.
+
 ## Response cache at the edge
 
 An optional **HTTP response cache** on the edge, off by default. The edge sits

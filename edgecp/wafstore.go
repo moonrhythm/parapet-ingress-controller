@@ -180,11 +180,18 @@ func patternHost(pattern string) string {
 // those labeled `…/waf: global` AND living in podNamespace (the platform-owned
 // baseline boundary). Mirrors the controller's reload + sortedDataValues.
 func concatGlobalRules(cms []wafConfigMap, podNamespace string) string {
-	var docs []string
+	var globals []wafConfigMap
 	for _, cm := range cms {
-		if cm.labels[WAFLabelKey] != wafRoleGlobal || cm.namespace != podNamespace {
-			continue
+		if cm.labels[WAFLabelKey] == wafRoleGlobal && cm.namespace == podNamespace {
+			globals = append(globals, cm)
 		}
+	}
+	// Deterministic order across CP replicas (k8s list order isn't stable), so the
+	// per-edge ETag is replica-stable and 304s aren't defeated. Mirrors the
+	// controller's reloadWAFDebounced sort; the rate-limit path already does this.
+	sortConfigMapsByName(globals)
+	var docs []string
+	for _, cm := range globals {
 		docs = append(docs, sortedValues(cm.data)...)
 	}
 	return strings.Join(docs, "\n---\n")

@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 
 	"github.com/moonrhythm/parapet-ingress-controller/cert"
+	"github.com/moonrhythm/parapet-ingress-controller/corazawaf"
 	"github.com/moonrhythm/parapet-ingress-controller/debounce"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
@@ -92,6 +93,12 @@ type Controller struct {
 	// controller_ratelimit.go.
 	RateLimitConfig RateLimitConfig
 
+	// CorazaConfig configures the Coraza (OWASP CRS / SecLang) firewall — an
+	// independent signature layer alongside the CEL WAF, with the same global +
+	// zone model. Set before Watch(); when disabled the feature does no work. See
+	// controller_coraza.go.
+	CorazaConfig CorazaConfig
+
 	// globalWAF is the always-on baseline firewall; zones holds the tenant zone
 	// registry keyed by <namespace>/<name>, swapped atomically on WAF reload.
 	// WAF reloads are decoupled from the mux — they never rebuild routes.
@@ -103,6 +110,12 @@ type Controller struct {
 	// reload. Decoupled from the mux exactly like the WAF registries.
 	globalRateLimit *ratelimitrule.Limiter
 	rlZones         atomic.Pointer[map[string]*ratelimitrule.Limiter]
+
+	// globalCoraza is the baseline Coraza (SecLang/CRS) firewall; corazaZones
+	// holds the tenant zone registry keyed by <namespace>/<name>, swapped
+	// atomically on Coraza reload. Decoupled from the mux like the WAF registries.
+	globalCoraza *corazawaf.Instance
+	corazaZones  atomic.Pointer[map[string]*corazawaf.Instance]
 
 	// WAF rule-input fingerprints from the last reload, used to skip recompiling
 	// CEL rulesets whose effective input (the sorted concatenated rule YAML) is
@@ -125,13 +138,22 @@ type Controller struct {
 	globalRLFingerprint string
 	rlZoneFingerprints  map[string]string
 
+	// Coraza reload state, the exact mirror of the WAF fields above —
+	// corazaReloadMu serializes overlapping debounce-fired passes, the
+	// fingerprints skip recompiling unchanged SecLang input. Accessed only under
+	// corazaReloadMu.
+	corazaReloadMu          sync.Mutex
+	globalCorazaFingerprint string
+	corazaZoneFingerprints  map[string]string
+
 	// holds current k8s state
-	watchedIngresses    sync.Map
-	watchedServices     sync.Map
-	watchedSecrets      sync.Map
-	watchedEndpoints    sync.Map
-	watchedConfigMaps   sync.Map
-	watchedRLConfigMaps sync.Map
+	watchedIngresses        sync.Map
+	watchedServices         sync.Map
+	watchedSecrets          sync.Map
+	watchedEndpoints        sync.Map
+	watchedConfigMaps       sync.Map
+	watchedRLConfigMaps     sync.Map
+	watchedCorazaConfigMaps sync.Map
 
 	certTable  cert.Table
 	routeTable route.Table
@@ -146,6 +168,7 @@ type Controller struct {
 	reloadSecretDebounce    *debounce.Debounce
 	reloadWAFDebounce       *debounce.Debounce
 	reloadRateLimitDebounce *debounce.Debounce
+	reloadCorazaDebounce    *debounce.Debounce
 }
 
 // New creates new ingress controller
@@ -162,6 +185,7 @@ func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl.reloadSecretDebounce = debounce.New(ctrl.reloadSecretDebounced, 300*time.Millisecond)
 	ctrl.reloadWAFDebounce = debounce.New(ctrl.reloadWAFDebounced, 300*time.Millisecond)
 	ctrl.reloadRateLimitDebounce = debounce.New(ctrl.reloadRateLimitDebounced, 300*time.Millisecond)
+	ctrl.reloadCorazaDebounce = debounce.New(ctrl.reloadCorazaDebounced, 300*time.Millisecond)
 	ctrl.proxy = proxy
 	ctrl.proxy.OnDialError = ctrl.routeTable.MarkBad
 	return ctrl
@@ -195,6 +219,9 @@ func (ctrl *Controller) Watch() {
 	}
 	if ctrl.RateLimitConfig.Enabled {
 		go ctrl.watchRateLimitConfigMaps(ctx)
+	}
+	if ctrl.CorazaConfig.Enabled {
+		go ctrl.watchCorazaConfigMaps(ctx)
 	}
 }
 
@@ -271,6 +298,19 @@ func (ctrl *Controller) preloadResources(ctx context.Context) {
 			return nil
 		})
 	}
+
+	if ctrl.CorazaConfig.Enabled {
+		preloadList(ctx, "coraza-configmaps", func() error {
+			configmaps, err := k8s.GetConfigMaps(ctx, ctrl.watchNamespace, corazaLabelKey)
+			if err != nil {
+				return err
+			}
+			for i := range configmaps {
+				ctrl.watchedCorazaConfigMaps.Store(configmaps[i].Namespace+"/"+configmaps[i].Name, &configmaps[i])
+			}
+			return nil
+		})
+	}
 }
 
 // preloadList runs fn, retrying with capped exponential backoff on error until it
@@ -309,6 +349,7 @@ func (ctrl *Controller) firstReload() {
 	ctrl.reloadEndpointDebounced()
 	ctrl.reloadWAFDebounced()       // no-op when WAF disabled
 	ctrl.reloadRateLimitDebounced() // no-op when rate limiting disabled
+	ctrl.reloadCorazaDebounced()    // no-op when Coraza disabled
 
 	// Edge auto-trust: bounded wait for the edge-CA pool before reporting Ready, so the
 	// edge isn't routed here during the cold-start window. Runs AFTER preload (above), so

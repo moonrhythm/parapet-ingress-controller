@@ -23,6 +23,10 @@ type Server struct {
 	authz *Authz
 	waf   *WafStore // optional (nil = WAF distribution disabled, /v1/waf → 404)
 
+	// coraza is the optional Coraza (SecLang/CRS) distribution store (nil =
+	// disabled, /v1/coraza → 404). Same scoping/ETag model as the WAF endpoint.
+	coraza *CorazaStore
+
 	// ratelimit is the optional rate-limit distribution store (nil = disabled,
 	// /v1/ratelimit → 404). Same scoping/ETag model as the WAF endpoint.
 	ratelimit *RateLimitStore
@@ -129,6 +133,13 @@ func NewServer(certs *CertStore, authz *Authz) *Server {
 // chaining.
 func (s *Server) WithWAF(waf *WafStore) *Server {
 	s.waf = waf
+	return s
+}
+
+// WithCoraza enables the Coraza (SecLang/CRS) distribution endpoint
+// (GET /v1/coraza). Returns the server for chaining.
+func (s *Server) WithCoraza(coraza *CorazaStore) *Server {
+	s.coraza = coraza
 	return s
 }
 
@@ -242,6 +253,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/certs", s.handleCert)
 	mux.HandleFunc("GET /v1/waf", s.handleWAF)
+	mux.HandleFunc("GET /v1/coraza", s.handleCoraza)
 	mux.HandleFunc("GET /v1/ratelimit", s.handleRateLimit)
 	mux.HandleFunc("GET /v1/cache", s.handleCache)
 	mux.HandleFunc("GET /v1/hosts", s.handleHosts)
@@ -391,6 +403,63 @@ func (s *Server) handleWAF(w http.ResponseWriter, r *http.Request) {
 	// 304 (full bundle + recompile every poll). The real generation still rides
 	// the 200 body; the in-body ca_id/signing fp stay in the validator (they are
 	// replica-identical — derived from the shared CA Secret).
+	etagResp := resp
+	etagResp.Generation = 0
+	etagBody, err := json.Marshal(etagResp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	etag := etagOfString(string(etagBody))
+	w.Header().Set("ETag", etag)
+	if match := r.Header.Get("If-None-Match"); match != "" && etagMatch(match, etag) {
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(body)
+}
+
+// corazaResponse is the GET /v1/coraza payload: the global baseline directives,
+// per-zone directives, and the path-aware route→zone binding. No legacy host map
+// (Coraza is a new feature) and no signer confirmer fields (/v1/certs and
+// /v1/waf already carry that signal).
+type corazaResponse struct {
+	Generation   uint64            `json:"generation"`
+	GlobalRules  string            `json:"global_rules"`
+	Zones        map[string]string `json:"zones"` // zoneKey -> SecLang directives
+	RouteZoneMap map[string]string `json:"route_zone_map"`
+}
+
+// handleCoraza serves the Coraza payload scoped to the edge's allowed domains:
+// the global baseline (identical for every edge) plus only the zones and route→
+// zone bindings for hosts this token may serve. ETag is computed over the scoped
+// payload, so revalidation is correct per edge — the same model as handleWAF.
+func (s *Server) handleCoraza(w http.ResponseWriter, r *http.Request) {
+	token, ok := bearer(r)
+	if !ok || !s.authz.Known(token) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.coraza == nil {
+		http.Error(w, "coraza distribution disabled", http.StatusNotFound)
+		return
+	}
+	snap := s.coraza.scoped(func(host string) bool { return s.authz.Allowed(token, host) })
+	resp := corazaResponse{
+		Generation:   snap.generation,
+		GlobalRules:  snap.global,
+		Zones:        snap.zones,
+		RouteZoneMap: snap.routeZone,
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		http.Error(w, "encode", http.StatusInternalServerError)
+		return
+	}
+	// ETag over the scoped bytes with the generation ZEROED (a process-local
+	// counter would otherwise differ across replicas and defeat 304s — same
+	// reasoning as handleWAF).
 	etagResp := resp
 	etagResp.Generation = 0
 	etagBody, err := json.Marshal(etagResp)
