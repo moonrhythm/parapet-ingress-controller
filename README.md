@@ -203,6 +203,8 @@ Out-of-cluster TLS-terminating proxy. See [EDGE.md](EDGE.md).
 | `EDGE_UPSTREAM_ADDR` | `parapet:80` | Where to forward (the in-cluster parapet) |
 | `EDGE_UPSTREAM_TLS` | `false` | Re-encrypt the upstream hop with TLS |
 | `EDGE_UPSTREAM_SNI` | `""` | SNI/Host for the upstream TLS hop |
+| `EDGE_UPSTREAM_MAX_CONNS_PER_HOST` | `0` | Hard ceiling on total conns per core host (`0` = unlimited); like the controller's `TR_MAX_CONNS_PER_HOST` |
+| `EDGE_UPSTREAM_MAX_IDLE_CONNS_PER_HOST` | `0` | Idle keep-alive pool per core host (`0` ⇒ parapet default 32) |
 | `EDGE_DATAPLANE_MTLS` | `false` | Present a CP-issued client cert on the upstream hop (requires `EDGE_UPSTREAM_TLS=true` + `EDGE_ID`) |
 | `EDGE_WAF_ENABLED` | `false` | Run the global+zone WAF at the edge |
 | `EDGE_RATELIMIT_ENABLED` | `false` | Enforce the CP-distributed rate limits at the edge (requires `CP_RATELIMIT_ENABLED`) |

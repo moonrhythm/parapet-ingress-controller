@@ -48,10 +48,10 @@ func TestForwarder_Plaintext_H2COptOut(t *testing.T) {
 	defer srv.Close()
 	addr := addrOf(t, srv.URL)
 
-	if got := forwardThrough(t, NewForwarder(addr, false, true, "", nil, nil)); got != "proto=2" {
+	if got := forwardThrough(t, NewForwarder(addr, false, true, "", ForwarderTuning{}, nil, nil)); got != "proto=2" {
 		t.Errorf("h2c default: want proto=2, got %q", got)
 	}
-	if got := forwardThrough(t, NewForwarder(addr, false, false, "", nil, nil)); got != "proto=1" {
+	if got := forwardThrough(t, NewForwarder(addr, false, false, "", ForwarderTuning{}, nil, nil)); got != "proto=1" {
 		t.Errorf("opt-out: want proto=1 (HTTP/1.1), got %q", got)
 	}
 }
@@ -66,10 +66,10 @@ func TestForwarder_TLS_H2OptOut(t *testing.T) {
 	defer srv.Close()
 	addr := addrOf(t, srv.URL)
 
-	if got := forwardThrough(t, NewForwarder(addr, true, true, "", nil, nil)); got != "proto=2" {
+	if got := forwardThrough(t, NewForwarder(addr, true, true, "", ForwarderTuning{}, nil, nil)); got != "proto=2" {
 		t.Errorf("h2 default: want proto=2, got %q", got)
 	}
-	if got := forwardThrough(t, NewForwarder(addr, true, false, "", nil, nil)); got != "proto=1" {
+	if got := forwardThrough(t, NewForwarder(addr, true, false, "", ForwarderTuning{}, nil, nil)); got != "proto=1" {
 		t.Errorf("opt-out: want proto=1 (HTTP/1.1 over TLS), got %q", got)
 	}
 }
@@ -83,7 +83,7 @@ func TestForwarder_TLS_H2FallsBackToHTTP1(t *testing.T) {
 	defer srv.Close()
 	addr := addrOf(t, srv.URL)
 
-	if got := forwardThrough(t, NewForwarder(addr, true, true, "", nil, nil)); got != "proto=1" {
+	if got := forwardThrough(t, NewForwarder(addr, true, true, "", ForwarderTuning{}, nil, nil)); got != "proto=1" {
 		t.Errorf("h2 requested, http/1.1-only core: want graceful proto=1, got %q", got)
 	}
 }

@@ -922,11 +922,26 @@ The edge→parapet hop runs **HTTP/2 by default**, matching the multiplexing the
 core already accepts (`edge/forward.go`):
 
 ```
-EDGE_UPSTREAM_ADDR   parapet host:port (default parapet:80)
-EDGE_UPSTREAM_TLS    re-encrypt the hop with TLS (default false)
-EDGE_UPSTREAM_SNI    SNI/Host on the re-encrypt handshake (default: addr's host)
-EDGE_UPSTREAM_HTTP2  HTTP/2 on the hop (default true — opt-out)
+EDGE_UPSTREAM_ADDR                parapet host:port (default parapet:80)
+EDGE_UPSTREAM_TLS                 re-encrypt the hop with TLS (default false)
+EDGE_UPSTREAM_SNI                 SNI/Host on the re-encrypt handshake (default: addr's host)
+EDGE_UPSTREAM_HTTP2               HTTP/2 on the hop (default true — opt-out)
+EDGE_UPSTREAM_MAX_CONNS_PER_HOST  hard ceiling on total conns per core host (default 0 = unlimited)
+EDGE_UPSTREAM_MAX_IDLE_CONNS_PER_HOST  idle keep-alive pool per core host (default 0 ⇒ 32)
 ```
+
+- **Connection ceiling.** `EDGE_UPSTREAM_MAX_CONNS_PER_HOST` mirrors the
+  controller's `TR_MAX_CONNS_PER_HOST`: a hard cap on the total (active + idle)
+  connections each edge replica opens to a core host, bounding fan-out and FD/memory
+  use under load. It applies to the HTTP/1.1 transports and the re-encrypt
+  ForceAttemptHTTP2 transport (net/http enforces it at the dial layer for both the h2
+  and HTTP/1.1-fallback conns it manages). The **default plaintext h2c path
+  multiplexes** every request over a handful of connections (`golang.org/x/net/http2`
+  has no per-host conn limit), so there the ceiling bounds only the HTTP/1.1
+  Upgrade/WebSocket fallback — the multiplexed stream traffic is low-connection by
+  construction. `EDGE_UPSTREAM_MAX_IDLE_CONNS_PER_HOST` tunes the idle keep-alive pool
+  (parapet's default is 32); raise it to keep more warm connections for bursty
+  traffic. Both are **per edge replica**.
 
 - **Plaintext hop (`EDGE_UPSTREAM_TLS=false`)** → **h2c** prior-knowledge, via
   parapet's `upstream.H2CTransport`. The core's `:80` server runs with `H2C=true`

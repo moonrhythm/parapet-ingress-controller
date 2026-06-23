@@ -76,6 +76,16 @@ func main() {
 	// Set EDGE_UPSTREAM_HTTP2=false to force HTTP/1.1 — e.g. a core that predates H2C
 	// on :80, or an L4 in front of :443 that can't ALPN.
 	upstreamHTTP2 := envOr("EDGE_UPSTREAM_HTTP2", "true") == "true"
+	// Per-host connection ceiling to the core (mirrors the controller's
+	// TR_MAX_CONNS_PER_HOST / TR_MAX_IDLE_CONNS_PER_HOST). MAX_CONNS_PER_HOST=0
+	// (default) leaves connections unbounded; MAX_IDLE_CONNS_PER_HOST=0 falls back
+	// to parapet's default idle pool (32). See edge.ForwarderTuning for which paths
+	// the hard ceiling applies to (HTTP/1.1 + re-encrypt h2; the multiplexed h2c
+	// stream path is inherently low-connection and not connection-capped).
+	upstreamTuning := edge.ForwarderTuning{
+		MaxConnsPerHost:     int(envInt64("EDGE_UPSTREAM_MAX_CONNS_PER_HOST", 0)),
+		MaxIdleConnsPerHost: int(envInt64("EDGE_UPSTREAM_MAX_IDLE_CONNS_PER_HOST", 0)),
+	}
 	dataplaneMTLS := envOr("EDGE_DATAPLANE_MTLS", "false") == "true"
 	if dataplaneMTLS && !upstreamTLS {
 		slog.Error("EDGE_DATAPLANE_MTLS=true requires EDGE_UPSTREAM_TLS=true (a client cert can only ride TLS)")
@@ -395,7 +405,7 @@ func main() {
 		// fires a (non-blocking) reactive re-mint. nil when mTLS is off.
 		onCertReject = func() { remintCoord.Trigger("reactive") }
 	}
-	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamHTTP2, upstreamSNI, getClientCert, onCertReject)
+	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamHTTP2, upstreamSNI, upstreamTuning, getClientCert, onCertReject)
 
 	if metricsListen != "" {
 		go func() {
