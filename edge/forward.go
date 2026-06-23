@@ -34,6 +34,34 @@ type Forwarder struct {
 	rp *httputil.ReverseProxy
 }
 
+// defaultMaxIdleConnsPerHost mirrors parapet's upstream.defaultMaxIdleConns (32):
+// the idle keep-alive pool kept per core host when ForwarderTuning leaves it at 0.
+const defaultMaxIdleConnsPerHost = 32
+
+// ForwarderTuning bounds the edge→core connection pool per upstream host. The
+// zero value preserves the historical behavior: no connection ceiling
+// (MaxConnsPerHost == 0 ⇒ unlimited) and parapet's default idle pool (32).
+//
+// MaxConnsPerHost is a hard ceiling on the total (active + idle) connections to
+// each core host, applied to the HTTP/1.1 transports and the re-encrypt
+// ForceAttemptHTTP2 transport (net/http enforces it at the dial layer for both
+// the h2 and HTTP/1.1-fallback conns it manages). The DEFAULT plaintext h2c path
+// multiplexes every request over a small number of connections via
+// golang.org/x/net/http2.Transport, which has no per-host connection limit — so
+// the ceiling there bounds only the HTTP/1.1 Upgrade/WebSocket fallback, not the
+// multiplexed stream traffic (which needs few connections by construction).
+type ForwarderTuning struct {
+	MaxConnsPerHost     int // 0 = unlimited (no hard ceiling)
+	MaxIdleConnsPerHost int // 0 = parapet default (32)
+}
+
+func (t ForwarderTuning) idle() int {
+	if t.MaxIdleConnsPerHost > 0 {
+		return t.MaxIdleConnsPerHost
+	}
+	return defaultMaxIdleConnsPerHost
+}
+
 // NewForwarder builds a forwarder to addr (host:port).
 //
 // useTLS selects re-encrypt (TLS) vs plaintext; sni is the SNI/Host presented when
@@ -61,7 +89,10 @@ type Forwarder struct {
 // CORE rejects the edge's data-plane client cert in the re-encrypt TLS handshake — the
 // reactive force-re-mint floor. It is the coordinator's reactive Trigger; nil when
 // data-plane mTLS is off.
-func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error), onCertReject func()) *Forwarder {
+//
+// tuning bounds the per-host connection pool to the core (see ForwarderTuning);
+// the zero value keeps the historical unbounded/idle-32 behavior.
+func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, tuning ForwarderTuning, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error), onCertReject func()) *Forwarder {
 	var tr http.RoundTripper
 	switch {
 	case useTLS:
@@ -74,20 +105,28 @@ func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, getClientCe
 		}
 		// HTTPSTransport sets r.URL.Scheme = "https" and dials r.URL.Host with TLS,
 		// HTTP/1.1 only (net/http won't auto-enable h2 with a custom TLS config).
-		h1 := &upstream.HTTPSTransport{TLSClientConfig: tlsConfig}
+		h1 := &upstream.HTTPSTransport{
+			TLSClientConfig: tlsConfig,
+			MaxConn:         tuning.MaxConnsPerHost,
+			MaxIdleConns:    tuning.idle(),
+		}
 		if enableHTTP2 {
-			tr = newH2TLSTransport(tlsConfig, h1)
+			tr = newH2TLSTransport(tlsConfig, tuning, h1)
 		} else {
 			tr = h1
 		}
 	case enableHTTP2:
 		// Plaintext h2c (prior-knowledge) to the core's H2C=true :80 listener.
 		// H2CTransport sets r.URL.Scheme = "http" and downgrades Upgrade/WebSocket
-		// requests to HTTP/1.1.
-		tr = &upstream.H2CTransport{}
+		// requests to HTTP/1.1. The multiplexed h2 path has no per-host conn cap;
+		// the ceiling applies to the HTTP/1.1 Upgrade fallback we wire up here.
+		tr = &upstream.H2CTransport{HTTPTransport: h2cFallbackTransport(tuning)}
 	default:
 		// HTTPTransport sets r.URL.Scheme = "http" and speaks HTTP/1.1.
-		tr = &upstream.HTTPTransport{}
+		tr = &upstream.HTTPTransport{
+			MaxConn:      tuning.MaxConnsPerHost,
+			MaxIdleConns: tuning.idle(),
+		}
 	}
 
 	scheme := "http"
@@ -172,7 +211,7 @@ type h2TLSTransport struct {
 	h1 http.RoundTripper // HTTP/1.1-over-TLS, for Upgrade requests
 }
 
-func newH2TLSTransport(tlsConfig *tls.Config, h1 http.RoundTripper) *h2TLSTransport {
+func newH2TLSTransport(tlsConfig *tls.Config, tuning ForwarderTuning, h1 http.RoundTripper) *h2TLSTransport {
 	return &h2TLSTransport{
 		// ForceAttemptHTTP2 makes net/http wire up the bundled http2 transport even
 		// though we supply a custom TLSClientConfig + DialContext (which otherwise trips
@@ -180,18 +219,38 @@ func newH2TLSTransport(tlsConfig *tls.Config, h1 http.RoundTripper) *h2TLSTransp
 		// ALPN then negotiates h2, falling back to HTTP/1.1 if the core only offers it.
 		// Fields mirror upstream.HTTPSTransport's defaults so only the protocol changes;
 		// DisableCompression keeps the proxy hop byte-transparent (no auto-gzip).
+		// MaxConnsPerHost caps total conns to the core (net/http enforces it for the h2
+		// and HTTP/1.1-fallback conns it manages); 0 leaves it unbounded.
 		h2: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment,
 			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 			TLSClientConfig:       tlsConfig,
 			ForceAttemptHTTP2:     true,
-			MaxIdleConnsPerHost:   32,
+			MaxConnsPerHost:       tuning.MaxConnsPerHost,
+			MaxIdleConnsPerHost:   tuning.idle(),
 			IdleConnTimeout:       10 * time.Minute,
 			TLSHandshakeTimeout:   5 * time.Second,
 			ResponseHeaderTimeout: time.Minute,
 			DisableCompression:    true,
 		},
 		h1: h1,
+	}
+}
+
+// h2cFallbackTransport builds the HTTP/1.1 transport that upstream.H2CTransport
+// uses for Upgrade/WebSocket requests (the multiplexed h2c path can't carry
+// them). It mirrors parapet's own default h2c fallback but threads the connection
+// ceiling through, so EDGE_UPSTREAM_MAX_CONNS_PER_HOST also bounds the plaintext
+// Upgrade path. A 0 ceiling leaves it unbounded, matching parapet's default.
+func h2cFallbackTransport(tuning ForwarderTuning) *http.Transport {
+	return &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+		MaxConnsPerHost:       tuning.MaxConnsPerHost,
+		MaxIdleConnsPerHost:   tuning.idle(),
+		IdleConnTimeout:       10 * time.Minute,
+		ResponseHeaderTimeout: time.Minute,
+		DisableCompression:    true,
 	}
 }
 
