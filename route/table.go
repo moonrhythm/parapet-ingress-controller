@@ -1,6 +1,7 @@
 package route
 
 import (
+	"net"
 	"strings"
 	"sync"
 )
@@ -47,14 +48,16 @@ func (t *Table) Lookup(addr string) string {
 			// not found any pod
 			return ""
 		}
-		return hostIP + ":" + targetPort
+		// JoinHostPort brackets IPv6 literals (EndpointSlices surface IPv6 pod IPs
+		// on dual-stack services); for IPv4/hostnames it is a plain host:port join.
+		return net.JoinHostPort(hostIP, targetPort)
 	}
 
 	if okExt {
 		// ExternalName service: dial the external DNS name directly — the dialer's
 		// net.Resolver resolves it at connect time. No RRLB/badAddr: there is a
 		// single target, and transient failures are handled by the retry path.
-		return externalName + ":" + targetPort
+		return net.JoinHostPort(externalName, targetPort)
 	}
 
 	// neither a pod route nor an externalName route for this host

@@ -1,6 +1,6 @@
 # parapet-ingress-controller
 
-A Kubernetes ingress controller built in Go on the [parapet](https://github.com/moonrhythm/parapet) middleware framework. It watches Kubernetes Ingress, Service, Secret, ConfigMap, and Endpoints resources and hot-reloads an `http.ServeMux` router without restarting the process.
+A Kubernetes ingress controller built in Go on the [parapet](https://github.com/moonrhythm/parapet) middleware framework. It watches Kubernetes Ingress, Service, Secret, ConfigMap, and EndpointSlice resources and hot-reloads an `http.ServeMux` router without restarting the process.
 
 > The behavior contract — annotations, env vars, metrics, WAF model,
 > per-request order — is [`SPEC.md`](SPEC.md): change behavior in the code and
@@ -94,7 +94,7 @@ and the upstream hop.
 ## Key concepts
 
 ### Controller lifecycle
-`Controller.Watch()` starts four goroutines that continuously watch Ingress, Service, Secret, and Endpoints resources (plus a fifth, WAF ConfigMaps, when `WAF_ENABLED=true`, a sixth, rate-limit ConfigMaps, when `RATELIMIT_ENABLED=true`, and a seventh, Coraza ConfigMaps, when `CORAZA_ENABLED=true`). Changes are coalesced through a 300 ms `debounce.Debounce` before triggering a reload. On reload, a new `http.ServeMux` is built and swapped in atomically (`atomic.Pointer[routeState]`) — zero downtime. WAF, rate-limit, and Coraza ConfigMap changes are the exception: they recompile their rulesets/limit sets without rebuilding the mux (see the WAF, rate-limit, and Coraza concepts below).
+`Controller.Watch()` starts four goroutines that continuously watch Ingress, Service, Secret, and EndpointSlice resources (plus a fifth, WAF ConfigMaps, when `WAF_ENABLED=true`, a sixth, rate-limit ConfigMaps, when `RATELIMIT_ENABLED=true`, and a seventh, Coraza ConfigMaps, when `CORAZA_ENABLED=true`). Changes are coalesced through a 300 ms `debounce.Debounce` before triggering a reload. On reload, a new `http.ServeMux` is built and swapped in atomically (`atomic.Pointer[routeState]`) — zero downtime. WAF, rate-limit, and Coraza ConfigMap changes are the exception: they recompile their rulesets/limit sets without rebuilding the mux (see the WAF, rate-limit, and Coraza concepts below).
 
 ### Plugins
 A `Plugin` is `func(ctx plugin.Context)` where `Context` carries:
@@ -110,9 +110,9 @@ Routes are keyed as `host + path` strings (e.g. `"www.example.com/api/"`). PathT
 - `Exact` → registers `host/path` only (strips trailing slash)
 - `ImplementationSpecific` → registers as-is
 
-Endpoint lookup is round-robin (`route.RRLB`). Bad addresses (dial errors) are marked and skipped temporarily.
+Endpoint lookup is round-robin (`route.RRLB`). Pod IPs come from the Service's EndpointSlices (`discovery.k8s.io/v1`) — a Service may own several slices, so they're unioned (ready addresses only, keyed back to the Service via the `kubernetes.io/service-name` label). Bad addresses (dial errors) are marked and skipped temporarily.
 
-**ExternalName Services** (`spec.type: ExternalName`) are supported via a separate `route.Table` map (`addrToExternalName`, set by `reloadServiceDebounced` via `SetExternalNameRoutes` — full-replace, so it never races the incremental endpoint host-route path). They have no Endpoints, so `Table.Lookup` falls back to dialing `spec.externalName` (resolved by the dialer's `net.Resolver`) on the **service port** the ingress references (no `targetPort` indirection; no RRLB/bad-addr — single target). A pod-backed host route takes precedence over an ExternalName one (only transiently overlapping during a type change). See [`SPEC.md`](SPEC.md).
+**ExternalName Services** (`spec.type: ExternalName`) are supported via a separate `route.Table` map (`addrToExternalName`, set by `reloadServiceDebounced` via `SetExternalNameRoutes` — full-replace, so it never races the incremental endpoint host-route path). They have no EndpointSlices, so `Table.Lookup` falls back to dialing `spec.externalName` (resolved by the dialer's `net.Resolver`) on the **service port** the ingress references (no `targetPort` indirection; no RRLB/bad-addr — single target). A pod-backed host route takes precedence over an ExternalName one (only transiently overlapping during a type change). See [`SPEC.md`](SPEC.md).
 
 ### TLS
 TLS secrets are loaded from `Secret.Data["tls.crt"]` / `["tls.key"]`. The `cert.Table` provides `GetCertificate` for SNI-based lookup (exact match, then a single-label wildcard climb), plugged directly into `tls.Config`. By default only secrets referenced by an Ingress's `spec.tls.secretName` are loaded; set `LOAD_ALL_CERTS=true` to index every TLS-typed secret in the watch namespace (lets a wildcard cert serve SNI without per-ingress wiring).

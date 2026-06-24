@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	networking "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,13 +24,13 @@ import (
 )
 
 type fsClient struct {
-	mu         sync.RWMutex
-	dir        string
-	ingresses  []networking.Ingress
-	services   []v1.Service
-	endpoints  []v1.Endpoints
-	secrets    []v1.Secret
-	configmaps []v1.ConfigMap
+	mu             sync.RWMutex
+	dir            string
+	ingresses      []networking.Ingress
+	services       []v1.Service
+	endpointSlices []discovery.EndpointSlice
+	secrets        []v1.Secret
+	configmaps     []v1.ConfigMap
 }
 
 func newFSClient(dir string) (*fsClient, error) {
@@ -46,7 +47,7 @@ func newFSClient(dir string) (*fsClient, error) {
 func (c *fsClient) reset() {
 	c.ingresses = nil
 	c.services = nil
-	c.endpoints = nil
+	c.endpointSlices = nil
 	c.secrets = nil
 	c.configmaps = nil
 }
@@ -162,16 +163,16 @@ func (c *fsClient) addObject(raw []byte) {
 		c.autofillMeta(&svc.ObjectMeta)
 		c.services = append(c.services, svc)
 	case runtime.TypeMeta{
-		APIVersion: "v1",
-		Kind:       "Endpoints",
+		APIVersion: "discovery.k8s.io/v1",
+		Kind:       "EndpointSlice",
 	}:
-		var ep v1.Endpoints
-		err := c.decode(raw, &ep)
+		var es discovery.EndpointSlice
+		err := c.decode(raw, &es)
 		if err != nil {
 			return
 		}
-		c.autofillMeta(&ep.ObjectMeta)
-		c.endpoints = append(c.endpoints, ep)
+		c.autofillMeta(&es.ObjectMeta)
+		c.endpointSlices = append(c.endpointSlices, es)
 	case runtime.TypeMeta{
 		APIVersion: "v1",
 		Kind:       "Secret",
@@ -267,13 +268,13 @@ func (c *fsClient) UpdateSecret(ctx context.Context, namespace string, secret *v
 	return secret.DeepCopy(), nil
 }
 
-func (c *fsClient) GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error) {
+func (c *fsClient) GetEndpointSlices(ctx context.Context, namespace string) ([]discovery.EndpointSlice, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.endpoints, nil
+	return c.endpointSlices, nil
 }
 
-func (c *fsClient) WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error) {
+func (c *fsClient) WatchEndpointSlices(ctx context.Context, namespace string) (watch.Interface, error) {
 	ch := make(chan watch.Event)
 	return watch.NewProxyWatcher(ch), nil
 }

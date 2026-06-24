@@ -20,12 +20,13 @@ Routes are keyed `host + path`. PathType semantics:
 | `Exact` | `host/path` only (trailing slash stripped; root `/` falls back to prefix) |
 | `ImplementationSpecific` | as-is |
 
-Backends resolve to a Service `host:port`, then to pod IPs via Endpoints.
-Endpoint selection is **round-robin**; an address that fails to dial is marked
-**bad for 2s** and skipped (reactive health — no active probing). Host is
-lowercased and port-stripped before matching.
+Backends resolve to a Service `host:port`, then to pod IPs via EndpointSlices
+(`discovery.k8s.io/v1`; a Service's slices are unioned into one address set,
+ready addresses only). Endpoint selection is **round-robin**; an address that
+fails to dial is marked **bad for 2s** and skipped (reactive health — no active
+probing). Host is lowercased and port-stripped before matching.
 
-A Service of `type: ExternalName` is also supported: it has no Endpoints, so the
+A Service of `type: ExternalName` is also supported: it has no EndpointSlices, so the
 backend is dialed at its `spec.externalName` (an external DNS name, resolved at
 connect time) on the **Service port the ingress references** (`targetPort` is a
 pod concept and does not apply to a DNS CNAME — the port the ingress addresses is

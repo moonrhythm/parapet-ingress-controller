@@ -15,6 +15,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/healthz"
 	"github.com/moonrhythm/parapet/pkg/waf"
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -150,7 +151,7 @@ type Controller struct {
 	watchedIngresses        sync.Map
 	watchedServices         sync.Map
 	watchedSecrets          sync.Map
-	watchedEndpoints        sync.Map
+	watchedEndpointSlices   sync.Map
 	watchedConfigMaps       sync.Map
 	watchedRLConfigMaps     sync.Map
 	watchedCorazaConfigMaps sync.Map
@@ -213,7 +214,7 @@ func (ctrl *Controller) Watch() {
 	go ctrl.watchIngresses(ctx)
 	go ctrl.watchServices(ctx)
 	go ctrl.watchSecrets(ctx)
-	go ctrl.watchEndpoints(ctx)
+	go ctrl.watchEndpointSlices(ctx)
 	if ctrl.WAFConfig.Enabled {
 		go ctrl.watchConfigMaps(ctx)
 	}
@@ -262,13 +263,13 @@ func (ctrl *Controller) preloadResources(ctx context.Context) {
 		}
 		return nil
 	})
-	preloadList(ctx, "endpoints", func() error {
-		endpoints, err := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
+	preloadList(ctx, "endpointslices", func() error {
+		slices, err := k8s.GetEndpointSlices(ctx, ctrl.watchNamespace)
 		if err != nil {
 			return err
 		}
-		for i := range endpoints {
-			ctrl.watchedEndpoints.Store(endpoints[i].Namespace+"/"+endpoints[i].Name, &endpoints[i])
+		for i := range slices {
+			ctrl.watchedEndpointSlices.Store(slices[i].Namespace+"/"+slices[i].Name, &slices[i])
 		}
 		return nil
 	})
@@ -509,24 +510,26 @@ func (ctrl *Controller) watchSecrets(ctx context.Context) {
 	)
 }
 
-func (ctrl *Controller) watchEndpoints(ctx context.Context) {
-	// a single endpoint event only touches its own service's host, so both
-	// upsert and delete update just that one host in place instead of rebuilding
-	// the whole endpoint table. The full rebuild (reloadEndpointDebounced) is
-	// reserved for the initial sync / resync in firstReload, where the entire
-	// set is (re)listed.
-	watchResource(ctx, ctrl.watchNamespace, "endpoints", k8s.WatchEndpoints, k8s.GetEndpoints,
-		&ctrl.watchedEndpoints,
-		func(ep *v1.Endpoints) {
-			ctrl.reloadSingleEndpoint(ep)
-			// Endpoints carry the numeric port a *named* Service targetPort resolves
-			// to, so a service whose named port wasn't resolvable at service-reload
-			// time (endpoints not yet present) converges once its endpoints arrive.
-			// Debounced, so high endpoint churn coalesces into at most one cheap
-			// port-table rebuild per window.
+func (ctrl *Controller) watchEndpointSlices(ctx context.Context) {
+	// A single EndpointSlice event only touches its own Service's host, so both
+	// upsert and delete recompute just that one host in place (by re-aggregating
+	// the Service's slices from the store) instead of rebuilding the whole
+	// endpoint table. The full rebuild (reloadEndpointDebounced) is reserved for
+	// the initial sync / resync in firstReload, where the entire set is (re)listed.
+	watchResource(ctx, ctrl.watchNamespace, "endpointslices", k8s.WatchEndpointSlices, k8s.GetEndpointSlices,
+		&ctrl.watchedEndpointSlices,
+		func(es *discovery.EndpointSlice) {
+			ctrl.reloadEndpointSlice(es)
+			// EndpointSlices carry the numeric port a *named* Service targetPort
+			// resolves to, so a service whose named port wasn't resolvable at
+			// service-reload time (slices not yet present) converges once its slices
+			// arrive. Debounced, so high endpoint churn coalesces into at most one
+			// cheap port-table rebuild per window.
 			ctrl.reloadService()
 		},
-		ctrl.deleteSingleEndpoint,
+		// delete: the store has already dropped this slice, so re-aggregating the
+		// Service drops the host when its last slice is gone.
+		ctrl.reloadEndpointSlice,
 		// resync: rebuild the full host-route table from the reconciled store.
 		ctrl.reloadEndpointDebounced,
 	)
@@ -745,8 +748,8 @@ func (ctrl *Controller) reloadServiceDebounced() {
 // resolveTargetPort returns the concrete numeric pod port (as a string) a
 // ServicePort routes to. A numeric targetPort is used directly. A *named*
 // targetPort (intstr.String) carries no number in the Service object, so it is
-// resolved from the service's Endpoints — matching the EndpointPort whose Name
-// equals this ServicePort's Name (Kubernetes keys EndpointPort.Name to
+// resolved from the service's EndpointSlices — matching the EndpointPort whose
+// Name equals this ServicePort's Name (Kubernetes keys EndpointPort.Name to
 // ServicePort.Name). Returns ok=false when a named port can't be resolved yet,
 // so the caller skips it instead of producing a dead ":0" route.
 func (ctrl *Controller) resolveTargetPort(s *v1.Service, p v1.ServicePort) (string, bool) {
@@ -759,19 +762,26 @@ func (ctrl *Controller) resolveTargetPort(s *v1.Service, p v1.ServicePort) (stri
 		return strconv.Itoa(int(p.Port)), true
 	}
 
-	v, ok := ctrl.watchedEndpoints.Load(s.Namespace + "/" + s.Name)
-	if !ok {
-		return "", false
-	}
-	ep := v.(*v1.Endpoints)
-	for _, ss := range ep.Subsets {
-		for _, epp := range ss.Ports {
-			if epp.Name == p.Name && epp.Port > 0 {
-				return strconv.Itoa(int(epp.Port)), true
+	// Scan the service's EndpointSlices (a service may own several) for the
+	// matching named port. All slices of a service share the same port set, so
+	// the first match wins.
+	var resolved string
+	var found bool
+	ctrl.watchedEndpointSlices.Range(func(_, value any) bool {
+		es := value.(*discovery.EndpointSlice)
+		if es.Namespace != s.Namespace || sliceServiceName(es) != s.Name {
+			return true
+		}
+		for _, epp := range es.Ports {
+			if epp.Name != nil && *epp.Name == p.Name && epp.Port != nil && *epp.Port > 0 {
+				resolved = strconv.Itoa(int(*epp.Port))
+				found = true
+				return false
 			}
 		}
-	}
-	return "", false
+		return true
+	})
+	return resolved, found
 }
 
 func (ctrl *Controller) reloadSecret() {
@@ -842,9 +852,13 @@ func (ctrl *Controller) reloadSecretDebounced() {
 }
 
 // reloadEndpointDebounced rebuilds the entire host -> pod-IP table from the
-// whole watched-endpoints store. It is the initial-sync / resync path (called
-// from firstReload); steady-state endpoint events are applied incrementally
-// per host by reloadSingleEndpoint / deleteSingleEndpoint and never come here.
+// whole watched-endpointslices store. It is the initial-sync / resync path
+// (called from firstReload); steady-state endpoint events are applied
+// incrementally per host by reloadEndpointSlice and never come here.
+//
+// A Service may own several EndpointSlices, so this groups slices by their
+// owning Service (the kubernetes.io/service-name label) in a single pass and
+// unions the ready addresses of all of a Service's slices into one RRLB.
 func (ctrl *Controller) reloadEndpointDebounced() {
 	defer func() {
 		if err := recover(); err != nil {
@@ -853,30 +867,68 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 	}()
 
 	routes := make(map[string]*route.RRLB, endpointSizeHint)
-	ctrl.watchedEndpoints.Range(func(_, value any) bool {
-		ep := value.(*v1.Endpoints)
-		if lb := endpointToRRLB(ep); lb != nil {
-			routes[buildHost(ep.Namespace, ep.Name)] = lb
+	ctrl.watchedEndpointSlices.Range(func(_, value any) bool {
+		es := value.(*discovery.EndpointSlice)
+		svc := sliceServiceName(es)
+		if svc == "" {
+			return true
 		}
+		host := buildHost(es.Namespace, svc)
+		lb := routes[host]
+		if lb == nil {
+			lb = &route.RRLB{}
+			routes[host] = lb
+		}
+		appendReadyIPs(lb, es)
 		return true
 	})
+
+	// Drop services whose slices yielded no ready address — an empty RRLB would
+	// 503 anyway, and leaving it out keeps Lookup's host-present check meaningful.
+	for host, lb := range routes {
+		if len(lb.IPs) == 0 {
+			delete(routes, host)
+		}
+	}
 
 	ctrl.routeTable.SetHostRoutes(routes)
 	slog.Info("reloaded endpoints", "hosts", len(routes))
 }
 
-func (ctrl *Controller) reloadSingleEndpoint(ep *v1.Endpoints) {
-	slog.Debug("reload single endpoint", "namespace", ep.Namespace, "name", ep.Name)
+// reloadEndpointSlice recomputes the host route for the Service owning es by
+// re-aggregating every slice the Service currently has in the store, then
+// swapping just that one host entry. It serves both upsert and delete events:
+// on delete the store has already dropped es, so an empty aggregate deletes the
+// host (SetHostRoute(nil)). The store is written only by the single endpoint
+// watch goroutine, which is also the only caller here, so the Range is consistent.
+func (ctrl *Controller) reloadEndpointSlice(es *discovery.EndpointSlice) {
+	svc := sliceServiceName(es)
+	if svc == "" {
+		slog.Warn("endpointslice without service-name label", "namespace", es.Namespace, "name", es.Name)
+		return
+	}
+	slog.Debug("reload endpointslice", "namespace", es.Namespace, "service", svc, "name", es.Name)
 
-	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), endpointToRRLB(ep))
+	ctrl.routeTable.SetHostRoute(buildHost(es.Namespace, svc), ctrl.aggregateServiceIPs(es.Namespace, svc))
 }
 
-func (ctrl *Controller) deleteSingleEndpoint(ep *v1.Endpoints) {
-	slog.Debug("delete single endpoint", "namespace", ep.Namespace, "name", ep.Name)
-
-	// the host is gone, so drop just that one entry; passing nil makes
-	// SetHostRoute delete it, leaving the rest of the table untouched.
-	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), nil)
+// aggregateServiceIPs unions the ready addresses of every watched EndpointSlice
+// owned by namespace/serviceName into one RRLB, or returns nil when none have a
+// ready address (so SetHostRoute deletes the host).
+func (ctrl *Controller) aggregateServiceIPs(namespace, serviceName string) *route.RRLB {
+	var b route.RRLB
+	ctrl.watchedEndpointSlices.Range(func(_, value any) bool {
+		es := value.(*discovery.EndpointSlice)
+		if es.Namespace != namespace || sliceServiceName(es) != serviceName {
+			return true
+		}
+		appendReadyIPs(&b, es)
+		return true
+	})
+	if len(b.IPs) == 0 {
+		return nil
+	}
+	return &b
 }
 
 func (ctrl *Controller) GetCertificate(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -1018,15 +1070,27 @@ func (ctrl *Controller) makeHandler(ing *networking.Ingress, svc *v1.Service, co
 	})
 }
 
-func endpointToRRLB(ep *v1.Endpoints) *route.RRLB {
-	var b route.RRLB
-	for _, ss := range ep.Subsets {
-		for _, addr := range ss.Addresses {
-			b.IPs = append(b.IPs, addr.IP)
+// sliceServiceName returns the name of the Service an EndpointSlice belongs to,
+// from the well-known kubernetes.io/service-name label, or "" if unset (e.g. a
+// hand-written slice not owned by a Service — skipped, as it maps to no host).
+func sliceServiceName(es *discovery.EndpointSlice) string {
+	return es.Labels[discovery.LabelServiceName]
+}
+
+// appendReadyIPs appends the ready addresses of an EndpointSlice to lb. Only
+// IPv4/IPv6 slices contribute pod IPs; FQDN slices carry hostnames the RRLB
+// can't treat as pod IPs (and never arise for the normal selector-backed
+// services this resolves). A nil Ready is treated as ready per the EndpointSlice
+// contract, matching the legacy Endpoints.Subsets[].Addresses behavior (which
+// only listed ready addresses).
+func appendReadyIPs(lb *route.RRLB, es *discovery.EndpointSlice) {
+	if es.AddressType == discovery.AddressTypeFQDN {
+		return
+	}
+	for _, e := range es.Endpoints {
+		if e.Conditions.Ready != nil && !*e.Conditions.Ready {
+			continue
 		}
+		lb.IPs = append(lb.IPs, e.Addresses...)
 	}
-	if len(b.IPs) == 0 {
-		return nil
-	}
-	return &b
 }

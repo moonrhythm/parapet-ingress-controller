@@ -176,8 +176,8 @@ func TestTableIncrementalMatchesRebuild(t *testing.T) {
 	}
 
 	// incremental: seed with the first state, then apply each subsequent state
-	// as per-host upserts/deletes, mirroring reloadSingleEndpoint /
-	// deleteSingleEndpoint.
+	// as per-host upserts/deletes, mirroring the per-host SetHostRoute path
+	// reloadEndpointSlice drives.
 	var incr Table
 	incr.SetHostRoutes(toRoutes(states[0]))
 	for i := 1; i < len(states); i++ {

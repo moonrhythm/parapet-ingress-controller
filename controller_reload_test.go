@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -152,12 +153,7 @@ func TestReloadIngress(t *testing.T) {
 func TestReloadServiceAndEndpoint(t *testing.T) {
 	ctrl := New("", proxy.New())
 	ctrl.watchedServices.Store("default/web", clusterIPService("default", "web", 80, 8080))
-	ctrl.watchedEndpoints.Store("default/web", &v1.Endpoints{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "web"},
-		Subsets: []v1.EndpointSubset{
-			{Addresses: []v1.EndpointAddress{{IP: "10.0.0.1"}}},
-		},
-	})
+	ctrl.watchedEndpointSlices.Store("default/web-1", endpointSlice("default", "web", "web-1", "10.0.0.1"))
 
 	ctrl.reloadServiceDebounced()  // populates port routes (svc addr -> target port)
 	ctrl.reloadEndpointDebounced() // populates host routes (svc host -> pod IPs)
@@ -183,16 +179,10 @@ func namedPortService(namespace, name, portName string, port int) *v1.Service {
 	}
 }
 
-func endpointsNamedPort(namespace, name, ip, portName string, port int) *v1.Endpoints {
-	return &v1.Endpoints{
-		ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
-		Subsets: []v1.EndpointSubset{
-			{
-				Addresses: []v1.EndpointAddress{{IP: ip}},
-				Ports:     []v1.EndpointPort{{Name: portName, Port: int32(port)}},
-			},
-		},
-	}
+func endpointSliceNamedPort(namespace, svcName, sliceName, ip, portName string, port int) *discovery.EndpointSlice {
+	es := endpointSlice(namespace, svcName, sliceName, ip)
+	es.Ports = []discovery.EndpointPort{{Name: ptr(portName), Port: ptr(int32(port))}}
+	return es
 }
 
 func externalNameService(namespace, name, externalName string, ports ...int) *v1.Service {
@@ -257,17 +247,14 @@ func TestReloadServiceExternalName(t *testing.T) {
 		ctrl := New("", proxy.New())
 		// Start as a ClusterIP service with one endpoint.
 		ctrl.watchedServices.Store("default/svc", clusterIPService("default", "svc", 80, 8080))
-		ctrl.watchedEndpoints.Store("default/svc", &v1.Endpoints{
-			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "svc"},
-			Subsets:    []v1.EndpointSubset{{Addresses: []v1.EndpointAddress{{IP: "10.0.0.1"}}}},
-		})
+		ctrl.watchedEndpointSlices.Store("default/svc-1", endpointSlice("default", "svc", "svc-1", "10.0.0.1"))
 		ctrl.reloadServiceDebounced()
 		ctrl.reloadEndpointDebounced()
 		assert.Equal(t, "10.0.0.1:8080", ctrl.routeTable.Lookup("svc.default.svc.cluster.local:80"))
 
-		// Flip to ExternalName; the endpoints controller removes the Endpoints object.
+		// Flip to ExternalName; the endpointslice controller removes the slices.
 		ctrl.watchedServices.Store("default/svc", externalNameService("default", "svc", "api.example.com", 80))
-		ctrl.watchedEndpoints.Delete("default/svc")
+		ctrl.watchedEndpointSlices.Delete("default/svc-1")
 		ctrl.reloadServiceDebounced()
 		ctrl.reloadEndpointDebounced()
 		assert.Equal(t, "api.example.com:80", ctrl.routeTable.Lookup("svc.default.svc.cluster.local:80"))
@@ -280,7 +267,7 @@ func TestReloadServiceNamedTargetPort(t *testing.T) {
 	// would route every request to ":0" → dial failure → 503).
 	ctrl := New("", proxy.New())
 	ctrl.watchedServices.Store("default/web", namedPortService("default", "web", "http", 80))
-	ctrl.watchedEndpoints.Store("default/web", endpointsNamedPort("default", "web", "10.0.0.1", "http", 8080))
+	ctrl.watchedEndpointSlices.Store("default/web-1", endpointSliceNamedPort("default", "web", "web-1", "10.0.0.1", "http", 8080))
 
 	ctrl.reloadServiceDebounced()
 	ctrl.reloadEndpointDebounced()
@@ -302,7 +289,7 @@ func TestReloadServiceNamedTargetPortConvergesWhenEndpointsArrive(t *testing.T) 
 	assert.Empty(t, ctrl.routeTable.Lookup("web.default.svc.cluster.local:80"),
 		"unresolved named port must not create a ':0' route")
 
-	ctrl.watchedEndpoints.Store("default/web", endpointsNamedPort("default", "web", "10.0.0.2", "http", 9090))
+	ctrl.watchedEndpointSlices.Store("default/web-1", endpointSliceNamedPort("default", "web", "web-1", "10.0.0.2", "http", 9090))
 	ctrl.reloadServiceDebounced()  // endpoint watch triggers this in production
 	ctrl.reloadEndpointDebounced() // host routes (pod IPs)
 
@@ -311,13 +298,11 @@ func TestReloadServiceNamedTargetPortConvergesWhenEndpointsArrive(t *testing.T) 
 		"named port converges once endpoints arrive")
 }
 
-func TestReloadEndpointEmptySubsetIsNotRouted(t *testing.T) {
+func TestReloadEndpointEmptySliceIsNotRouted(t *testing.T) {
 	ctrl := New("", proxy.New())
 	ctrl.watchedServices.Store("default/web", clusterIPService("default", "web", 80, 8080))
-	ctrl.watchedEndpoints.Store("default/web", &v1.Endpoints{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "web"},
-		// no subsets -> no usable backend
-	})
+	// a slice with no endpoints -> no usable backend
+	ctrl.watchedEndpointSlices.Store("default/web-1", endpointSlice("default", "web", "web-1"))
 
 	ctrl.reloadServiceDebounced()
 	ctrl.reloadEndpointDebounced()

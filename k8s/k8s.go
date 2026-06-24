@@ -6,6 +6,7 @@ import (
 	"os"
 
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	networking "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
@@ -57,8 +58,8 @@ var client interface {
 	WatchSecrets(ctx context.Context, namespace string) (watch.Interface, error)
 	GetSecret(ctx context.Context, namespace, name string) (*v1.Secret, error)
 	UpdateSecret(ctx context.Context, namespace string, secret *v1.Secret) (*v1.Secret, error)
-	GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error)
-	WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error)
+	GetEndpointSlices(ctx context.Context, namespace string) ([]discovery.EndpointSlice, error)
+	WatchEndpointSlices(ctx context.Context, namespace string) (watch.Interface, error)
 	GetConfigMaps(ctx context.Context, namespace, labelSelector string) ([]v1.ConfigMap, error)
 	WatchConfigMaps(ctx context.Context, namespace, labelSelector string) (watch.Interface, error)
 }
@@ -105,14 +106,14 @@ func UpdateSecret(ctx context.Context, namespace string, secret *v1.Secret) (*v1
 	return client.UpdateSecret(ctx, namespace, secret)
 }
 
-// GetEndpoints lists all endpoints
-func GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error) {
-	return client.GetEndpoints(ctx, namespace)
+// GetEndpointSlices lists all endpoint slices
+func GetEndpointSlices(ctx context.Context, namespace string) ([]discovery.EndpointSlice, error) {
+	return client.GetEndpointSlices(ctx, namespace)
 }
 
-// WatchEndpoints watches endpoints
-func WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error) {
-	return client.WatchEndpoints(ctx, namespace)
+// WatchEndpointSlices watches endpoint slices
+func WatchEndpointSlices(ctx context.Context, namespace string) (watch.Interface, error) {
+	return client.WatchEndpointSlices(ctx, namespace)
 }
 
 // GetConfigMaps lists config maps for given namespace, filtered by labelSelector
