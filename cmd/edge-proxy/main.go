@@ -33,7 +33,6 @@ import (
 
 	"github.com/moonrhythm/parapet-ingress-controller/edge"
 	"github.com/moonrhythm/parapet-ingress-controller/geoip"
-	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 	"github.com/moonrhythm/parapet-ingress-controller/trustcidr"
 )
 
@@ -327,10 +326,12 @@ func main() {
 			}
 		}
 		if storage != nil {
-			// Cache outcomes: bounded prom counters (no host label — serve-all
-			// means r.Host is unbounded) + a cacheStatus access-log field
-			// (no-op under DISABLE_LOG — no logger record to set).
-			cacheMetrics := observe.CacheResult()
+			// Cache outcomes: the host-bounded parapet_cache_total{host,result,
+			// edge_id} counter (host collapsed to "other" off the knownHost oracle,
+			// the same serve-all bounding parapet_requests uses, so the per-project
+			// usage pipeline can attribute outcomes by host) + a cacheStatus
+			// access-log field (no-op under DISABLE_LOG — no logger record to set).
+			cacheMetrics := edge.CacheTotal(edgeHosts.IsKnownHost)
 			opts := cache.Options{
 				MaxFileSize: maxFile,
 				// Cache GET responses that arrive chunked with no Content-Length —

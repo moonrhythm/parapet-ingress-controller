@@ -702,12 +702,15 @@ cacheable object locally removes a full origin round trip. Enabled with
   (a 101) stay untagged.
   Cache outcomes are counted on the `:9187` metrics
   endpoint (`EDGE_METRICS_LISTEN`, set `""` to disable) as
-  `parapet_cache_total{result}` (`HIT|MISS|STALE|STALE_ERROR|BYPASS`) plus
-  `parapet_cache_fill_duration_seconds` (origin-fill latency, observed only when
-  parapet was contacted on the serving path). Deliberately **no `host` label** —
-  the edge serves any Host the client sends, so a host label would be unbounded
-  series under a flood. Unless `DISABLE_LOG` is set, each access-log line also
-  carries the outcome as a `cacheStatus` field.
+  `parapet_cache_total{host,result,edge_id}` (`HIT|MISS|STALE|STALE_ERROR|BYPASS`)
+  plus `parapet_cache_fill_duration_seconds` (origin-fill latency, observed only
+  when parapet was contacted on the serving path). The `host` label is **bounded
+  by the knownHost oracle** — a Host the edge doesn't serve collapses to `other`,
+  the same serve-all bounding `parapet_requests` / `parapet_cache_egress_bytes`
+  use — so per-host cache attribution is possible without unbounded series under a
+  Host flood (`edge.CacheTotal`, the host-bounded replacement for the host-less
+  `metric/observe.CacheResult`). Unless `DISABLE_LOG` is set, each access-log line
+  also carries the outcome as a `cacheStatus` field.
 
   `parapet_cache_egress_bytes{host,result,edge_id}` counts the response-body
   bytes written to clients by the edge cache, partitioned by cache outcome. It

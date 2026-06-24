@@ -318,8 +318,8 @@ RFC 5861 surface.
 
 Every in-scope decision counts in
 **`parapet_cache_override_total{name,action,result}`** on the edge's `:9187`
-endpoint, alongside the existing `parapet_cache_total{result}` (HIT/MISS/…) and
-`parapet_cache_egress_bytes`:
+endpoint, alongside the existing `parapet_cache_total{host,result,edge_id}`
+(HIT/MISS/…, host bounded by the knownHost oracle) and `parapet_cache_egress_bytes`:
 
 - `action` = `cache` | `bypass`.
 - `result` = `applied` | `shadow` | `error` (a rule whose filter excludes the
