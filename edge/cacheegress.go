@@ -23,8 +23,10 @@ package edge
 //   - result: bounded explicitly — only HIT, STALE, MISS from the X-Cache
 //     header pass through; any other value collapses to "other" (defense in
 //     depth; the header is set by our own cache.go, not by the client).
-//     Empty X-Cache (cache bypass, hijacked upgrade, etc.) records NOTHING,
-//     keeping series from accumulating for uncached traffic.
+//     Empty X-Cache (hijacked upgrade, etc.) and an explicit BYPASS (stamped by
+//     CacheStatus on uncacheable responses) record NOTHING — bypass bytes reach
+//     the origin and are already counted by origin-side counters — keeping series
+//     from accumulating for uncached traffic.
 //   - edge_id: single cardinality per process — the global edgeID var.
 
 import (
@@ -105,9 +107,14 @@ func cacheResultLabel(v string) string {
 		return ""
 	case "HIT", "STALE", "MISS":
 		return v
+	case "BYPASS":
+		// CacheStatus stamps BYPASS on responses the cache didn't manage. Those
+		// bytes reached the origin and are already counted by origin-side byte
+		// counters, so they are not cache egress — skip, same as an absent header.
+		return ""
 	default:
-		// Unexpected value (defense in depth — our cache.go is the only
-		// writer of X-Cache, but bound the label unconditionally).
+		// Unexpected value (defense in depth — our cache.go / CacheStatus are the
+		// only writers of X-Cache, but bound the label unconditionally).
 		return "other"
 	}
 }

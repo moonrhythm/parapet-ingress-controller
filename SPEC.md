@@ -217,7 +217,9 @@ invariants:
   only on explicit `Cache-Control`/`Expires` freshness; refuses
   `private`/`no-store`/`no-cache`/`Set-Cookie`/`Vary: *`; ignores **client**
   request `Cache-Control`, CDN-style), `GET`/`HEAD`, LRU-bounded, restart-
-  persistent, fail-static, `X-Cache: HIT|MISS`. This is an **edge-only** feature:
+  persistent, fail-static, `X-Cache: HIT|MISS|STALE|BYPASS` (BYPASS = stamped on
+  responses ineligible for caching — non-cacheable method, upgrade, Range, or
+  override bypass — that the cache proxies straight to the origin). This is an **edge-only** feature:
   the parapet controller does not cache, so there is no controller equivalent and
   no conformance obligation. A cache **hit** is served without contacting parapet,
   so parapet's authoritative WAF does not re-run on hits (only origin-opted-in

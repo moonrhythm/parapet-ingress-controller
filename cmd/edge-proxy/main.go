@@ -488,6 +488,11 @@ func main() {
 		// counts body bytes for every managed response (HITs, STALEs, MISSes)
 		// so billing can account for cache-HIT egress that never reaches the origin.
 		m.Use(edge.CacheEgress(edgeHosts.IsKnownHost))
+		// CacheStatus sits between CacheEgress and the cache: it stamps
+		// X-Cache: BYPASS on responses the cache declined to manage (non-cacheable
+		// method, upgrade, Range, or Cacheable=false), so every response under the
+		// cache carries an explicit X-Cache status. CacheEgress skips BYPASS bytes.
+		m.Use(edge.CacheStatus())
 		m.Use(respCache)
 	}
 	m.Use(forwarder)
