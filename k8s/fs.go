@@ -29,6 +29,7 @@ type fsClient struct {
 	ingresses      []networking.Ingress
 	services       []v1.Service
 	endpointSlices []discovery.EndpointSlice
+	endpoints      []v1.Endpoints
 	secrets        []v1.Secret
 	configmaps     []v1.ConfigMap
 }
@@ -48,6 +49,7 @@ func (c *fsClient) reset() {
 	c.ingresses = nil
 	c.services = nil
 	c.endpointSlices = nil
+	c.endpoints = nil
 	c.secrets = nil
 	c.configmaps = nil
 }
@@ -175,6 +177,17 @@ func (c *fsClient) addObject(raw []byte) {
 		c.endpointSlices = append(c.endpointSlices, es)
 	case runtime.TypeMeta{
 		APIVersion: "v1",
+		Kind:       "Endpoints",
+	}:
+		var ep v1.Endpoints
+		err := c.decode(raw, &ep)
+		if err != nil {
+			return
+		}
+		c.autofillMeta(&ep.ObjectMeta)
+		c.endpoints = append(c.endpoints, ep)
+	case runtime.TypeMeta{
+		APIVersion: "v1",
 		Kind:       "Secret",
 	}:
 		var s v1.Secret
@@ -275,6 +288,17 @@ func (c *fsClient) GetEndpointSlices(ctx context.Context, namespace string) ([]d
 }
 
 func (c *fsClient) WatchEndpointSlices(ctx context.Context, namespace string) (watch.Interface, error) {
+	ch := make(chan watch.Event)
+	return watch.NewProxyWatcher(ch), nil
+}
+
+func (c *fsClient) GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.endpoints, nil
+}
+
+func (c *fsClient) WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error) {
 	ch := make(chan watch.Event)
 	return watch.NewProxyWatcher(ch), nil
 }

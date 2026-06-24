@@ -19,6 +19,8 @@ rules:
   - services
   - secrets
   - configmaps
+  # endpoints: legacy fallback for services that have no EndpointSlice
+  - endpoints
   verbs:
   - list
   - watch

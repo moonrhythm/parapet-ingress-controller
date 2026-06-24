@@ -4,9 +4,24 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// legacyEndpoints builds a core/v1 Endpoints object (named after its Service)
+// with all addresses ready, for the no-EndpointSlice fallback tests.
+func legacyEndpoints(namespace, name string, ips ...string) *v1.Endpoints {
+	ep := &v1.Endpoints{ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name}}
+	if len(ips) > 0 {
+		addrs := make([]v1.EndpointAddress, 0, len(ips))
+		for _, ip := range ips {
+			addrs = append(addrs, v1.EndpointAddress{IP: ip})
+		}
+		ep.Subsets = []v1.EndpointSubset{{Addresses: addrs}}
+	}
+	return ep
+}
 
 // endpointSlice builds an IPv4 EndpointSlice for namespace/svcName (carrying the
 // kubernetes.io/service-name label the controller maps back to a host). All
@@ -138,4 +153,83 @@ func TestReloadEndpointSlice(t *testing.T) {
 	// host a is untouched by b's deletion
 	assert.Equal(t, "10.0.0.9:8080", incr.routeTable.Lookup("a.default.svc.cluster.local:80"))
 	assertSame("a.default.svc.cluster.local")
+}
+
+// TestEndpointSliceFallbackToEndpoints checks the no-slice fallback: a Service
+// with only a legacy Endpoints object routes from it, an EndpointSlice takes
+// over the moment one appears (slices are authoritative — even an empty slice
+// suppresses the fallback), and removing the slice restores the fallback.
+func TestEndpointSliceFallbackToEndpoints(t *testing.T) {
+	t.Parallel()
+
+	const host = "c.default.svc.cluster.local"
+	newCtrl := func() *Controller {
+		var c Controller
+		c.routeTable.SetPortRoutes(map[string]string{host + ":80": "8080"})
+		return &c
+	}
+
+	t.Run("incremental: endpoints -> slice wins -> slice removed restores fallback", func(t *testing.T) {
+		c := newCtrl()
+
+		// only legacy Endpoints exist -> routed from them
+		ep := legacyEndpoints("default", "c", "10.0.0.50")
+		c.watchedEndpoints.Store("default/c", ep)
+		c.reloadEndpointsObject(ep)
+		assert.Equal(t, "10.0.0.50:8080", c.routeTable.Lookup(host+":80"))
+
+		// a slice appears -> it is authoritative, the legacy IP is dropped
+		sl := endpointSlice("default", "c", "c-1", "10.0.0.60")
+		c.watchedEndpointSlices.Store("default/c-1", sl)
+		c.reloadEndpointSlice(sl)
+		assert.Equal(t, "10.0.0.60:8080", c.routeTable.Lookup(host+":80"))
+
+		// an empty slice still suppresses the fallback (slices authoritative)
+		empty := endpointSlice("default", "c", "c-1")
+		c.watchedEndpointSlices.Store("default/c-1", empty)
+		c.reloadEndpointSlice(empty)
+		assert.Empty(t, c.routeTable.Lookup(host+":80"))
+
+		// slice removed -> fallback to legacy Endpoints restored
+		c.watchedEndpointSlices.Delete("default/c-1")
+		c.reloadEndpointSlice(empty)
+		assert.Equal(t, "10.0.0.50:8080", c.routeTable.Lookup(host+":80"))
+	})
+
+	t.Run("full rebuild: slice wins over endpoints for the same service", func(t *testing.T) {
+		c := newCtrl()
+		c.watchedEndpoints.Store("default/c", legacyEndpoints("default", "c", "10.0.0.50"))
+
+		// endpoints-only -> rebuild routes from them
+		c.reloadEndpointDebounced()
+		assert.Equal(t, "10.0.0.50:8080", c.routeTable.Lookup(host+":80"))
+
+		// add a slice -> rebuild prefers it
+		c.watchedEndpointSlices.Store("default/c-1", endpointSlice("default", "c", "c-1", "10.0.0.60"))
+		c.reloadEndpointDebounced()
+		assert.Equal(t, "10.0.0.60:8080", c.routeTable.Lookup(host+":80"))
+	})
+
+	t.Run("resolveTargetPort falls back to Endpoints named port", func(t *testing.T) {
+		c := newCtrl()
+		svc := namedPortService("default", "c", "http", 80)
+
+		// no slice, no endpoints -> unresolved
+		_, ok := c.resolveTargetPort(svc, svc.Spec.Ports[0])
+		assert.False(t, ok)
+
+		// legacy Endpoints carry the named port -> resolved from them
+		ep := legacyEndpoints("default", "c", "10.0.0.50")
+		ep.Subsets[0].Ports = []v1.EndpointPort{{Name: "http", Port: 8080}}
+		c.watchedEndpoints.Store("default/c", ep)
+		got, ok := c.resolveTargetPort(svc, svc.Spec.Ports[0])
+		assert.True(t, ok)
+		assert.Equal(t, "8080", got)
+
+		// once a slice exists with the port, it is authoritative
+		c.watchedEndpointSlices.Store("default/c-1", endpointSliceNamedPort("default", "c", "c-1", "10.0.0.60", "http", 9090))
+		got, ok = c.resolveTargetPort(svc, svc.Spec.Ports[0])
+		assert.True(t, ok)
+		assert.Equal(t, "9090", got)
+	})
 }

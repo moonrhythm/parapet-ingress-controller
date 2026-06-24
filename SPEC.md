@@ -22,7 +22,9 @@ Routes are keyed `host + path`. PathType semantics:
 
 Backends resolve to a Service `host:port`, then to pod IPs via EndpointSlices
 (`discovery.k8s.io/v1`; a Service's slices are unioned into one address set,
-ready addresses only). Endpoint selection is **round-robin**; an address that
+ready addresses only). EndpointSlices are authoritative; a Service with **no**
+slice falls back to its legacy `Endpoints` object (the no-mirror / `skip-mirror`
+case). Endpoint selection is **round-robin**; an address that
 fails to dial is marked **bad for 2s** and skipped (reactive health — no active
 probing). Host is lowercased and port-stripped before matching.
 

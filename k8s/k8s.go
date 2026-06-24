@@ -60,6 +60,8 @@ var client interface {
 	UpdateSecret(ctx context.Context, namespace string, secret *v1.Secret) (*v1.Secret, error)
 	GetEndpointSlices(ctx context.Context, namespace string) ([]discovery.EndpointSlice, error)
 	WatchEndpointSlices(ctx context.Context, namespace string) (watch.Interface, error)
+	GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error)
+	WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error)
 	GetConfigMaps(ctx context.Context, namespace, labelSelector string) ([]v1.ConfigMap, error)
 	WatchConfigMaps(ctx context.Context, namespace, labelSelector string) (watch.Interface, error)
 }
@@ -114,6 +116,17 @@ func GetEndpointSlices(ctx context.Context, namespace string) ([]discovery.Endpo
 // WatchEndpointSlices watches endpoint slices
 func WatchEndpointSlices(ctx context.Context, namespace string) (watch.Interface, error) {
 	return client.WatchEndpointSlices(ctx, namespace)
+}
+
+// GetEndpoints lists all (legacy) endpoints. Only consulted as a fallback for a
+// Service that has no EndpointSlice; see Controller.aggregateServiceIPs.
+func GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error) {
+	return client.GetEndpoints(ctx, namespace)
+}
+
+// WatchEndpoints watches (legacy) endpoints — the no-EndpointSlice fallback.
+func WatchEndpoints(ctx context.Context, namespace string) (watch.Interface, error) {
+	return client.WatchEndpoints(ctx, namespace)
 }
 
 // GetConfigMaps lists config maps for given namespace, filtered by labelSelector

@@ -147,11 +147,22 @@ type Controller struct {
 	globalCorazaFingerprint string
 	corazaZoneFingerprints  map[string]string
 
+	// endpointReloadMu serializes host-route recomputes. Two watch goroutines now
+	// feed pod IPs — the EndpointSlice watch and the legacy-Endpoints fallback
+	// watch — and both compute a Service's host route by reading the slice +
+	// endpoints stores and then SetHostRoute. Without serialization, one
+	// goroutine could read a now-stale "slice present" state and write its result
+	// after the other goroutine wrote the fresh "slice gone → fallback" result,
+	// clobbering it. Holding this across read+write makes the last writer also the
+	// latest reader, so the route always reflects the current store state.
+	endpointReloadMu sync.Mutex
+
 	// holds current k8s state
 	watchedIngresses        sync.Map
 	watchedServices         sync.Map
 	watchedSecrets          sync.Map
 	watchedEndpointSlices   sync.Map
+	watchedEndpoints        sync.Map // legacy fallback: only used for services with no EndpointSlice
 	watchedConfigMaps       sync.Map
 	watchedRLConfigMaps     sync.Map
 	watchedCorazaConfigMaps sync.Map
@@ -215,6 +226,7 @@ func (ctrl *Controller) Watch() {
 	go ctrl.watchServices(ctx)
 	go ctrl.watchSecrets(ctx)
 	go ctrl.watchEndpointSlices(ctx)
+	go ctrl.watchEndpoints(ctx)
 	if ctrl.WAFConfig.Enabled {
 		go ctrl.watchConfigMaps(ctx)
 	}
@@ -270,6 +282,16 @@ func (ctrl *Controller) preloadResources(ctx context.Context) {
 		}
 		for i := range slices {
 			ctrl.watchedEndpointSlices.Store(slices[i].Namespace+"/"+slices[i].Name, &slices[i])
+		}
+		return nil
+	})
+	preloadList(ctx, "endpoints", func() error {
+		endpoints, err := k8s.GetEndpoints(ctx, ctrl.watchNamespace)
+		if err != nil {
+			return err
+		}
+		for i := range endpoints {
+			ctrl.watchedEndpoints.Store(endpoints[i].Namespace+"/"+endpoints[i].Name, &endpoints[i])
 		}
 		return nil
 	})
@@ -535,6 +557,29 @@ func (ctrl *Controller) watchEndpointSlices(ctx context.Context) {
 	)
 }
 
+func (ctrl *Controller) watchEndpoints(ctx context.Context) {
+	// Legacy Endpoints watch — the fallback for a Service that has NO
+	// EndpointSlice (e.g. hand-managed Endpoints labeled
+	// endpointslice.kubernetes.io/skip-mirror=true, or a cluster without the
+	// EndpointSlice mirroring controller). aggregateServiceIPs / resolveTargetPort
+	// only consult this store when the Service has zero slices, so on any normal
+	// Service these events recompute a host route that immediately re-prefers the
+	// slices and changes nothing. Keyed by Service name (an Endpoints object is
+	// named after its Service), matching buildHost.
+	watchResource(ctx, ctrl.watchNamespace, "endpoints", k8s.WatchEndpoints, k8s.GetEndpoints,
+		&ctrl.watchedEndpoints,
+		func(ep *v1.Endpoints) {
+			ctrl.reloadEndpointsObject(ep)
+			ctrl.reloadService() // converge a named targetPort resolvable only from Endpoints
+		},
+		// delete: the store has already dropped this object, so re-aggregating the
+		// Service drops the host when it has neither a slice nor an Endpoints object.
+		ctrl.reloadEndpointsObject,
+		// resync: rebuild the full host-route table from the reconciled stores.
+		ctrl.reloadEndpointDebounced,
+	)
+}
+
 func (ctrl *Controller) reloadIngress() {
 	ctrl.reloadIngressDebounce.Call()
 }
@@ -750,8 +795,10 @@ func (ctrl *Controller) reloadServiceDebounced() {
 // targetPort (intstr.String) carries no number in the Service object, so it is
 // resolved from the service's EndpointSlices — matching the EndpointPort whose
 // Name equals this ServicePort's Name (Kubernetes keys EndpointPort.Name to
-// ServicePort.Name). Returns ok=false when a named port can't be resolved yet,
-// so the caller skips it instead of producing a dead ":0" route.
+// ServicePort.Name). A Service with no EndpointSlice falls back to its legacy
+// Endpoints object (the same authoritative-slice rule as aggregateServiceIPs).
+// Returns ok=false when a named port can't be resolved yet, so the caller skips
+// it instead of producing a dead ":0" route.
 func (ctrl *Controller) resolveTargetPort(s *v1.Service, p v1.ServicePort) (string, bool) {
 	if p.TargetPort.Type == intstr.Int {
 		if p.TargetPort.IntVal > 0 {
@@ -766,12 +813,13 @@ func (ctrl *Controller) resolveTargetPort(s *v1.Service, p v1.ServicePort) (stri
 	// matching named port. All slices of a service share the same port set, so
 	// the first match wins.
 	var resolved string
-	var found bool
+	var found, sliceExists bool
 	ctrl.watchedEndpointSlices.Range(func(_, value any) bool {
 		es := value.(*discovery.EndpointSlice)
 		if es.Namespace != s.Namespace || sliceServiceName(es) != s.Name {
 			return true
 		}
+		sliceExists = true
 		for _, epp := range es.Ports {
 			if epp.Name != nil && *epp.Name == p.Name && epp.Port != nil && *epp.Port > 0 {
 				resolved = strconv.Itoa(int(*epp.Port))
@@ -781,7 +829,26 @@ func (ctrl *Controller) resolveTargetPort(s *v1.Service, p v1.ServicePort) (stri
 		}
 		return true
 	})
-	return resolved, found
+	if found {
+		return resolved, true
+	}
+	if sliceExists {
+		// Slices are authoritative; do not fall back when they exist but lack the port.
+		return "", false
+	}
+
+	// No EndpointSlice for this Service — fall back to the legacy Endpoints object.
+	if v, ok := ctrl.watchedEndpoints.Load(s.Namespace + "/" + s.Name); ok {
+		ep := v.(*v1.Endpoints)
+		for _, ss := range ep.Subsets {
+			for _, epp := range ss.Ports {
+				if epp.Name == p.Name && epp.Port > 0 {
+					return strconv.Itoa(int(epp.Port)), true
+				}
+			}
+		}
+	}
+	return "", false
 }
 
 func (ctrl *Controller) reloadSecret() {
@@ -852,13 +919,16 @@ func (ctrl *Controller) reloadSecretDebounced() {
 }
 
 // reloadEndpointDebounced rebuilds the entire host -> pod-IP table from the
-// whole watched-endpointslices store. It is the initial-sync / resync path
-// (called from firstReload); steady-state endpoint events are applied
-// incrementally per host by reloadEndpointSlice and never come here.
+// whole watched-endpointslices store (with a legacy-Endpoints fallback). It is
+// the initial-sync / resync path (called from firstReload); steady-state endpoint
+// events are applied incrementally per host by reloadEndpointSlice /
+// reloadEndpointsObject and never come here.
 //
 // A Service may own several EndpointSlices, so this groups slices by their
 // owning Service (the kubernetes.io/service-name label) in a single pass and
-// unions the ready addresses of all of a Service's slices into one RRLB.
+// unions the ready addresses of all of a Service's slices into one RRLB. A
+// Service that has NO slice falls back to its legacy Endpoints object — slices
+// are authoritative, so a host already produced from slices is never overwritten.
 func (ctrl *Controller) reloadEndpointDebounced() {
 	defer func() {
 		if err := recover(); err != nil {
@@ -866,7 +936,13 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		}
 	}()
 
+	// Serialize with the incremental per-host updates (both watch goroutines):
+	// this full replace and a single-host SetHostRoute must not interleave.
+	ctrl.endpointReloadMu.Lock()
+	defer ctrl.endpointReloadMu.Unlock()
+
 	routes := make(map[string]*route.RRLB, endpointSizeHint)
+	sliceHosts := make(map[string]struct{}, endpointSizeHint)
 	ctrl.watchedEndpointSlices.Range(func(_, value any) bool {
 		es := value.(*discovery.EndpointSlice)
 		svc := sliceServiceName(es)
@@ -874,6 +950,7 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 			return true
 		}
 		host := buildHost(es.Namespace, svc)
+		sliceHosts[host] = struct{}{} // slice-managed (even if it yields no ready IP)
 		lb := routes[host]
 		if lb == nil {
 			lb = &route.RRLB{}
@@ -883,8 +960,26 @@ func (ctrl *Controller) reloadEndpointDebounced() {
 		return true
 	})
 
-	// Drop services whose slices yielded no ready address — an empty RRLB would
-	// 503 anyway, and leaving it out keeps Lookup's host-present check meaningful.
+	// Fallback: services with no EndpointSlice are routed from their legacy
+	// Endpoints object. A host present in sliceHosts is skipped — slices win even
+	// when they currently resolve to zero ready addresses.
+	ctrl.watchedEndpoints.Range(func(_, value any) bool {
+		ep := value.(*v1.Endpoints)
+		host := buildHost(ep.Namespace, ep.Name)
+		if _, ok := sliceHosts[host]; ok {
+			return true
+		}
+		lb := routes[host]
+		if lb == nil {
+			lb = &route.RRLB{}
+			routes[host] = lb
+		}
+		appendEndpointsReadyIPs(lb, ep)
+		return true
+	})
+
+	// Drop services that yielded no ready address — an empty RRLB would 503
+	// anyway, and leaving it out keeps Lookup's host-present check meaningful.
 	for host, lb := range routes {
 		if len(lb.IPs) == 0 {
 			delete(routes, host)
@@ -909,22 +1004,50 @@ func (ctrl *Controller) reloadEndpointSlice(es *discovery.EndpointSlice) {
 	}
 	slog.Debug("reload endpointslice", "namespace", es.Namespace, "service", svc, "name", es.Name)
 
+	ctrl.endpointReloadMu.Lock()
+	defer ctrl.endpointReloadMu.Unlock()
 	ctrl.routeTable.SetHostRoute(buildHost(es.Namespace, svc), ctrl.aggregateServiceIPs(es.Namespace, svc))
 }
 
+// reloadEndpointsObject recomputes the host route for the Service named by a
+// legacy Endpoints object (its name is the Service name). It re-runs the same
+// slice-first aggregation, so the legacy addresses take effect only while the
+// Service has no EndpointSlice; the moment slices appear they win. Serves both
+// upsert and delete (delete leaves an empty aggregate that drops the host).
+func (ctrl *Controller) reloadEndpointsObject(ep *v1.Endpoints) {
+	slog.Debug("reload endpoints", "namespace", ep.Namespace, "name", ep.Name)
+
+	ctrl.endpointReloadMu.Lock()
+	defer ctrl.endpointReloadMu.Unlock()
+	ctrl.routeTable.SetHostRoute(buildHost(ep.Namespace, ep.Name), ctrl.aggregateServiceIPs(ep.Namespace, ep.Name))
+}
+
 // aggregateServiceIPs unions the ready addresses of every watched EndpointSlice
-// owned by namespace/serviceName into one RRLB, or returns nil when none have a
-// ready address (so SetHostRoute deletes the host).
+// owned by namespace/serviceName into one RRLB. EndpointSlices are authoritative:
+// if the Service owns at least one slice (even an empty one), its slices alone
+// decide the route. Only when the Service has NO slice does it fall back to the
+// legacy Endpoints object (keyed by Service name). Returns nil when neither
+// source yields a ready address (so SetHostRoute deletes the host).
 func (ctrl *Controller) aggregateServiceIPs(namespace, serviceName string) *route.RRLB {
 	var b route.RRLB
+	var sliceExists bool
 	ctrl.watchedEndpointSlices.Range(func(_, value any) bool {
 		es := value.(*discovery.EndpointSlice)
 		if es.Namespace != namespace || sliceServiceName(es) != serviceName {
 			return true
 		}
+		sliceExists = true
 		appendReadyIPs(&b, es)
 		return true
 	})
+
+	if !sliceExists {
+		// No EndpointSlice for this Service — fall back to its legacy Endpoints.
+		if v, ok := ctrl.watchedEndpoints.Load(namespace + "/" + serviceName); ok {
+			appendEndpointsReadyIPs(&b, v.(*v1.Endpoints))
+		}
+	}
+
 	if len(b.IPs) == 0 {
 		return nil
 	}
@@ -1092,5 +1215,16 @@ func appendReadyIPs(lb *route.RRLB, es *discovery.EndpointSlice) {
 			continue
 		}
 		lb.IPs = append(lb.IPs, e.Addresses...)
+	}
+}
+
+// appendEndpointsReadyIPs appends the ready addresses of a legacy Endpoints
+// object to lb. Subsets[].Addresses holds the ready set (NotReadyAddresses is
+// excluded), mirroring appendReadyIPs for the no-EndpointSlice fallback.
+func appendEndpointsReadyIPs(lb *route.RRLB, ep *v1.Endpoints) {
+	for _, ss := range ep.Subsets {
+		for _, addr := range ss.Addresses {
+			lb.IPs = append(lb.IPs, addr.IP)
+		}
 	}
 }
