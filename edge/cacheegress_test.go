@@ -111,6 +111,19 @@ func TestCacheEgressNoHeaderRecordsNothing(t *testing.T) {
 	}
 }
 
+func TestCacheEgressBypassRecordsNothing(t *testing.T) {
+	// CacheStatus stamps X-Cache: BYPASS on uncacheable responses; those bytes
+	// reached the origin and are not cache egress, so CacheEgress must skip them.
+	CacheEgress(knownCacheHost) //nolint:errcheck
+
+	countBefore := testutil.CollectAndCount(cacheEgressVec)
+	serveCacheEgress(t, "known.example.com", "BYPASS", []byte("bypass body"))
+	countAfter := testutil.CollectAndCount(cacheEgressVec)
+	if countAfter > countBefore {
+		t.Errorf("BYPASS: series count went from %d to %d, want no new series", countBefore, countAfter)
+	}
+}
+
 func TestCacheEgressBytesAccumulate(t *testing.T) {
 	mw := CacheEgress(knownCacheHost)
 	_ = mw
@@ -134,7 +147,7 @@ func TestCacheResultLabel(t *testing.T) {
 		{"HIT", "HIT"},
 		{"STALE", "STALE"},
 		{"MISS", "MISS"},
-		{"BYPASS", "other"},
+		{"BYPASS", ""}, // stamped by CacheStatus; bytes reach origin, not cache egress
 		{"STALE_ERROR", "other"},
 		{"revalidated", "other"},
 	}

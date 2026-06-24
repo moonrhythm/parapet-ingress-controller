@@ -690,12 +690,19 @@ cacheable object locally removes a full origin round trip. Enabled with
   fetch (no stampede): the first request fills while streaming to its own client
   and to disk; others wait (≤ a 2s timeout) then read the just-filled entry, or
   fall through to their own fetch if it turned out uncacheable.
-- **Observability.** Sets `X-Cache: HIT|MISS|STALE` (HIT = served from the edge
-  cache, MISS = fetched from parapet, STALE = served stale under RFC 5861).
+- **Observability.** Sets `X-Cache: HIT|MISS|STALE|BYPASS` (HIT = served from the
+  edge cache, MISS = fetched from parapet, STALE = served stale under RFC 5861,
+  BYPASS = the request was ineligible for caching — a non-cacheable method, a
+  protocol upgrade, a Range request, or a cache-override bypass rule — and was
+  proxied straight to the origin). parapet's cache emits HIT/MISS/STALE itself;
+  the edge's `CacheStatus` middleware (mounted just outside the cache) stamps
+  `X-Cache: BYPASS` on the ineligible responses the cache leaves untagged, so
+  every response under the cache carries an explicit status. A managed response,
+  or an `X-Cache` an origin set itself, is never overwritten; hijacked upgrades
+  (a 101) stay untagged.
   Cache outcomes are counted on the `:9187` metrics
   endpoint (`EDGE_METRICS_LISTEN`, set `""` to disable) as
-  `parapet_cache_total{result}` (`HIT|MISS|STALE|STALE_ERROR|BYPASS` — BYPASS is
-  the ineligible-request path that sends no `X-Cache` header) plus
+  `parapet_cache_total{result}` (`HIT|MISS|STALE|STALE_ERROR|BYPASS`) plus
   `parapet_cache_fill_duration_seconds` (origin-fill latency, observed only when
   parapet was contacted on the serving path). Deliberately **no `host` label** —
   the edge serves any Host the client sends, so a host label would be unbounded
@@ -709,9 +716,10 @@ cacheable object locally removes a full origin round trip. Enabled with
   bytes are invisible to `parapet_backend_network_read_bytes` (which only counts
   origin reads) and to pod-egress kernel counters (which only see traffic that
   reaches the pod). The `result` label carries `HIT`, `STALE`, or `MISS` for
-  the three cache outcomes that emit an `X-Cache` header; any unexpected value
-  is collapsed to `other` (defense in depth). Responses with no `X-Cache`
-  header (bypass, WebSocket upgrades, etc.) produce no series. The `host` label
+  the three cache outcomes that serve cached/filled bytes; any unexpected value
+  is collapsed to `other` (defense in depth). `BYPASS` responses (and those with
+  no `X-Cache` header, e.g. WebSocket upgrades) produce no series — their bytes
+  reach the origin and are already counted by origin-side counters. The `host` label
   is bounded by the same known-host oracle as `parapet_requests`: unknown hosts
   collapse to `"other"` so a Host-flood cannot grow series cardinality. This
   metric is only registered when the response cache is enabled
