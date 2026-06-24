@@ -16,9 +16,12 @@ import (
 	"github.com/moonrhythm/parapet"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/pointer"
+
+	"github.com/moonrhythm/parapet-ingress-controller/route"
 
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
@@ -387,53 +390,63 @@ func TestGetBackendConfig(t *testing.T) {
 	})
 }
 
-func TestEndpointToRRLB(t *testing.T) {
+func TestAppendReadyIPs(t *testing.T) {
 	t.Parallel()
 
+	endpoint := func(ready *bool, ips ...string) discovery.Endpoint {
+		return discovery.Endpoint{Addresses: ips, Conditions: discovery.EndpointConditions{Ready: ready}}
+	}
+
 	t.Run("Empty", func(t *testing.T) {
-		ep := v1.Endpoints{}
-		lb := endpointToRRLB(&ep)
-		assert.Nil(t, lb)
+		var lb route.RRLB
+		appendReadyIPs(&lb, &discovery.EndpointSlice{AddressType: discovery.AddressTypeIPv4})
+		assert.Empty(t, lb.IPs)
 	})
 
-	t.Run("Single Subset", func(t *testing.T) {
-		ep := v1.Endpoints{
-			Subsets: []v1.EndpointSubset{
-				{
-					Addresses: []v1.EndpointAddress{
-						{IP: "192.168.0.1"},
-						{IP: "192.168.0.2"},
-						{IP: "192.168.0.3"},
-					},
-				},
+	t.Run("Ready and nil-ready addresses included", func(t *testing.T) {
+		var lb route.RRLB
+		appendReadyIPs(&lb, &discovery.EndpointSlice{
+			AddressType: discovery.AddressTypeIPv4,
+			Endpoints: []discovery.Endpoint{
+				endpoint(pointer.Bool(true), "192.168.0.1", "192.168.0.2"),
+				endpoint(nil, "192.168.0.3"), // nil Ready -> treated as ready
 			},
-		}
-		lb := endpointToRRLB(&ep)
-		if assert.NotNil(t, lb) {
-			assert.EqualValues(t, []string{"192.168.0.1", "192.168.0.2", "192.168.0.3"}, lb.IPs)
-		}
+		})
+		assert.EqualValues(t, []string{"192.168.0.1", "192.168.0.2", "192.168.0.3"}, lb.IPs)
 	})
 
-	t.Run("Multiple Subsets", func(t *testing.T) {
-		ep := v1.Endpoints{
-			Subsets: []v1.EndpointSubset{
-				{
-					Addresses: []v1.EndpointAddress{
-						{IP: "192.168.0.1"},
-						{IP: "192.168.0.2"},
-					},
-				},
-				{
-					Addresses: []v1.EndpointAddress{
-						{IP: "192.168.0.3"},
-					},
-				},
+	t.Run("Not-ready addresses excluded", func(t *testing.T) {
+		var lb route.RRLB
+		appendReadyIPs(&lb, &discovery.EndpointSlice{
+			AddressType: discovery.AddressTypeIPv4,
+			Endpoints: []discovery.Endpoint{
+				endpoint(pointer.Bool(true), "192.168.0.1"),
+				endpoint(pointer.Bool(false), "192.168.0.2"), // not ready -> skipped
 			},
-		}
-		lb := endpointToRRLB(&ep)
-		if assert.NotNil(t, lb) {
-			assert.EqualValues(t, []string{"192.168.0.1", "192.168.0.2", "192.168.0.3"}, lb.IPs)
-		}
+		})
+		assert.EqualValues(t, []string{"192.168.0.1"}, lb.IPs)
+	})
+
+	t.Run("FQDN slice skipped", func(t *testing.T) {
+		var lb route.RRLB
+		appendReadyIPs(&lb, &discovery.EndpointSlice{
+			AddressType: discovery.AddressTypeFQDN,
+			Endpoints:   []discovery.Endpoint{endpoint(pointer.Bool(true), "example.com")},
+		})
+		assert.Empty(t, lb.IPs)
+	})
+
+	t.Run("Multiple slices union into one RRLB", func(t *testing.T) {
+		var lb route.RRLB
+		appendReadyIPs(&lb, &discovery.EndpointSlice{
+			AddressType: discovery.AddressTypeIPv4,
+			Endpoints:   []discovery.Endpoint{endpoint(pointer.Bool(true), "192.168.0.1", "192.168.0.2")},
+		})
+		appendReadyIPs(&lb, &discovery.EndpointSlice{
+			AddressType: discovery.AddressTypeIPv4,
+			Endpoints:   []discovery.Endpoint{endpoint(pointer.Bool(true), "192.168.0.3")},
+		})
+		assert.EqualValues(t, []string{"192.168.0.1", "192.168.0.2", "192.168.0.3"}, lb.IPs)
 	})
 }
 

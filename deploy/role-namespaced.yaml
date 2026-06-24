@@ -18,13 +18,14 @@ rules:
   resources:
   - services
   - secrets
-  - endpoints
   - configmaps
+  # endpoints: legacy fallback for services that have no EndpointSlice
+  - endpoints
   verbs:
   - list
   - watch
 - apiGroups:
-  - discovery.k8s.io/v1
+  - discovery.k8s.io
   resources:
   - endpointslices
   verbs:

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	v1 "k8s.io/api/core/v1"
+	discovery "k8s.io/api/discovery/v1"
 	networking "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
@@ -56,6 +57,18 @@ func (c *clusterClient) GetSecret(ctx context.Context, namespace, name string) (
 
 func (c *clusterClient) UpdateSecret(ctx context.Context, namespace string, secret *v1.Secret) (*v1.Secret, error) {
 	return c.client.CoreV1().Secrets(namespace).Update(ctx, secret, metav1.UpdateOptions{})
+}
+
+func (c *clusterClient) GetEndpointSlices(ctx context.Context, namespace string) ([]discovery.EndpointSlice, error) {
+	list, err := c.client.DiscoveryV1().EndpointSlices(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return list.Items, nil
+}
+
+func (c *clusterClient) WatchEndpointSlices(ctx context.Context, namespace string) (watch.Interface, error) {
+	return c.client.DiscoveryV1().EndpointSlices(namespace).Watch(ctx, metav1.ListOptions{})
 }
 
 func (c *clusterClient) GetEndpoints(ctx context.Context, namespace string) ([]v1.Endpoints, error) {
