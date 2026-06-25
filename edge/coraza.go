@@ -53,15 +53,17 @@ func NewEdgeCoraza(rootFS fs.FS, requestBodyLimit int) *EdgeCoraza {
 		return ""
 	}
 	newInstance := func(scope string) *corazawaf.Instance {
+		// Per-rule match counter (parapet_coraza_matches), same metric as the
+		// controller — recorded through observe (not metric) so the controller's
+		// init-materialized core-trust series stay off the edge's /metrics.
+		corazaMatch := observe.CorazaMatch(scope)
 		return corazawaf.New(corazawaf.Options{
 			RootFS:           rootFS,
 			RequestBodyLimit: requestBodyLimit,
 			ClientIP:         clientIP,
 			Observe:          observe.CorazaEval(scope),
-			// Edge logs matches at debug only; it deliberately stays off the metric
-			// package (observe keeps the edge's /metrics free of the controller's
-			// core-trust series). Per-rule match counters are the core's job.
 			OnMatch: func(ev corazawaf.MatchEvent) {
+				corazaMatch(ev.RuleID, ev.Severity)
 				slog.Debug("edge coraza match", "scope", scope, "rule", ev.RuleID,
 					"disruptive", ev.Disruptive, "uri", ev.URI, "message", ev.Message)
 			},

@@ -1,6 +1,8 @@
 package observe
 
 import (
+	"sync"
+
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/moonrhythm/parapet/pkg/waf"
 	"github.com/prometheus/client_golang/prometheus"
@@ -8,6 +10,17 @@ import (
 
 var _wafEval struct {
 	vec *prometheus.HistogramVec
+}
+
+// _wafMatch is registered LAZILY (first WAFMatch call), NOT in init(): the
+// controller imports this package for WAFEval but records matches through
+// metric.WAFMatch, whose init already registers parapet_waf_matches on the shared
+// registry — eager registration here would duplicate-register and panic at
+// startup. Only a binary that actually wires the OnMatch hook (the edge) mints
+// the series.
+var _wafMatch struct {
+	once sync.Once
+	vec  *prometheus.CounterVec
 }
 
 // wafEvalBuckets match parapet's prom.WAF tuning: dense below 1ms where the bulk
@@ -54,5 +67,33 @@ func WAFEval(scope string) waf.ObserveFunc {
 		if int(ev.Outcome) < len(handles) {
 			handles[ev.Outcome].Observe(ev.Duration.Seconds())
 		}
+	}
+}
+
+// WAFMatch returns a hook for waf.WAF.OnMatch counting every rule that fires as
+// parapet_waf_matches{rule_id,action,scope} — the SAME metric the controller's
+// metric.WAFMatch records, so an edge's matches aggregate with the core's on one
+// dashboard. scope is "global"/"zone"; all three labels are bounded (rule_id and
+// action come from the operator's ruleset, scope is caller-fixed — never request
+// input). See _wafMatch for why registration is lazy.
+//
+// Handles can't be pre-resolved the way WAFEval does — rule IDs aren't known
+// until a rule fires — so each event resolves through CounterVec.With (internally
+// locked+cached). Matches are rare relative to evals, so this lookup is off the
+// hot path. Call only when the WAF is actually enabled.
+func WAFMatch(scope string) func(waf.MatchEvent) {
+	_wafMatch.once.Do(func() {
+		_wafMatch.vec = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: prom.Namespace,
+			Name:      "waf_matches",
+		}, []string{"rule_id", "action", "scope"})
+		prom.Registry().MustRegister(_wafMatch.vec)
+	})
+	return func(ev waf.MatchEvent) {
+		_wafMatch.vec.With(prometheus.Labels{
+			"rule_id": ev.RuleID,
+			"action":  ev.Action.String(),
+			"scope":   scope,
+		}).Inc()
 	}
 }

@@ -63,6 +63,10 @@ func NewEdgeWAF(country func(*http.Request) string, asn func(*http.Request) int6
 		// observe (not metric) keeps the controller's init-materialized
 		// core-trust series off the edge's /metrics.
 		w.Observe = observe.WAFEval(scope)
+		// Per-rule match counter (parapet_waf_matches), same metric as the
+		// controller — so an edge's matches aggregate with the core's. Fires only
+		// on a match, which the eval-outcome histogram can't attribute to a rule.
+		w.OnMatch = observe.WAFMatch(scope)
 		return w
 	}
 	w := &EdgeWAF{newZone: func() *waf.WAF { return newWAF("zone") }}
