@@ -432,9 +432,11 @@ Both layers record per-request rule-eval latency on `:9187` as
 `parapet_waf_eval_duration_seconds{outcome,scope}` (`outcome` =
 `pass|allow|block|error`, `scope` = `global|zone`), same metric as the
 controller; an empty ruleset (before the first snapshot lands) takes the
-no-rules fast path and records nothing. Edge rule *matches* are debug-logged
-but not yet a counter (the controller's `parapet_waf_matches` is
-controller-only).
+no-rules fast path and records nothing. Edge rule *matches* are also counted as
+`parapet_waf_matches{rule_id,action,scope}` — the same metric the controller
+records, so an edge's matches aggregate with the core's on one dashboard. Both
+series come from `metric/observe` (not the `metric` package), so the controller's
+init-materialized core-trust series never appear on the edge's `:9187`.
 
 ### parapet stays authoritative (the backstop)
 
@@ -641,10 +643,10 @@ What to know before enabling:
   `WAF_VALIDATED_PROXY`, the edge Coraza stamps **no claim** and the **core always
   re-runs its own Coraza** — parapet stays authoritative. The edge is purely an
   early-drop layer.
-- **Per-edge match logging** is debug-only; the edge stays off the `metric`
-  package, so there is no `parapet_coraza_matches` on the edge's `:9187` (only the
-  `observe`-based `parapet_coraza_eval_duration_seconds`). Per-rule match counters
-  are the core's job.
+- **Per-edge matches** are counted as `parapet_coraza_matches{rule_id,severity,
+  scope}` (alongside the debug log and `parapet_coraza_eval_duration_seconds`) —
+  the same metric the controller records, via `metric/observe` so the edge's
+  `:9187` stays free of the controller's core-trust series.
 - **Zone resolution is path-aware** (`route_zone_map`), like the edge WAF — the
   controller's own route keys on a real `http.ServeMux`.
 

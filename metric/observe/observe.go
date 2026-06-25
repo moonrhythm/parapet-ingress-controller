@@ -1,7 +1,8 @@
 // Package observe provides bounded, pre-resolved Prometheus observers for
-// parapet's per-request observability hooks (waf.WAF.Observe,
-// ratelimit.RateLimiter.Observe, cache.Options.OnResult), shared by the
-// controller and edge-proxy binaries.
+// parapet's per-request observability hooks (waf.WAF.Observe + OnMatch,
+// ratelimit.RateLimiter.Observe, cache.Options.OnResult, and the corazawaf
+// Observe + OnMatch analogues), shared by the controller and edge-proxy
+// binaries.
 //
 // It is deliberately a LEAF package, separate from metric: importing metric
 // materializes the controller's core-trust alerting series at init
@@ -18,4 +19,12 @@
 // the names collide, never wire parapet's prom.WAF()/prom.RateLimit()/
 // prom.Cache() in a binary that uses this package — the duplicate
 // MustRegister panics at startup.
+//
+// The match counters (WAFMatch -> parapet_waf_matches, CorazaMatch ->
+// parapet_coraza_matches) duplicate names the metric package registers in its
+// own init, so they register LAZILY on first call (see _wafMatch / _corazaMatch):
+// a binary that imports both — the controller — records matches through metric
+// and never calls these, so the lazy registration never fires there; only the
+// edge, which never imports metric, mints them here. Wiring one of these in a
+// binary that also imports metric would duplicate-register and panic.
 package observe
