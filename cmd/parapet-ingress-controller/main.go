@@ -54,6 +54,7 @@ func main() {
 	autoH2CTTL := config.DurationDefault("UPSTREAM_AUTO_H2C_TTL", 10*time.Minute)
 
 	rateLimitEnabled := config.Bool("RATELIMIT_ENABLED")
+	transformEnabled := config.Bool("TRANSFORM_ENABLED")
 
 	// Coraza (OWASP CRS / SecLang) firewall — an independent signature layer
 	// alongside the CEL WAF, same global+zone model. ClientIP/RootFS wired below.
@@ -164,6 +165,7 @@ func main() {
 		"waf_validated_proxy", config.String("WAF_VALIDATED_PROXY"),
 		"ratelimit_enabled", rateLimitEnabled,
 		"coraza_enabled", corazaConfig.Enabled,
+		"transform_enabled", transformEnabled,
 	)
 
 	if enableProfiler {
@@ -302,6 +304,20 @@ func main() {
 	ctrl.InitRateLimit()
 	ctrl.CorazaConfig = corazaConfig
 	ctrl.InitCoraza()
+	ctrl.TransformConfig = controller.TransformConfig{
+		Enabled: transformEnabled,
+		// The WAF's GeoIP resolvers double as the transform filter's
+		// request.country / request.asn resolvers (nil when the DB isn't loaded — a
+		// geo reference then simply never matches, mirroring ratelimit).
+		Country: wafConfig.Country,
+		ASN:     wafConfig.ASN,
+		// Bound a rule's CEL `filter` with the same operator knobs as the WAF: same
+		// engine, same tenant-authored trust surface (WAF_COST_LIMIT /
+		// WAF_DISABLE_MACROS feed all three CEL layers).
+		FilterCostLimit:     wafConfig.CostLimit,
+		FilterDisableMacros: wafConfig.DisableMacros,
+	}
+	ctrl.InitTransform()
 	ctrl.Use(plugin.InjectStateIngress)
 	ctrl.Use(plugin.AllowRemote)
 	if wafConfig.Enabled {
@@ -321,6 +337,19 @@ func main() {
 		ctrl.Use(plugin.RateLimitZone(ctrl.LookupRateLimitZone))
 	}
 	ctrl.Use(plugin.RateLimit)
+	if transformEnabled {
+		// SECURITY-CRITICAL SLOT (SPEC §4.4 / F1): transform mounts AFTER WAF +
+		// ratelimit (so security and throttle always see the ORIGINAL, un-rewritten
+		// request — a rewrite running first could evade a WAF rule or skip a
+		// rate-limit count) but BEFORE UpstreamProtocol/Host/Path, BasicAuth,
+		// ForwardAuth and StripPrefix. ForwardAuth deletes and re-stamps the
+		// X-Auth-* identity headers, so registering transform before it guarantees
+		// ForwardAuth always overwrites any transform-forged identity header — a
+		// set-only tenant must NOT be able to forge X-Auth-Email/X-Auth-User. The
+		// accepted tradeoff: a transform redirect short-circuits before the access
+		// gate, which is harmless for a soft re-route.
+		ctrl.Use(plugin.TransformZone(ctrl.LookupTransformZone))
+	}
 	ctrl.Use(plugin.BodyLimit)
 	ctrl.Use(plugin.UpstreamProtocol)
 	ctrl.Use(plugin.UpstreamHost)
