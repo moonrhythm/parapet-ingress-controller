@@ -31,6 +31,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/ratelimitrule"
 	"github.com/moonrhythm/parapet-ingress-controller/route"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
+	"github.com/moonrhythm/parapet-ingress-controller/transformrule"
 )
 
 // IngressClass to load ingresses
@@ -100,6 +101,12 @@ type Controller struct {
 	// controller_coraza.go.
 	CorazaConfig CorazaConfig
 
+	// TransformConfig configures the ConfigMap-driven transform layer — a
+	// per-(project, location) zone of CEL-scoped request/response mutations. Set
+	// before Watch(); when disabled the feature does no work: no ConfigMap watch,
+	// no mount. See controller_transform.go.
+	TransformConfig TransformConfig
+
 	// globalWAF is the always-on baseline firewall; zones holds the tenant zone
 	// registry keyed by <namespace>/<name>, swapped atomically on WAF reload.
 	// WAF reloads are decoupled from the mux — they never rebuild routes.
@@ -117,6 +124,12 @@ type Controller struct {
 	// atomically on Coraza reload. Decoupled from the mux like the WAF registries.
 	globalCoraza *corazawaf.Instance
 	corazaZones  atomic.Pointer[map[string]*corazawaf.Instance]
+
+	// transformZones holds the per-(project, location) transform zone registry
+	// keyed by <namespace>/<name>, swapped atomically on transform reload. There
+	// is no global baseline (transforms are zone-only). Decoupled from the mux
+	// exactly like the WAF/ratelimit registries.
+	transformZones atomic.Pointer[map[string]*transformrule.Zone]
 
 	// WAF rule-input fingerprints from the last reload, used to skip recompiling
 	// CEL rulesets whose effective input (the sorted concatenated rule YAML) is
@@ -147,6 +160,13 @@ type Controller struct {
 	globalCorazaFingerprint string
 	corazaZoneFingerprints  map[string]string
 
+	// Transform reload state, mirroring the WAF/ratelimit fields above —
+	// transformReloadMu serializes overlapping debounce-fired passes, the
+	// fingerprints skip recompiling unchanged transform input. Accessed only under
+	// transformReloadMu.
+	transformReloadMu         sync.Mutex
+	transformZoneFingerprints map[string]string
+
 	// endpointReloadMu serializes host-route recomputes. Two watch goroutines now
 	// feed pod IPs — the EndpointSlice watch and the legacy-Endpoints fallback
 	// watch — and both compute a Service's host route by reading the slice +
@@ -158,14 +178,15 @@ type Controller struct {
 	endpointReloadMu sync.Mutex
 
 	// holds current k8s state
-	watchedIngresses        sync.Map
-	watchedServices         sync.Map
-	watchedSecrets          sync.Map
-	watchedEndpointSlices   sync.Map
-	watchedEndpoints        sync.Map // legacy fallback: only used for services with no EndpointSlice
-	watchedConfigMaps       sync.Map
-	watchedRLConfigMaps     sync.Map
-	watchedCorazaConfigMaps sync.Map
+	watchedIngresses           sync.Map
+	watchedServices            sync.Map
+	watchedSecrets             sync.Map
+	watchedEndpointSlices      sync.Map
+	watchedEndpoints           sync.Map // legacy fallback: only used for services with no EndpointSlice
+	watchedConfigMaps          sync.Map
+	watchedRLConfigMaps        sync.Map
+	watchedCorazaConfigMaps    sync.Map
+	watchedTransformConfigMaps sync.Map
 
 	certTable  cert.Table
 	routeTable route.Table
@@ -181,6 +202,7 @@ type Controller struct {
 	reloadWAFDebounce       *debounce.Debounce
 	reloadRateLimitDebounce *debounce.Debounce
 	reloadCorazaDebounce    *debounce.Debounce
+	reloadTransformDebounce *debounce.Debounce
 }
 
 // New creates new ingress controller
@@ -198,6 +220,7 @@ func New(watchNamespace string, proxy *proxy.Proxy) *Controller {
 	ctrl.reloadWAFDebounce = debounce.New(ctrl.reloadWAFDebounced, 300*time.Millisecond)
 	ctrl.reloadRateLimitDebounce = debounce.New(ctrl.reloadRateLimitDebounced, 300*time.Millisecond)
 	ctrl.reloadCorazaDebounce = debounce.New(ctrl.reloadCorazaDebounced, 300*time.Millisecond)
+	ctrl.reloadTransformDebounce = debounce.New(ctrl.reloadTransformDebounced, 300*time.Millisecond)
 	ctrl.proxy = proxy
 	ctrl.proxy.OnDialError = ctrl.routeTable.MarkBad
 	return ctrl
@@ -235,6 +258,9 @@ func (ctrl *Controller) Watch() {
 	}
 	if ctrl.CorazaConfig.Enabled {
 		go ctrl.watchCorazaConfigMaps(ctx)
+	}
+	if ctrl.TransformConfig.Enabled {
+		go ctrl.watchTransformConfigMaps(ctx)
 	}
 }
 
@@ -334,6 +360,19 @@ func (ctrl *Controller) preloadResources(ctx context.Context) {
 			return nil
 		})
 	}
+
+	if ctrl.TransformConfig.Enabled {
+		preloadList(ctx, "transform-configmaps", func() error {
+			configmaps, err := k8s.GetConfigMaps(ctx, ctrl.watchNamespace, transformLabelKey)
+			if err != nil {
+				return err
+			}
+			for i := range configmaps {
+				ctrl.watchedTransformConfigMaps.Store(configmaps[i].Namespace+"/"+configmaps[i].Name, &configmaps[i])
+			}
+			return nil
+		})
+	}
 }
 
 // preloadList runs fn, retrying with capped exponential backoff on error until it
@@ -373,6 +412,7 @@ func (ctrl *Controller) firstReload() {
 	ctrl.reloadWAFDebounced()       // no-op when WAF disabled
 	ctrl.reloadRateLimitDebounced() // no-op when rate limiting disabled
 	ctrl.reloadCorazaDebounced()    // no-op when Coraza disabled
+	ctrl.reloadTransformDebounced() // no-op when transform disabled
 
 	// Edge auto-trust: bounded wait for the edge-CA pool before reporting Ready, so the
 	// edge isn't routed here during the cold-start window. Runs AFTER preload (above), so
