@@ -1,6 +1,8 @@
 package controller
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -112,6 +114,105 @@ func TestReloadTransform_RemoveZone(t *testing.T) {
 	ctrl.watchedTransformConfigMaps.Delete("cust1/transform-42")
 	ctrl.reloadTransformDebounced()
 	assert.Nil(t, ctrl.LookupTransformZone("cust1/transform-42"), "deleted zone is gone after reload")
+}
+
+func globalTransformCM(namespace, name, doc string) *v1.ConfigMap {
+	cm := transformCM(namespace, name, doc)
+	cm.Labels[transformLabelKey] = roleGlobal
+	return cm
+}
+
+const transformGlobalRule = `
+transforms:
+- id: robots
+  phase: response
+  ops:
+  - type: set-header
+    name: X-Robots-Tag
+    value: noindex, nofollow
+  priority: 0
+`
+
+func TestReloadTransform_Global(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTransformController()
+	ctrl.watchedTransformConfigMaps.Store("ctrl-ns/transform-global", globalTransformCM("ctrl-ns", "transform-global", transformGlobalRule))
+	ctrl.reloadTransformDebounced()
+
+	// the global set serves through the mounted middleware end-to-end.
+	h := ctrl.GlobalTransform().ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Equal(t, "noindex, nofollow", w.Header().Get("X-Robots-Tag"),
+		"global response op applies to all traffic")
+
+	// deleting the global ConfigMap drops the set back to a pass-through.
+	ctrl.watchedTransformConfigMaps.Delete("ctrl-ns/transform-global")
+	ctrl.reloadTransformDebounced()
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/", nil))
+	assert.Empty(t, w.Header().Get("X-Robots-Tag"), "deleted global set is gone after reload")
+}
+
+func TestReloadTransform_GlobalOutsidePodNamespaceIgnored(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTransformController()
+	ctrl.watchedTransformConfigMaps.Store("cust1/transform-global", globalTransformCM("cust1", "transform-global", transformGlobalRule))
+	ctrl.reloadTransformDebounced()
+
+	assert.Nil(t, ctrl.globalTransform.Load(),
+		"a tenant-namespace global set must not mutate all traffic")
+}
+
+func TestReloadTransform_BadGlobalKeepsLastGood(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newTransformController()
+	ctrl.watchedTransformConfigMaps.Store("ctrl-ns/transform-global", globalTransformCM("ctrl-ns", "transform-global", transformGlobalRule))
+	ctrl.reloadTransformDebounced()
+	require.NotNil(t, ctrl.globalTransform.Load())
+
+	ctrl.watchedTransformConfigMaps.Store("ctrl-ns/transform-global", globalTransformCM("ctrl-ns", "transform-global", `
+transforms:
+- id: broken
+  phase: response
+  filter: "this is not && valid cel ("
+  ops:
+  - type: set-header
+    name: X-Test
+    value: "1"
+  priority: 0
+`))
+	ctrl.reloadTransformDebounced()
+
+	z := ctrl.globalTransform.Load()
+	require.NotNil(t, z)
+	assert.Equal(t, []string{"robots"}, z.IDs(), "bad edit must not drop the live global set")
+
+	// a fixed edit applies (the rejected input didn't advance the fingerprint).
+	ctrl.watchedTransformConfigMaps.Store("ctrl-ns/transform-global", globalTransformCM("ctrl-ns", "transform-global", `
+transforms:
+- id: robots-v2
+  phase: response
+  ops:
+  - type: set-header
+    name: X-Robots-Tag
+    value: none
+  priority: 0
+`))
+	ctrl.reloadTransformDebounced()
+	assert.Equal(t, []string{"robots-v2"}, ctrl.globalTransform.Load().IDs())
+}
+
+func TestGlobalTransform_DisabledReturnsNil(t *testing.T) {
+	t.Parallel()
+
+	ctrl := New("", proxy.New())
+	assert.Nil(t, ctrl.GlobalTransform(), "disabled transform mounts nothing")
 }
 
 func TestReloadTransform_IgnoresMultiLabeledConfigMap(t *testing.T) {
