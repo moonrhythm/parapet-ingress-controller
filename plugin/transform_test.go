@@ -15,6 +15,105 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/transformrule"
 )
 
+func TestTransform_Inline(t *testing.T) {
+	t.Parallel()
+
+	newCtx := func(ann map[string]string) Context {
+		return Context{
+			Middlewares: &parapet.Middlewares{},
+			Ingress: &networking.Ingress{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "cust1", Name: "web", Annotations: ann},
+			},
+		}
+	}
+
+	serve := func(ctx Context, target string) (*httptest.ResponseRecorder, *http.Request) {
+		var upstream *http.Request
+		r := httptest.NewRequest(http.MethodGet, target, nil)
+		w := httptest.NewRecorder()
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			upstream = r
+			w.WriteHeader(http.StatusOK)
+		})).ServeHTTP(w, r)
+		return w, upstream
+	}
+
+	t.Run("mounts the inline set", func(t *testing.T) {
+		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/transform": `
+transforms:
+- id: robots
+  phase: response
+  ops:
+  - type: set-header
+    name: X-Robots-Tag
+    value: noindex
+- id: upstream-marker
+  phase: request
+  ops:
+  - type: set-header
+    name: X-Inline
+    value: "1"
+`})
+		Transform(transformrule.Options{})(ctx)
+
+		w, upstream := serve(ctx, "/")
+		assert.Equal(t, "noindex", w.Header().Get("X-Robots-Tag"), "response op applies")
+		require.NotNil(t, upstream)
+		assert.Equal(t, "1", upstream.Header.Get("X-Inline"), "request op applies")
+	})
+
+	t.Run("filter scopes the rule", func(t *testing.T) {
+		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/transform": `
+transforms:
+- id: robots
+  phase: response
+  filter: request.path.startsWith("/private")
+  ops:
+  - type: set-header
+    name: X-Robots-Tag
+    value: noindex
+`})
+		Transform(transformrule.Options{})(ctx)
+
+		w, _ := serve(ctx, "/private/x")
+		assert.Equal(t, "noindex", w.Header().Get("X-Robots-Tag"))
+
+		w, _ = serve(ctx, "/public")
+		assert.Empty(t, w.Header().Get("X-Robots-Tag"))
+	})
+
+	t.Run("invalid set is a safe no-op", func(t *testing.T) {
+		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/transform": `
+transforms:
+- id: broken
+  phase: request
+  filter: "this is not && valid cel ("
+  ops:
+  - type: set-header
+    name: X-Test
+    value: "1"
+`})
+		Transform(transformrule.Options{})(ctx)
+
+		w, upstream := serve(ctx, "/")
+		assert.Equal(t, http.StatusOK, w.Code, "bad inline set passes traffic through unmodified")
+		require.NotNil(t, upstream)
+		assert.Empty(t, upstream.Header.Get("X-Test"))
+	})
+
+	t.Run("no annotation injects no middleware", func(t *testing.T) {
+		ctx := newCtx(nil)
+		Transform(transformrule.Options{})(ctx)
+		assert.Empty(t, *ctx.Middlewares, "no annotation => no mount")
+	})
+
+	t.Run("empty ruleset injects no middleware", func(t *testing.T) {
+		ctx := newCtx(map[string]string{"parapet.moonrhythm.io/transform": "transforms: []\n"})
+		Transform(transformrule.Options{})(ctx)
+		assert.Empty(t, *ctx.Middlewares, "ruleless set => no mount")
+	})
+}
+
 func TestTransformZone(t *testing.T) {
 	t.Parallel()
 

@@ -1,12 +1,47 @@
 package plugin
 
 import (
+	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/moonrhythm/parapet"
 
 	"github.com/moonrhythm/parapet-ingress-controller/transformrule"
 )
+
+// Transform mounts an inline transform set carried directly in the
+// parapet.moonrhythm.io/transform annotation — the same YAML document a
+// transform ConfigMap holds (`transforms:` root key). It complements the
+// zone reference (transform-zone): a zone is shared, ConfigMap-managed config;
+// the inline set is the ingress's own, hot-reloaded the way every other inline
+// annotation is — plugins re-run on each mux reload, so an annotation edit
+// recompiles naturally and there is no registry to look up per request.
+//
+// The compile options (CEL cost limit / macro policy, GeoIP resolvers) are the
+// same ones the global and zone sets use, so an inline `filter` is bounded
+// identically. A set that fails to parse is logged and mounted as nothing —
+// traffic passes through unmodified (the same log-and-skip failure mode as a
+// bad `redirect` annotation; unlike a ConfigMap edit there is no previous
+// compiled set to keep). An empty/valid-but-ruleless set mounts nothing.
+func Transform(opts transformrule.Options) Plugin {
+	return func(ctx Context) {
+		doc := ctx.Ingress.Annotations[namespace+"/transform"]
+		if strings.TrimSpace(doc) == "" {
+			return
+		}
+		z, err := transformrule.Parse(opts, doc)
+		if err != nil {
+			slog.Error("plugin/transform: invalid inline transform set; passing traffic through unmodified",
+				"ingress", ctx.ingressID(), "error", err)
+			return
+		}
+		if z.Empty() {
+			return
+		}
+		ctx.Use(parapet.MiddlewareFunc(z.ServeHandler))
+	}
+}
 
 // TransformZone binds an ingress to a transform zone via the
 // parapet.moonrhythm.io/transform-zone annotation. The value is a zone

@@ -349,6 +349,11 @@ func main() {
 		// accepted tradeoff: a transform redirect short-circuits before the access
 		// gate, which is harmless for a soft re-route.
 		ctrl.Use(plugin.TransformZone(ctrl.LookupTransformZone))
+		// Inline transform (the ingress's own set, carried in the annotation)
+		// runs after the zone so shared zone config applies first and the
+		// ingress's inline rules see — and can override — its effects, mirroring
+		// global→zone. Same security-critical slot as TransformZone above.
+		ctrl.Use(plugin.Transform(ctrl.TransformConfig.Options()))
 	}
 	ctrl.Use(plugin.BodyLimit)
 	ctrl.Use(plugin.UpstreamProtocol)

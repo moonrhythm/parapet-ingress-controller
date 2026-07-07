@@ -39,6 +39,7 @@ func TestTransformZoneRegistrationSlot(t *testing.T) {
 	waf := idx("ctrl.Use(plugin.WAFZone(")
 	rateLimit := idx("ctrl.Use(plugin.RateLimit)")
 	transform := idx("ctrl.Use(plugin.TransformZone(")
+	transformInline := idx("ctrl.Use(plugin.Transform(")
 	upstreamProto := idx("ctrl.Use(plugin.UpstreamProtocol)")
 	upstreamHost := idx("ctrl.Use(plugin.UpstreamHost)")
 	upstreamPath := idx("ctrl.Use(plugin.UpstreamPath)")
@@ -50,12 +51,18 @@ func TestTransformZoneRegistrationSlot(t *testing.T) {
 	require.Less(t, waf, transform, "transform must register AFTER WAFZone")
 	require.Less(t, rateLimit, transform, "transform must register AFTER RateLimit")
 
+	// the inline set runs after the zone (shared config first, the ingress's own
+	// rules see and can override its effects) and shares the whole F1 slot.
+	require.Less(t, transform, transformInline, "inline transform must register AFTER TransformZone")
+
 	// before the upstream rewrites + auth + strip-prefix
-	require.Less(t, transform, upstreamProto, "transform must register BEFORE UpstreamProtocol")
-	require.Less(t, transform, upstreamHost, "transform must register BEFORE UpstreamHost")
-	require.Less(t, transform, upstreamPath, "transform must register BEFORE UpstreamPath")
-	require.Less(t, transform, basicAuth, "transform must register BEFORE BasicAuth")
-	require.Less(t, transform, forwardAuth,
-		"transform must register BEFORE ForwardAuth so X-Auth-* re-stamp overwrites any forged identity header (SPEC §4.4)")
-	require.Less(t, transform, stripPrefix, "transform must register BEFORE StripPrefix")
+	for name, pos := range map[string]int{"zone": transform, "inline": transformInline} {
+		require.Less(t, pos, upstreamProto, "%s transform must register BEFORE UpstreamProtocol", name)
+		require.Less(t, pos, upstreamHost, "%s transform must register BEFORE UpstreamHost", name)
+		require.Less(t, pos, upstreamPath, "%s transform must register BEFORE UpstreamPath", name)
+		require.Less(t, pos, basicAuth, "%s transform must register BEFORE BasicAuth", name)
+		require.Less(t, pos, forwardAuth,
+			"%s transform must register BEFORE ForwardAuth so X-Auth-* re-stamp overwrites any forged identity header (SPEC §4.4)", name)
+		require.Less(t, pos, stripPrefix, "%s transform must register BEFORE StripPrefix", name)
+	}
 }
