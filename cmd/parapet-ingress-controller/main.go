@@ -400,6 +400,17 @@ func main() {
 		// Per-zone limits run inside the per-ingress chain (plugin.RateLimitZone).
 		m.Use(ctrl.GlobalRateLimit())
 	}
+	if transformEnabled {
+		// Global transform runs after every global security layer (WAF, Coraza,
+		// rate limit) so security and throttle always see the original,
+		// un-rewritten request and blocked/limited traffic is never transformed —
+		// the same F1 reasoning that slots the per-ingress TransformZone plugin.
+		// It runs BEFORE forwardGeoHeaders below, so a transform-set
+		// X-Forwarded-Country/ASN is always overwritten by the authoritative GeoIP
+		// values, and before routing, so its response ops (e.g. a global
+		// X-Robots-Tag) also stamp unrouted-host (404) responses.
+		m.Use(ctrl.GlobalTransform())
+	}
 	// Forward the resolved GeoIP country/ASN to upstreams. Mounted only when a DB
 	// is loaded (resolver non-nil); runs just before routing so the headers reach
 	// the proxied request.

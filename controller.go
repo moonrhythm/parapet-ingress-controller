@@ -101,10 +101,11 @@ type Controller struct {
 	// controller_coraza.go.
 	CorazaConfig CorazaConfig
 
-	// TransformConfig configures the ConfigMap-driven transform layer — a
-	// per-(project, location) zone of CEL-scoped request/response mutations. Set
-	// before Watch(); when disabled the feature does no work: no ConfigMap watch,
-	// no mount. See controller_transform.go.
+	// TransformConfig configures the ConfigMap-driven transform layer of
+	// CEL-scoped request/response mutations — a global baseline plus
+	// per-(project, location) zones, following the WAF's model. Set before
+	// Watch(); when disabled the feature does no work: no ConfigMap watch, no
+	// mount. See controller_transform.go.
 	TransformConfig TransformConfig
 
 	// globalWAF is the always-on baseline firewall; zones holds the tenant zone
@@ -125,11 +126,14 @@ type Controller struct {
 	globalCoraza *corazawaf.Instance
 	corazaZones  atomic.Pointer[map[string]*corazawaf.Instance]
 
-	// transformZones holds the per-(project, location) transform zone registry
-	// keyed by <namespace>/<name>, swapped atomically on transform reload. There
-	// is no global baseline (transforms are zone-only). Decoupled from the mux
-	// exactly like the WAF/ratelimit registries.
-	transformZones atomic.Pointer[map[string]*transformrule.Zone]
+	// globalTransform is the baseline transform set (nil = none loaded, a
+	// pass-through); transformZones holds the per-(project, location) transform
+	// zone registry keyed by <namespace>/<name>, swapped atomically on transform
+	// reload. Decoupled from the mux exactly like the WAF/ratelimit registries.
+	// Unlike globalWAF (a mutable instance fed by SetRules), a transformrule.Zone
+	// is immutable, so the global set is itself an atomic.Pointer swap.
+	globalTransform atomic.Pointer[transformrule.Zone]
+	transformZones  atomic.Pointer[map[string]*transformrule.Zone]
 
 	// WAF rule-input fingerprints from the last reload, used to skip recompiling
 	// CEL rulesets whose effective input (the sorted concatenated rule YAML) is
@@ -164,8 +168,9 @@ type Controller struct {
 	// transformReloadMu serializes overlapping debounce-fired passes, the
 	// fingerprints skip recompiling unchanged transform input. Accessed only under
 	// transformReloadMu.
-	transformReloadMu         sync.Mutex
-	transformZoneFingerprints map[string]string
+	transformReloadMu          sync.Mutex
+	globalTransformFingerprint string
+	transformZoneFingerprints  map[string]string
 
 	// endpointReloadMu serializes host-route recomputes. Two watch goroutines now
 	// feed pod IPs — the EndpointSlice watch and the legacy-Endpoints fallback
