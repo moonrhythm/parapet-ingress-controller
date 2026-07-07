@@ -42,13 +42,20 @@ type TransformConfig struct {
 	FilterDisableMacros bool
 }
 
-func (ctrl *Controller) transformOptions() transformrule.Options {
+// Options returns the compile options shared by every transform surface
+// (global, zone, and the inline-annotation plugin), so all three are bounded
+// and geo-resolved identically.
+func (c TransformConfig) Options() transformrule.Options {
 	return transformrule.Options{
-		Country:             ctrl.TransformConfig.Country,
-		ASN:                 ctrl.TransformConfig.ASN,
-		FilterCostLimit:     ctrl.TransformConfig.FilterCostLimit,
-		FilterDisableMacros: ctrl.TransformConfig.FilterDisableMacros,
+		Country:             c.Country,
+		ASN:                 c.ASN,
+		FilterCostLimit:     c.FilterCostLimit,
+		FilterDisableMacros: c.FilterDisableMacros,
 	}
+}
+
+func (ctrl *Controller) transformOptions() transformrule.Options {
+	return ctrl.TransformConfig.Options()
 }
 
 // InitTransform seeds the (empty) zone registry. Call after setting
