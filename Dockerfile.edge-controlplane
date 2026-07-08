@@ -10,7 +10,7 @@
 # $BUILDPLATFORM and Go cross-compiles to $TARGETARCH, so the arm64 image is
 # produced WITHOUT QEMU emulation (pure Go, CGO_ENABLED=0). GOAMD64 is honored
 # only for amd64 (Go ignores it when GOARCH=arm64).
-FROM --platform=$BUILDPLATFORM golang:1.26.4-trixie AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.5-trixie AS build
 
 ARG VERSION
 ARG GOAMD64

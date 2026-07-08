@@ -17,7 +17,7 @@ jobs:
     runs-on: self-hosted
     strategy:
       matrix:
-        go: ['1.26.4']
+        go: ['1.26.5']
     name: Go ${{ matrix.go }}
     steps:
     - uses: actions/checkout@v4

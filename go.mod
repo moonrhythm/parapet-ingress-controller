@@ -1,6 +1,6 @@
 module github.com/moonrhythm/parapet-ingress-controller
 
-go 1.26.4
+go 1.26.5
 
 require (
 	cloud.google.com/go/profiler v0.6.0
