@@ -10,7 +10,7 @@
 # GOARCH=arm64). Build a multi-arch image with:
 #
 #     docker buildx build --platform linux/amd64,linux/arm64 -t parapet-ingress-controller .
-FROM --platform=$BUILDPLATFORM golang:1.26.4-trixie AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.5-trixie AS build
 
 ARG VERSION
 ARG GOAMD64

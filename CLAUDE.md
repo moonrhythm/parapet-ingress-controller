@@ -180,7 +180,7 @@ fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
 `make test` target.
 
 ### Docker image
-- Builder: `golang:1.26.4-trixie` (pure Go, `CGO_ENABLED=0`) — cross-compiles, so the image is multi-arch-capable (linux/amd64 + linux/arm64) without QEMU like the edge images
+- Builder: `golang:1.26.5-trixie` (pure Go, `CGO_ENABLED=0`) — cross-compiles, so the image is multi-arch-capable (linux/amd64 + linux/arm64) without QEMU like the edge images
 - Runtime: `gcr.io/distroless/static-debian12` (static binary; root variant so it can bind privileged :80/:443)
 - Build args: `VERSION` (injected as `main.version`), `GOAMD64` (v3 default, v1 for compatibility image; honored only for amd64)
 
@@ -196,7 +196,7 @@ All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`):
 
 ```
 module github.com/moonrhythm/parapet-ingress-controller
-go 1.26.4
+go 1.26.5
 ```
 
 The module lives at the repo root, so `go install` targets are `…/parapet-ingress-controller/cmd/parapet-ingress-controller`. Key dependencies: `github.com/moonrhythm/parapet`, `k8s.io/client-go`, `go.opentelemetry.io`, `github.com/prometheus/client_golang`, `cloud.google.com/go/profiler`.
