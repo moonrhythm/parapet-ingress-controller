@@ -52,6 +52,10 @@ func main() {
 	loadAllCerts := config.Bool("LOAD_ALL_CERTS")
 	autoH2C := config.Bool("UPSTREAM_AUTO_H2C")
 	autoH2CTTL := config.DurationDefault("UPSTREAM_AUTO_H2C_TTL", 10*time.Minute)
+	// UPSTREAM_WS_H2C (default true, kill switch): tunnel WebSocket to h2c pods via
+	// RFC 8441 extended CONNECT instead of the h1 upgrade dial; falls back to h1 when
+	// the pod does not advertise it.
+	wsUpstreamH2C := config.BoolDefault("UPSTREAM_WS_H2C", true)
 
 	rateLimitEnabled := config.Bool("RATELIMIT_ENABLED")
 	transformEnabled := config.Bool("TRANSFORM_ENABLED")
@@ -292,6 +296,9 @@ func main() {
 	proxy.ConfigTransport(configTransport)
 	if autoH2C {
 		proxy.EnableAutoH2C(autoH2CTTL)
+	}
+	if wsUpstreamH2C {
+		proxy.EnableWSUpstreamH2C()
 	}
 
 	ctrl := controller.New(watchNamespace, proxy)

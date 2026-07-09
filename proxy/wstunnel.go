@@ -28,6 +28,18 @@ func (p *Proxy) serveWSTunnel(w http.ResponseWriter, r *http.Request, stream io.
 	ctx := r.Context()
 	addr := r.URL.Host
 
+	// Phase 3: when the pod speaks WS-over-h2c (explicit appProtocol: h2c, or a
+	// fresh auto-h2c positive verdict), tunnel stream-to-stream via extended CONNECT
+	// instead of dialing the h1 upgrade. A not-supported peer returns false, leaving
+	// the parked stream untouched so we fall through to the h1 path below.
+	if p.wsUpstreamH2C {
+		if key := upstreamKey(r); p.wsH2CEligible(r, key) {
+			if p.tryWSTunnelH2C(w, r, stream, key) {
+				return
+			}
+		}
+	}
+
 	conn, err := p.dialer.DialContext(ctx, "tcp", addr)
 	if err != nil {
 		// Dial error before the handshake: nothing was sent and the request body is

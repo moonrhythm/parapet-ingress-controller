@@ -1,8 +1,9 @@
 # WebSocket over HTTP/2 on the internal hops (RFC 8441 extended CONNECT)
 
-Status: **phases 1–2 implemented** (core acceptance + edge tunnel; SPEC.md /
-EDGE.md carry the contract rows). Phase 3 (core→pod extended CONNECT) remains
-design-only.
+Status: **all three phases implemented** (core acceptance, edge tunnel —
+default on, `EDGE_UPSTREAM_WS_H2` opt-out — and core→pod extended CONNECT —
+default on, `UPSTREAM_WS_H2C` kill switch). SPEC.md / EDGE.md carry the
+contract rows.
 
 ## Problem
 
@@ -80,13 +81,14 @@ fallback so version skew is order-free:
    `EDGE_UPSTREAM_WS_H2`): translate the client's h1 upgrade into extended
    CONNECT on a dedicated multiplexed transport; fall back to the current h1
    path when the core doesn't advertise.
-3. **Core→pod extended CONNECT** (opt-in, later): when a pod's h2c connection
-   advertises the setting, tunnel over h2c instead of dialing an h1 upgrade.
+3. **Core→pod extended CONNECT** (`UPSTREAM_WS_H2C`, default true): when a
+   pod's h2c connection advertises the setting, tunnel over h2c instead of
+   dialing an h1 upgrade.
 
 Phase 1 ships first; phase 2 is the payoff (the edge falls back cleanly against
 an old core, so rollout order doesn't matter). Phase 3 is a nicety — the
 core→pod hop dials many distinct pod IPs, each with its own source-port space,
-so it has no exhaustion problem; see "Scope".
+so it has no exhaustion problem; see its section below.
 
 ## Core: accepting extended CONNECT
 
@@ -166,10 +168,11 @@ in an upstream header.
 
 ### Config
 
-`EDGE_UPSTREAM_WS_H2` (bool, **default false** at introduction; intended to
-flip to default-true once baked). Only meaningful when the upstream hop is
-multiplexed (`EDGE_UPSTREAM_HTTP2=true`, the default); with h2 disabled the
-flag is a no-op and WS rides h1 as today.
+`EDGE_UPSTREAM_WS_H2` (bool, **default true** — opt-out; safe at any version
+skew because the attempt against a non-advertising core fails pre-flight with
+zero wire cost and falls back per request). Only meaningful when the upstream
+hop is multiplexed (`EDGE_UPSTREAM_HTTP2=true`, the default); with h2 disabled
+the flag is a no-op and WS rides h1 as today.
 
 ### Behavior (`edge/forward.go` + new tunnel code)
 
@@ -236,28 +239,49 @@ unchanged; the multiplexed tunnel path needs few connections by construction
 
 Rollout is order-free; core first is natural (edges fall back until upgraded).
 
-## Phase 3: core→pod extended CONNECT (opt-in, later)
+## Phase 3: core→pod extended CONNECT (implemented; `UPSTREAM_WS_H2C` default true)
 
-When the pod itself speaks WS-over-h2c, the core can skip the h1 dial and
-tunnel stream-to-stream. Detection is exact and layered on what already exists:
+When the pod itself speaks WS-over-h2c, the core skips the h1 dial and tunnels
+stream-to-stream (`proxy/wsh2c.go`, attempted by `serveWSTunnel` before the h1
+path). Detection is exact and layered on what already exists:
 
-1. **Is the Service h2c at all?** Answered today by explicit
-   `appProtocol: h2c` or the `UPSTREAM_AUTO_H2C` per-Service TTL cache.
-   WS requests continue **not** to establish this verdict (regular traffic
-   does), preserving the current auto-h2c contract.
+1. **Is the Service h2c at all?** Explicit `appProtocol: h2c` (scheme `h2c`)
+   is always eligible; plain `http` is eligible only with a **fresh positive**
+   `UPSTREAM_AUTO_H2C` verdict (read-only accessor — WS requests still never
+   establish or refresh that verdict, preserving the auto-h2c contract);
+   `https` never (h1-over-TLS as before).
 2. **Does the h2c peer advertise `ENABLE_CONNECT_PROTOCOL`?** Attempt the
-   extended CONNECT; the not-supported error is local, instant on a live
-   connection, and sends nothing — fall back to the h1 upgrade dial and cache
-   the negative per-Service (same `<ns>/<name>:<port>` key + TTL pattern as
-   `proxy/autoh2c.go`).
+   extended CONNECT on a **dedicated** prior-knowledge h2c transport (dialing
+   through the shared dialer so bad-addr marking works; PING keepalive; never
+   the RPC h2c transport, whose stream budget long-lived tunnels must not
+   pin). The not-supported error is pre-flight — nothing written, the parked
+   client stream untouched — so the request falls back to the h1 upgrade dial
+   and the negative verdict is cached per-Service (`upstreamKey`, or the pod
+   `host:port` when auto-h2c is off; 10m TTL, expired entries pruned on read;
+   only negatives are cached).
+
+Failure semantics mirror phase 1: a **dial** failure cannot have consumed the
+request body, so it panics into `retryMiddleware` exactly like the h1 path
+(the dial error is captured at the `DialTLSContext` seam because x/net wraps
+RoundTrip errors); any other post-dial failure is a 502 with **no fallback and
+no retry** (the stream may be partially consumed — a replay could duplicate
+frames). Attempt outcomes count in `parapet_ws_upstream_h2c{result}`
+(`ok|not_supported|error`); the tunnel-vs-refusal distinction stays in
+`parapet_ws_tunnels`.
+
+Scope note: this path serves **tunneled** (h2-inbound / edge-tunneled)
+WebSockets. A legacy h1-inbound WebSocket at the core still rides the
+ReverseProxy hijack path to the pod over h1, unchanged — with the edge
+tunneling by default, edge-fronted traffic gets the stream-to-stream path
+end-to-end.
 
 Expectation-setting: almost no upstream advertises this by default — a Go pod
 needs the same `GODEBUG=http2xconnect=1`, Node needs
 `http2.createServer({settings: {enableConnectProtocol: true}})`, and gRPC
-servers don't do WebSocket. Negatives are free, positives are per-app opt-ins.
-This phase reuses the phase-1 splice code and the autoh2c cache pattern; it is
-deliberately last because the core→pod hop has no port-exhaustion problem
-(distinct pod IPs each carry their own tuple space).
+servers don't do WebSocket. Negatives are free and cached; positives are
+per-app opt-ins. The core→pod hop has no port-exhaustion problem (distinct pod
+IPs each carry their own tuple space), so this phase is about per-pod
+connection reduction and native-h2 apps.
 
 ## Failure semantics & blast radius
 
@@ -334,7 +358,8 @@ Dockerfile                  # ENV GODEBUG=http2xconnect=1
 edge/wstunnel.go            # edge: translate + dedicated tunnel transports (phase 2)
 metric/ws.go                # core counters/gauge
 metric/observe/ws.go        # edge counter (leaf package — edge binaries stay off metric)
-proxy/autoh2c.go            # phase 3: extended-CONNECT verdict cache alongside h2c cache
+proxy/wsh2c.go              # phase 3: pod-side extended CONNECT (dedicated h2c transport,
+                            #   eligibility + negative-verdict cache, dial-error retry seam)
 ```
 
 ## SPEC.md rows to add at implementation time
@@ -350,10 +375,11 @@ proxy/autoh2c.go            # phase 3: extended-CONNECT verdict cache alongside 
 
 ## Open questions
 
-1. When does `EDGE_UPSTREAM_WS_H2` default flip to true — after one release of
-   bake, or gated on a fleet-wide `parapet_edge_ws_upstream{result="fallback"}`
-   ≈ 0 observation?
-2. Do we expose `HTTP_SERVER_MAX_CONCURRENT_STREAMS` in phase 1 or defer until
-   someone needs to tune session-per-connection blast radius?
-3. Phase 3: worth doing at all until a real upstream advertises support? (The
-   detection is cheap, but so is not building it.)
+1. ~~When does `EDGE_UPSTREAM_WS_H2` default flip to true?~~ Resolved: default
+   true from the start — the pre-flight fallback makes it safe at any skew.
+2. Do we expose `HTTP_SERVER_MAX_CONCURRENT_STREAMS`, or defer until someone
+   needs to tune session-per-connection blast radius (~250/conn at Go's
+   default)?
+3. ~~Phase 3: worth doing at all?~~ Built (default on, `UPSTREAM_WS_H2C` kill
+   switch): detection is free-negative and cached, and edge-fronted traffic
+   now rides stream-to-stream end-to-end when the pod opts in.

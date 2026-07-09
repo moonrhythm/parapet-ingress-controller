@@ -78,9 +78,12 @@ func main() {
 	upstreamHTTP2 := envOr("EDGE_UPSTREAM_HTTP2", "true") == "true"
 	// Tunnel client WebSocket upgrades over a single multiplexed h2/h2c stream to
 	// the core (RFC 8441 extended CONNECT) instead of one dedicated HTTP/1.1
-	// connection each. Only meaningful when the upstream hop is h2; with h2 off it
-	// is a no-op (WS rides h1 as today) — warn if it was set explicitly.
-	upstreamWSH2 := envOr("EDGE_UPSTREAM_WS_H2", "false") == "true"
+	// connection each. Default on (opt-out): against a core that doesn't advertise
+	// the capability the attempt fails pre-flight with zero wire cost and the
+	// request falls back to HTTP/1.1, so the flag being on is safe at any skew.
+	// Only meaningful when the upstream hop is h2; with h2 off it is a no-op (WS
+	// rides h1 as today) — warn if it was set explicitly.
+	upstreamWSH2 := envOr("EDGE_UPSTREAM_WS_H2", "true") == "true"
 	if upstreamWSH2 && !upstreamHTTP2 {
 		slog.Warn("EDGE_UPSTREAM_WS_H2 is ignored when EDGE_UPSTREAM_HTTP2=false; WebSocket rides HTTP/1.1")
 		upstreamWSH2 = false

@@ -140,6 +140,15 @@ func (t *autoH2CTransport) lookup(key string) (h2cEntry, bool) {
 	return e, true
 }
 
+// freshPositive reports whether key holds a fresh cached h2c-positive verdict.
+// Read-only: it never probes, stores, or refreshes the entry, so a WS request
+// consulting it can never establish or extend the auto-h2c verdict (that contract
+// stays owned by regular traffic).
+func (t *autoH2CTransport) freshPositive(key string) bool {
+	e, ok := t.lookup(key)
+	return ok && e.h2c
+}
+
 // store records a probe outcome with a fresh TTL.
 func (t *autoH2CTransport) store(key string, supportsH2C bool) {
 	t.entries.Store(key, h2cEntry{h2c: supportsH2C, deadline: t.now().Add(t.ttl)})

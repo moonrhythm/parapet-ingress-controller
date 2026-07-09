@@ -945,7 +945,7 @@ EDGE_UPSTREAM_SNI                 SNI/Host on the re-encrypt handshake (default:
 EDGE_UPSTREAM_HTTP2               HTTP/2 on the hop (default true — opt-out)
 EDGE_UPSTREAM_MAX_CONNS_PER_HOST  hard ceiling on total conns per core host (default 0 = unlimited)
 EDGE_UPSTREAM_MAX_IDLE_CONNS_PER_HOST  idle keep-alive pool per core host (default 0 ⇒ 32)
-EDGE_UPSTREAM_WS_H2               tunnel WebSocket over the h2/h2c hop via RFC 8441 (default false; see WEBSOCKET.md)
+EDGE_UPSTREAM_WS_H2               tunnel WebSocket over the h2/h2c hop via RFC 8441 (default true — opt-out; see WEBSOCKET.md)
 ```
 
 - **Connection ceiling.** `EDGE_UPSTREAM_MAX_CONNS_PER_HOST` mirrors the
@@ -978,9 +978,9 @@ has no HTTP/2 upgrade path and an h2 connection rejects the
 `Connection`/`Upgrade` request headers: `H2CTransport` downgrades them itself, and
 the re-encrypt path routes them to a dedicated HTTP/1.1-over-TLS transport. That
 costs **one edge→core TCP connection per WebSocket client** — the tuple space to a
-single core VIP exhausts around 28k–64k concurrent sockets. Opt-in
-`EDGE_UPSTREAM_WS_H2=true` instead tunnels each WebSocket as an **RFC 8441
-extended CONNECT stream** on dedicated h2/h2c tunnel transports (never the RPC
+single core VIP exhausts around 28k–64k concurrent sockets. By default
+(`EDGE_UPSTREAM_WS_H2`, opt-out) the edge instead tunnels each WebSocket as an
+**RFC 8441 extended CONNECT stream** on dedicated h2/h2c tunnel transports (never the RPC
 transports — long-lived streams would pin their stream budget; h2-only ALPN on
 the re-encrypt hop; PING keepalive so a silently-dropped connection can't hold
 its sessions hostage). The core must run with `GODEBUG=http2xconnect=1` (baked

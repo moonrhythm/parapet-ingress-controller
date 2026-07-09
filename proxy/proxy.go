@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"sync"
 	"time"
 
 	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
@@ -21,6 +22,13 @@ type Proxy struct {
 	h2cTransport  *h2cTransport
 	gw            *gateway
 	autoH2C       *autoH2CTransport
+
+	// WS-over-h2c (phase 3): a dedicated pod-side extended-CONNECT transport plus a
+	// per-Service negative-verdict cache. wsH2C is an interface so tests can inject a
+	// stub RoundTripper. wsH2CNeg maps an upstream key to a negative-verdict expiry.
+	wsUpstreamH2C bool
+	wsH2C         http.RoundTripper
+	wsH2CNeg      sync.Map // upstream key (string) -> time.Time (negative-verdict expiry)
 }
 
 func New() *Proxy {
