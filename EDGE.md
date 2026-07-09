@@ -945,6 +945,7 @@ EDGE_UPSTREAM_SNI                 SNI/Host on the re-encrypt handshake (default:
 EDGE_UPSTREAM_HTTP2               HTTP/2 on the hop (default true — opt-out)
 EDGE_UPSTREAM_MAX_CONNS_PER_HOST  hard ceiling on total conns per core host (default 0 = unlimited)
 EDGE_UPSTREAM_MAX_IDLE_CONNS_PER_HOST  idle keep-alive pool per core host (default 0 ⇒ 32)
+EDGE_UPSTREAM_WS_H2               tunnel WebSocket over the h2/h2c hop via RFC 8441 (default true — opt-out; see WEBSOCKET.md)
 ```
 
 - **Connection ceiling.** `EDGE_UPSTREAM_MAX_CONNS_PER_HOST` mirrors the
@@ -972,10 +973,23 @@ EDGE_UPSTREAM_MAX_IDLE_CONNS_PER_HOST  idle keep-alive pool per core host (defau
   (`EDGE_DATAPLANE_MTLS`) rides h2 or HTTP/1.1 identically — the client cert is
   presented in the TLS handshake either way.
 
-**WebSocket / `Upgrade` requests always ride HTTP/1.1.** `httputil.ReverseProxy`
-has no HTTP/2 upgrade path (no RFC 8441) and an h2 connection rejects the
+**WebSocket / `Upgrade` requests ride HTTP/1.1 by default.** `httputil.ReverseProxy`
+has no HTTP/2 upgrade path and an h2 connection rejects the
 `Connection`/`Upgrade` request headers: `H2CTransport` downgrades them itself, and
-the re-encrypt path routes them to a dedicated HTTP/1.1-over-TLS transport.
+the re-encrypt path routes them to a dedicated HTTP/1.1-over-TLS transport. That
+costs **one edge→core TCP connection per WebSocket client** — the tuple space to a
+single core VIP exhausts around 28k–64k concurrent sockets. By default
+(`EDGE_UPSTREAM_WS_H2`, opt-out) the edge instead tunnels each WebSocket as an
+**RFC 8441 extended CONNECT stream** on dedicated h2/h2c tunnel transports (never the RPC
+transports — long-lived streams would pin their stream budget; h2-only ALPN on
+the re-encrypt hop; PING keepalive so a silently-dropped connection can't hold
+its sessions hostage). The core must run with `GODEBUG=http2xconnect=1` (baked
+into the controller Dockerfile) to advertise acceptance; against a core that
+doesn't, the attempt fails **pre-flight with zero wire cost** and the edge falls
+back to the HTTP/1.1 path per request — rollout is order-free. Fallbacks count in
+`parapet_edge_ws_upstream{protocol="http1",result="fallback"}` (a persistent
+non-zero rate is the "core lost its GODEBUG" alarm). Full design in
+[WEBSOCKET.md](WEBSOCKET.md).
 
 **Opt-out (`EDGE_UPSTREAM_HTTP2=false`)** forces HTTP/1.1 on both hops. Use it for
 a core that predates `H2C=true` on `:80`, or a dumb L4 in front of `:443` that

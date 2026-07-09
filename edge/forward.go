@@ -32,6 +32,7 @@ import (
 // forwardGeoHeaders.
 type Forwarder struct {
 	rp *httputil.ReverseProxy
+	ws *wsTunnel // non-nil when EDGE_UPSTREAM_WS_H2 is on AND the upstream hop is h2
 }
 
 // defaultMaxIdleConnsPerHost mirrors parapet's upstream.defaultMaxIdleConns (32):
@@ -92,7 +93,13 @@ func (t ForwarderTuning) idle() int {
 //
 // tuning bounds the per-host connection pool to the core (see ForwarderTuning);
 // the zero value keeps the historical unbounded/idle-32 behavior.
-func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, tuning ForwarderTuning, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error), onCertReject func()) *Forwarder {
+//
+// wsH2 (EDGE_UPSTREAM_WS_H2, default off) tunnels client WebSocket upgrades over a
+// single multiplexed h2/h2c stream to the core (RFC 8441 extended CONNECT) instead
+// of a dedicated HTTP/1.1 connection each; it needs enableHTTP2 (a plain-h1 hop has
+// no stream to multiplex on) and falls back to the h1 upgrade path against a core
+// that doesn't advertise the capability.
+func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, tuning ForwarderTuning, getClientCert func(*tls.CertificateRequestInfo) (*tls.Certificate, error), onCertReject func(), wsH2 bool) *Forwarder {
 	var tr http.RoundTripper
 	switch {
 	case useTLS:
@@ -158,7 +165,12 @@ func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, tuning Forw
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		},
 	}
-	return &Forwarder{rp: rp}
+
+	f := &Forwarder{rp: rp}
+	if wsH2 && enableHTTP2 {
+		f.ws = newWSTunnel(addr, scheme, useTLS, sni, getClientCert)
+	}
+	return f
 }
 
 // isClientCertRejected reports whether err is the CORE rejecting the edge's client cert
@@ -267,6 +279,13 @@ func (t *h2TLSTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 // is ignored (the request is forwarded upstream).
 func (f *Forwarder) ServeHandler(_ http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if f.ws != nil && isWebSocketUpgrade(r) {
+			// serve returns false only before any byte reaches the client, so the
+			// fallback re-serves the original request on the h1 upgrade path.
+			if f.ws.serve(w, r) {
+				return
+			}
+		}
 		r.RemoteAddr = "" // stop ReverseProxy re-appending X-Forwarded-For
 		f.rp.ServeHTTP(w, r)
 	})

@@ -84,6 +84,21 @@ carries the edge's `X-Parapet-Waf` claim (stamped after the edge's WAF
 evaluated it), the **global WAF** and **zone WAF** steps are skipped for that
 request — counted as `parapet_waf_skips{scope}`; every other step is unchanged.
 
+An HTTP/2 **extended-CONNECT WebSocket handshake** (RFC 8441, accepted only
+when the process runs with `GODEBUG=http2xconnect=1`) is normalized **before
+step 1** into the equivalent HTTP/1.1 upgrade shape — method `GET`,
+`Connection: Upgrade` + `Upgrade: websocket`, the live tunnel stream detached
+from `r.Body` (so WAF/Coraza body inspection sees the same empty body an h1
+handshake has) — and then follows the same order; every step sees it exactly
+as it sees an h1 WebSocket handshake. A `:protocol` other than `websocket` is
+refused with 501. On acceptance the proxy performs the h1 upgrade toward the
+pod itself (synthesizing `Sec-WebSocket-Key`, validating the pod's `Accept`)
+and splices the pod connection to the h2 stream — unless the pod is
+h2c-capable and advertises extended CONNECT itself, in which case the tunnel
+is stream-to-stream over h2c (`UPSTREAM_WS_H2C`, default on; a pod that
+doesn't advertise falls back to the h1 upgrade). See
+[WEBSOCKET.md](WEBSOCKET.md).
+
 ### Request header normalization
 
 Before the WAF reads the request and before forwarding upstream, an HTTP/2
@@ -284,6 +299,8 @@ invariants:
 | `WAF_VALIDATED_PROXY` | `""` | Skip the core's global+zone WAF for requests whose peer already ran the same rules (the edge proxy). Comma list of `edge-mtls` (peer client cert chains to the live edge CA; requires `EDGE_TRUST_CP_ENDPOINT`) and/or CIDRs/named groups (immediate TCP peer). Also requires the per-request `X-Parapet-Waf` claim the edge stamps after evaluating. `true` is refused; a bad spec is fatal at startup. Skips counted in `parapet_waf_skips{scope}`. See [EDGE.md](EDGE.md#skipping-the-core-re-run-waf_validated_proxy-opt-in) |
 | `UPSTREAM_AUTO_H2C` | `false` | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The verdict (h2c or HTTP/1.1-only) is cached per-Service with a TTL and re-probed on expiry; concurrent probes for a cold/expired upstream are single-flighted so they can't stampede failed connections. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
 | `UPSTREAM_AUTO_H2C_TTL` | `10m` | How long a cached auto-h2c verdict is trusted before the upstream is re-probed (only when `UPSTREAM_AUTO_H2C` is on) |
+| `UPSTREAM_WS_H2C` | `true` | Kill switch for core→pod WebSocket-over-h2c: a tunneled WebSocket to an h2c-capable pod (explicit `appProtocol: h2c`, or a fresh auto-h2c positive verdict) is attempted as an RFC 8441 extended CONNECT stream instead of an h1 upgrade dial; a pod that doesn't advertise the capability falls back to h1 (negative verdict cached 10m per Service). See [WEBSOCKET.md](WEBSOCKET.md) |
+| `GODEBUG` | Dockerfile sets `http2xconnect=1` | Must contain `http2xconnect=1` for the core to **accept WebSocket-over-HTTP/2** (RFC 8441 extended CONNECT; see [WEBSOCKET.md](WEBSOCKET.md)). Read by `net/http` at process init — a `GODEBUG` set in a pod spec **replaces** the Dockerfile value, silently disabling acceptance (edges fall back to HTTP/1.1 per request); a startup warning is logged when the token is absent |
 
 ## Metrics
 
@@ -305,6 +322,10 @@ Prometheus, served on `:9187`.
 | `parapet_coraza_matches{rule_id,severity,scope}` | Coraza (OWASP CRS / SecLang) rule matches; `scope` = `global\|zone`, no `_total` suffix |
 | `parapet_coraza_eval_duration_seconds{outcome,scope}` | histogram of per-request Coraza request-phase eval latency; `outcome` = `pass\|block` |
 | `parapet_ratelimit_total{name,result}` | `result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names |
+| `parapet_ws_tunnels{result}` | WebSocket-over-h2 extended-CONNECT handshakes at the core; `result` = `tunneled\|refused\|upstream_error\|bad_protocol`, no `_total` suffix (see [WEBSOCKET.md](WEBSOCKET.md)) |
+| `parapet_ws_tunnel_active` | live spliced WebSocket-over-h2 sessions at the core |
+| `parapet_ws_upstream_h2c{result}` | core→pod extended-CONNECT attempt outcomes; `result` = `ok\|not_supported\|error` — `not_supported` = the pod doesn't advertise the capability (fell back to h1), no `_total` suffix |
+| `parapet_edge_ws_upstream{protocol,result}` | edge-side WebSocket upstream outcomes; `protocol` = `h2\|http1`, `result` = `ok\|fallback\|error` — `fallback` = the core didn't accept extended CONNECT (edge-only metric, reaches Prometheus via the CP's merged registry) |
 | `parapet_connections{state}` | per-state connection gauge |
 | `go_*` runtime, `process_*` (client_golang), Cloud Profiler/Trace | |
 
