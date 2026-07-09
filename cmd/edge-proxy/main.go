@@ -76,6 +76,15 @@ func main() {
 	// Set EDGE_UPSTREAM_HTTP2=false to force HTTP/1.1 — e.g. a core that predates H2C
 	// on :80, or an L4 in front of :443 that can't ALPN.
 	upstreamHTTP2 := envOr("EDGE_UPSTREAM_HTTP2", "true") == "true"
+	// Tunnel client WebSocket upgrades over a single multiplexed h2/h2c stream to
+	// the core (RFC 8441 extended CONNECT) instead of one dedicated HTTP/1.1
+	// connection each. Only meaningful when the upstream hop is h2; with h2 off it
+	// is a no-op (WS rides h1 as today) — warn if it was set explicitly.
+	upstreamWSH2 := envOr("EDGE_UPSTREAM_WS_H2", "false") == "true"
+	if upstreamWSH2 && !upstreamHTTP2 {
+		slog.Warn("EDGE_UPSTREAM_WS_H2 is ignored when EDGE_UPSTREAM_HTTP2=false; WebSocket rides HTTP/1.1")
+		upstreamWSH2 = false
+	}
 	// Per-host connection ceiling to the core (mirrors the controller's
 	// TR_MAX_CONNS_PER_HOST / TR_MAX_IDLE_CONNS_PER_HOST). MAX_CONNS_PER_HOST=0
 	// (default) leaves connections unbounded; MAX_IDLE_CONNS_PER_HOST=0 falls back
@@ -407,7 +416,7 @@ func main() {
 		// fires a (non-blocking) reactive re-mint. nil when mTLS is off.
 		onCertReject = func() { remintCoord.Trigger("reactive") }
 	}
-	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamHTTP2, upstreamSNI, upstreamTuning, getClientCert, onCertReject)
+	forwarder := edge.NewForwarder(upstreamAddr, upstreamTLS, upstreamHTTP2, upstreamSNI, upstreamTuning, getClientCert, onCertReject, upstreamWSH2)
 
 	if metricsListen != "" {
 		go func() {

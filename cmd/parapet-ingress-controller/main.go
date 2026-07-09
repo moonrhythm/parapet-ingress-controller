@@ -168,6 +168,18 @@ func main() {
 		"transform_enabled", transformEnabled,
 	)
 
+	// WS-over-HTTP/2 acceptance (RFC 8441 extended CONNECT) is gated by the real
+	// GODEBUG env var, read by the h2 server in package init(). A user-supplied
+	// GODEBUG in the pod spec REPLACES the Dockerfile's ENV entirely, silently
+	// disabling the feature — so verify it at startup and warn prominently (not
+	// fatal: the core is still correct, it just can't accept WS-over-h2 and edges
+	// fall back to HTTP/1.1).
+	if !strings.Contains(os.Getenv("GODEBUG"), "http2xconnect=1") {
+		slog.Warn("WS-over-HTTP/2 acceptance DISABLED: GODEBUG does not contain http2xconnect=1 " +
+			"(a user-supplied GODEBUG replaces the image default); the core will not advertise " +
+			"SETTINGS_ENABLE_CONNECT_PROTOCOL and edges fall back to HTTP/1.1 WebSocket")
+	}
+
 	if enableProfiler {
 		if profilerName == "" {
 			profilerName = "parapet-ingress-controller"
@@ -367,6 +379,11 @@ func main() {
 	// reads ctrl.WaitTrustReady, so it must be installed before Watch runs.
 
 	m := parapet.Middlewares{}
+	// WS-over-HTTP/2 normalization runs first, before everything in SPEC.md's
+	// per-request order, so an h2 extended-CONNECT WebSocket handshake is rewritten
+	// into the h1-upgrade shape the whole chain already understands. Unconditional:
+	// a non-handshake request pays only two header checks.
+	m.Use(wsNormalize())
 	m.Use(ctrl.Healthz())
 	m.Use(host.StripPort())
 	m.Use(host.ToLower())

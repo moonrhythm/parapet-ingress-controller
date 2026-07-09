@@ -59,4 +59,10 @@ FROM gcr.io/distroless/static-debian12
 COPY --from=build /workspace/parapet-ingress-controller /app/parapet-ingress-controller
 COPY --from=geoip /geoip/ /geoip/
 
+# RFC 8441 extended CONNECT (WebSocket over HTTP/2) acceptance is gated by this
+# real GODEBUG env var, read by the h2 server at startup. A user-supplied GODEBUG
+# in the pod spec REPLACES this value entirely — main.go warns at startup when
+# http2xconnect=1 is missing. See WEBSOCKET.md.
+ENV GODEBUG=http2xconnect=1
+
 ENTRYPOINT ["/app/parapet-ingress-controller"]

@@ -9,11 +9,13 @@ import (
 	"time"
 
 	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
+	"github.com/moonrhythm/parapet-ingress-controller/wsh2"
 )
 
 type Proxy struct {
 	OnDialError func(addr string)
 
+	dialer        *dialer
 	reverseProxy  httputil.ReverseProxy
 	httpTransport *http.Transport
 	h2cTransport  *h2cTransport
@@ -26,6 +28,7 @@ func New() *Proxy {
 
 	var p Proxy
 	d.onError = p.onDialError
+	p.dialer = d
 	p.httpTransport = newHTTPTransport(d.DialContext)
 	p.h2cTransport = newH2CTransport(d.DialContext, p.httpTransport)
 	p.gw = &gateway{
@@ -74,6 +77,16 @@ func (p *Proxy) onDialError(addr string) {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// A normalized extended-CONNECT WebSocket handshake (wsh2.Normalize parked its
+	// stream in the context) cannot ride httputil.ReverseProxy: that path hijacks
+	// the downstream connection, and an h2 stream's ResponseWriter has no Hijacker.
+	// Tunnel it to the pod over the h1 upgrade it already speaks instead. The
+	// Upgrade check keeps this off any other CONNECT that somehow carries a stream.
+	if stream, ok := wsh2.TunnelStream(r.Context()); ok && r.Header.Get("Upgrade") == "websocket" {
+		p.serveWSTunnel(w, r, stream)
+		return
+	}
+
 	p.reverseProxy.ServeHTTP(w, r)
 }
 
