@@ -9,10 +9,13 @@
 // middleware becomes a cheap pass-through. All-or-nothing like waf.SetRules — a
 // bad ruleset is rejected and the last-good instance stays live.
 //
-// Only the REQUEST phases run (connection, URI, headers, and — opt-in — the
-// request body up to a byte limit). Response-body inspection is deliberately
-// never enabled: it would force buffering the response and break the reverse
-// proxy's streaming, the edge response cache, and HTTP/2.
+// Only the REQUEST phases run: connection, URI, headers, and phase 2 — which
+// always evaluates, even for bodyless requests, because most CRS detections
+// (SQLi 942xxx, XSS 941xxx) and the CRS anomaly-blocking evaluation rule
+// (949110) are phase 2; request-body bytes feed it only when a byte limit opts
+// in. Response-body inspection is deliberately never enabled: it would force
+// buffering the response and break the reverse proxy's streaming, the edge
+// response cache, and HTTP/2.
 //
 // The package is pure (no metric/k8s imports), so both the controller and the
 // out-of-cluster edge can import it, wiring metrics/logging through the OnMatch
@@ -53,14 +56,17 @@ type MatchEvent struct {
 type Options struct {
 	// RootFS is the rule filesystem resolved by Include directives — wire the
 	// embedded OWASP CRS (coreruleset.FS) here so a ruleset can `Include
-	// @owasp_crs`. nil disables bundled-ruleset includes.
+	// @crs-setup.conf.example` + `Include @owasp_crs/*.conf`. Include is a plain
+	// fs.ReadFile that globs only when the path contains '*', so the bare
+	// `@crs-setup` / `@owasp_crs` forms do not resolve. nil disables
+	// bundled-ruleset includes.
 	RootFS fs.FS
 
 	// RequestBodyLimit caps request-body inspection, in bytes. <= 0 disables
-	// request-body access entirely (URI + headers only) — no body is buffered, so
-	// the request path pays nothing extra. When > 0, up to this many bytes are
-	// fed to Coraza and the body is rebuilt so the upstream still receives it in
-	// full.
+	// request-body access entirely — no body is buffered, so the request path
+	// pays nothing extra (phase-2 rules still evaluate, over the URI, args, and
+	// headers only). When > 0, up to this many bytes are fed to Coraza and the
+	// body is rebuilt so the upstream still receives it in full.
 	RequestBodyLimit int
 
 	// ClientIP resolves the true client IP (parapet's X-Real-IP / X-Forwarded-For
@@ -201,19 +207,26 @@ func (in *Instance) inspectRequest(tx types.Transaction, r *http.Request) *types
 	}
 
 	if in.opts.RequestBodyLimit > 0 && r.Body != nil && r.Body != http.NoBody {
-		if it := in.inspectBody(tx, r); it != nil {
+		if it := in.feedBody(tx, r); it != nil {
 			return it
 		}
 	}
-	return nil
+	// Phase 2 always runs, body or not: most CRS detections (SQLi 942xxx, XSS
+	// 941xxx) and the CRS anomaly-blocking evaluation rule (949110) are phase 2,
+	// so gating it on a body would leave GET query-string attacks entirely
+	// unblocked. With no body fed it evaluates over the URI/args/headers above.
+	it, _ := tx.ProcessRequestBody()
+	return it
 }
 
-// inspectBody feeds up to RequestBodyLimit bytes of the request body to Coraza,
+// feedBody buffers up to RequestBodyLimit bytes of the request body into the
+// transaction (phase 2 itself runs later, unconditionally, in inspectRequest),
 // then rebuilds r.Body so the upstream still receives the body in full (the
 // buffered prefix followed by whatever remained unread). A read error fails open
-// (the body is restored and inspection skipped) — the WAF must never drop a
-// request because its body couldn't be buffered.
-func (in *Instance) inspectBody(tx types.Transaction, r *http.Request) *types.Interruption {
+// (the body is restored and body inspection skipped) — the WAF must never drop a
+// request because its body couldn't be buffered. The returned interruption is
+// WriteRequestBody's own, e.g. the body limit reached under a rejecting action.
+func (in *Instance) feedBody(tx types.Transaction, r *http.Request) *types.Interruption {
 	limit := in.opts.RequestBodyLimit
 	var buf bytes.Buffer
 	_, err := io.CopyN(&buf, r.Body, int64(limit))
@@ -224,12 +237,7 @@ func (in *Instance) inspectBody(tx types.Transaction, r *http.Request) *types.In
 		return nil
 	}
 
-	it, _, werr := tx.WriteRequestBody(buf.Bytes())
-	if werr == nil && it != nil {
-		r.Body = newBodyReadCloser(buf.Bytes(), r.Body)
-		return it
-	}
-	it, _ = tx.ProcessRequestBody()
+	it, _, _ := tx.WriteRequestBody(buf.Bytes())
 	r.Body = newBodyReadCloser(buf.Bytes(), r.Body)
 	return it
 }

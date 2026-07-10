@@ -281,7 +281,8 @@ func main() {
 	// Optional edge Coraza (SecLang/CRS early-drop layer; parapet stays
 	// authoritative — defense-in-depth, no validated-proxy claim). Independent of
 	// the CEL WAF: either can run alone. RootFS is the embedded OWASP CRS so a
-	// ruleset can `Include @owasp_crs`.
+	// ruleset can `Include @crs-setup.conf.example` + `Include @owasp_crs/*.conf`
+	// (the bare forms don't resolve — Include globs only on '*').
 	var ecoraza *edge.EdgeCoraza
 	if corazaEnabled {
 		ecoraza = edge.NewEdgeCoraza(coreruleset.FS, int(envInt64("EDGE_CORAZA_REQUEST_BODY_LIMIT", 0)))

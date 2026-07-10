@@ -34,7 +34,9 @@ const corazaLabelKey = "parapet.moonrhythm.io/coraza"
 type CorazaConfig struct {
 	Enabled bool
 	// RootFS resolves Include directives — wire the embedded OWASP CRS here so a
-	// ruleset can `Include @owasp_crs`. nil disables bundled-ruleset includes.
+	// ruleset can `Include @crs-setup.conf.example` + `Include @owasp_crs/*.conf`
+	// (the bare `@crs-setup` / `@owasp_crs` forms do not resolve — Include globs
+	// only on '*'). nil disables bundled-ruleset includes.
 	RootFS fs.FS
 	// RequestBodyLimit caps request-body inspection in bytes. <= 0 (the default)
 	// inspects only the URI and headers — no body is buffered. Set from
@@ -53,7 +55,7 @@ func (ctrl *Controller) InitCoraza() {
 	if !ctrl.CorazaConfig.Enabled {
 		return
 	}
-	ctrl.globalCoraza = ctrl.newCoraza(roleGlobal)
+	ctrl.globalCoraza = ctrl.newCoraza(roleGlobal, "")
 	empty := map[string]*corazawaf.Instance{}
 	ctrl.corazaZones.Store(&empty)
 	ctrl.corazaZoneFingerprints = map[string]string{}
@@ -83,22 +85,24 @@ func (ctrl *Controller) LookupCorazaZone(key string) *corazawaf.Instance {
 }
 
 // newCoraza builds a Coraza instance with the configured tunables and wires
-// match events to metrics + logging. scope ("global"/"zone") is the metric
-// label.
-func (ctrl *Controller) newCoraza(scope string) *corazawaf.Instance {
+// match events to metrics + logging. scope ("global"/"zone") and zone (the zone
+// registry key <namespace>/<name>; "" for global) are the metric labels — zone
+// is what makes a match attributable, since Coraza rule ids (CRS ids) are
+// shared by every zone.
+func (ctrl *Controller) newCoraza(scope, zone string) *corazawaf.Instance {
 	return corazawaf.New(corazawaf.Options{
 		RootFS:           ctrl.CorazaConfig.RootFS,
 		RequestBodyLimit: ctrl.CorazaConfig.RequestBodyLimit,
 		ClientIP:         ctrl.CorazaConfig.ClientIP,
 		Observe:          observe.CorazaEval(scope),
 		OnMatch: func(ev corazawaf.MatchEvent) {
-			metric.CorazaMatch(ev.RuleID, ev.Severity, scope)
+			metric.CorazaMatch(ev.RuleID, ev.Severity, scope, zone)
 			lvl := slog.LevelDebug
 			if ev.Disruptive {
 				lvl = slog.LevelInfo
 			}
 			slog.Log(context.Background(), lvl, "coraza match",
-				"scope", scope, "rule", ev.RuleID, "severity", ev.Severity,
+				"scope", scope, "zone", zone, "rule", ev.RuleID, "severity", ev.Severity,
 				"disruptive", ev.Disruptive, "ip", ev.ClientIP, "uri", ev.URI,
 				"message", ev.Message)
 		},
@@ -219,7 +223,7 @@ func (ctrl *Controller) reloadCorazaDebounced() {
 			continue
 		}
 		if !reused {
-			c = ctrl.newCoraza(roleZone)
+			c = ctrl.newCoraza(roleZone, key)
 		}
 		if err := c.SetDirectives(docs...); err != nil {
 			slog.Error("coraza: invalid zone ruleset, keeping previous", "zone", key, "error", err)

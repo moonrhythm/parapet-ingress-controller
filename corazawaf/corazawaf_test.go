@@ -124,8 +124,29 @@ func TestBodyNotInspectedWhenLimitZero(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("payload=evil"))
 	in.ServeHandler(echo).ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code, "body rules don't run when inspection is off")
+	assert.Equal(t, http.StatusOK, rec.Code, "phase 2 still runs but sees no body bytes when inspection is off")
 	assert.Equal(t, "payload=evil", got, "untouched body reaches upstream")
+}
+
+func TestPhase2RunsWithoutBody(t *testing.T) {
+	// A phase-2 rule over the query args must fire for a bodyless GET even with
+	// request-body inspection off — most CRS detections and the CRS
+	// anomaly-blocking evaluation rule (949110) are phase 2, so phase 2 always
+	// runs (URI/args/headers; body bytes only feed it when a limit opts in).
+	const blockOnArgsPhase2 = `
+SecRuleEngine On
+SecRule ARGS "@contains evil" "id:1005,phase:2,deny,status:403,msg:'blocked args'"
+`
+	in := New(Options{}) // RequestBodyLimit 0 -> no body buffered
+	require.NoError(t, in.SetDirectives(blockOnArgsPhase2))
+
+	rec := httptest.NewRecorder()
+	in.ServeHandler(okHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?q=evil", nil))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "phase-2 rules must evaluate for bodyless requests")
+
+	rec = httptest.NewRecorder()
+	in.ServeHandler(okHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?q=safe", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestObserveCalled(t *testing.T) {

@@ -287,7 +287,7 @@ invariants:
 | `WAF_ENABLED` | `false` | Master switch for the WAF |
 | `RATELIMIT_ENABLED` | `false` | Master switch for ConfigMap-driven rate limiting (global + zone sets; see [RATELIMIT.md](RATELIMIT.md)) |
 | `CORAZA_ENABLED` | `false` | Master switch for the Coraza (OWASP CRS / SecLang) firewall (global + zone rulesets; see [CORAZA.md](CORAZA.md)). Global is active iff a global ConfigMap exists; each zone iff its ConfigMap exists |
-| `CORAZA_REQUEST_BODY_LIMIT` | `0` | Bytes of request body Coraza inspects (`0` = URI + headers only; no body buffered). When set, up to this many bytes feed Coraza and the body is rebuilt so the upstream still receives it in full. Response-body inspection is never enabled |
+| `CORAZA_REQUEST_BODY_LIMIT` | `0` | Bytes of request body fed to Coraza's phase 2 (`0` = no body buffered; phase 2 still always evaluates, over URI/args/headers only). When set, up to this many bytes feed Coraza and the body is rebuilt so the upstream still receives it in full. Response-body inspection is never enabled |
 | `WAF_FAIL_MODE` | `open` | `open` (skip on rule error) / `closed` (500) |
 | `WAF_EVAL_TIMEOUT` | `5ms` | Per-request ruleset deadline |
 | `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | Path to an IPLocate ip-to-country `.mmdb` (flat `country_code` schema); sets `request.country` and serves rate-limit `country` keys (Go: loaded when `WAF_ENABLED` **or** `RATELIMIT_ENABLED`). Defaults to the baked-in DB; `""` disables. A missing file at the default path is a quiet no-op (`request.country` `""`); a missing explicit path is an error |
@@ -319,7 +319,7 @@ Prometheus, served on `:9187`.
 | `parapet_waf_matches{rule_id,action,scope}` | note: **no** `_total` suffix |
 | `parapet_waf_skips{scope}` | requests that bypassed WAF evaluation via `WAF_VALIDATED_PROXY` (already validated at the edge); `scope` = `global\|zone`, no `_total` suffix |
 | `parapet_waf_eval_duration_seconds{outcome,scope}` | histogram of per-request rule-eval latency; `outcome` = `pass\|allow\|block\|error`, fired once per evaluated request — the pass path `parapet_waf_matches` can't see |
-| `parapet_coraza_matches{rule_id,severity,scope}` | Coraza (OWASP CRS / SecLang) rule matches; `scope` = `global\|zone`, no `_total` suffix |
+| `parapet_coraza_matches{rule_id,severity,scope,zone}` | Coraza (OWASP CRS / SecLang) rule matches; `scope` = `global\|zone`, `zone` = zone registry key `<ns>/<name>` (`""` for global; rule ids are shared CRS ids, so `zone` attributes a match), no `_total` suffix |
 | `parapet_coraza_eval_duration_seconds{outcome,scope}` | histogram of per-request Coraza request-phase eval latency; `outcome` = `pass\|block` |
 | `parapet_ratelimit_total{name,result}` | `result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names |
 | `parapet_ws_tunnels{result}` | WebSocket-over-h2 extended-CONNECT handshakes at the core; `result` = `tunneled\|refused\|upstream_error\|bad_protocol`, no `_total` suffix (see [WEBSOCKET.md](WEBSOCKET.md)) |
