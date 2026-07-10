@@ -193,6 +193,80 @@ func (t *wsTunnel) serve(w http.ResponseWriter, r *http.Request) (handled bool) 
 	return true
 }
 
+// serveH2Inbound tunnels an h2-inbound WebSocket (a client's own RFC 8441
+// extended CONNECT, already normalized to GET+Upgrade with the live stream parked
+// in the context) to the core over extended CONNECT. Unlike serve there is no
+// client key, no 101, and no hijack: the parked stream is the request body
+// directly (x/net streams it as the client→core DATA frames) and the client is
+// answered with a 200 on its own h2 stream, which is natively full-duplex.
+//
+// It returns true when it owns the outcome (session spliced, refusal relayed) and
+// false ONLY before any byte reaches the client (not-supported / pre-commit
+// failure), so the caller falls back to the h1-upgrade bridge — never to
+// ReverseProxy, which cannot serve WebSocket on an h2 stream. On a false return it
+// counts nothing; the bridge records the terminal outcome (one event per request).
+func (t *wsTunnel) serveH2Inbound(w http.ResponseWriter, r *http.Request, stream io.ReadCloser) (handled bool) {
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	// The parked stream IS the request body — no pipe (x/net reads it directly).
+	creq := t.translate(ctx, r, stream)
+
+	timer := time.AfterFunc(wsHandshakeTimeout, cancel)
+	resp, err := t.tr.RoundTrip(creq)
+	timer.Stop()
+	if err != nil {
+		// ONLY the not-supported error may fall back to the bridge: it is provably
+		// pre-flight (x/net checks the peer's SETTINGS before writing anything, so no
+		// body goroutine ever started and the parked stream is pristine). Any other
+		// failure may have already streamed client frames from the parked stream as
+		// DATA frames — a bridge replay would lose them, and a stale x/net body
+		// reader could race the bridge for later frames — so it is a 502, never a
+		// fallback. (The h1-inbound serve can fall back more broadly because its
+		// request body is a pipe that holds nothing until the 101 commits.)
+		if strings.Contains(err.Error(), errExtendedConnectNotSupported) {
+			wsFallbackWarn.Do(func() {
+				slog.Warn("edge: core does not advertise WS-over-h2 (extended CONNECT); falling back to HTTP/1.1 — verify GODEBUG=http2xconnect=1 on the core", "error", err)
+			})
+			return false
+		}
+		slog.Warn("edge: ws h2-inbound tunnel handshake failed", "addr", t.addr, "error", err)
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		stream.Close()
+		observe.WSUpstream("h2", "error")
+		return true
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		// The core refused the handshake (WAF block / auth / app 4xx). Relay it as a
+		// normal response on the client's h2 stream (works fine — no hijack needed).
+		copyHeader(w.Header(), resp.Header)
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		resp.Body.Close()
+		stream.Close()
+		observe.WSUpstream("h2", "ok")
+		return true
+	}
+
+	// Accepted. Answer 200 on the client's h2 stream and splice.
+	copyWSResponseHeader(w.Header(), resp.Header)
+	w.WriteHeader(http.StatusOK)
+	rc := http.NewResponseController(w)
+	flush := func() { _ = rc.Flush() }
+	flush() // commit the 200 before any frames
+	observe.WSUpstream("h2", "ok")
+
+	// Splice core→client here; the client→core direction is x/net streaming the
+	// request body (the parked stream). Closing both endpoints on return unblocks
+	// that reader so the request completes when the session ends.
+	_ = wsh2.Copy(w, resp.Body, flush)
+	stream.Close()
+	resp.Body.Close()
+	cancel()
+	return true
+}
+
 // translate builds the extended-CONNECT clone of r on ctx, leaving r untouched so
 // the caller can still fall back with the original. body is the client→core pipe.
 // Per RFC 8441 the h2 handshake carries no Sec-WebSocket-Key/Accept, and
@@ -296,6 +370,21 @@ func isHopHeader(k string) bool {
 func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
 		if isHopHeader(k) {
+			continue
+		}
+		for _, v := range vv {
+			dst.Add(k, v)
+		}
+	}
+}
+
+// copyWSResponseHeader copies the accepted-handshake response headers onto the
+// client's h2 stream, minus the hop-by-hop headers and the Sec-WebSocket-Accept
+// proof (meaningless on the h2 side — the client's own extended CONNECT carried
+// no key, and the core/bridge's accept refers to a different hop).
+func copyWSResponseHeader(dst, src http.Header) {
+	for k, vv := range src {
+		if isHopHeader(k) || http.CanonicalHeaderKey(k) == "Sec-Websocket-Accept" {
 			continue
 		}
 		for _, v := range vv {

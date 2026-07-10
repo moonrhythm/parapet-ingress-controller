@@ -2,8 +2,9 @@
 
 Status: **all three phases implemented** (core acceptance, edge tunnel —
 default on, `EDGE_UPSTREAM_WS_H2` opt-out — and core→pod extended CONNECT —
-default on, `UPSTREAM_WS_H2C` kill switch). SPEC.md / EDGE.md carry the
-contract rows.
+default on, `UPSTREAM_WS_H2C` kill switch), **plus edge public acceptance**:
+the edge's own `:443` listener accepts WS-over-h2 from clients (browsers) and
+relays it stream-to-stream. SPEC.md / EDGE.md carry the contract rows.
 
 ## Problem
 
@@ -29,9 +30,12 @@ on the **internal hops only** — client→edge and (by default) core→pod stay
 plain HTTP/1.1 WebSocket.
 
 ```
-client ──(h1 WS: GET + Upgrade)──▶ edge ──(h2/h2c extended CONNECT)──▶ core ──(h1 WS)──▶ pod
-                                                                        └─(phase 3, opt-in: h2c extended CONNECT when the pod advertises it)
+client ──(h1 WS, or h2 extended CONNECT)──▶ edge ──(h2/h2c extended CONNECT)──▶ core ──(h1 WS)──▶ pod
+                                                                                  └─(phase 3: h2c extended CONNECT when the pod advertises it)
 ```
+
+Every hop degrades to HTTP/1.1 independently, so any mix of old/new
+components keeps working.
 
 ## Protocol background (verified against Go 1.26.5 / x/net v0.56.0)
 
@@ -331,14 +335,40 @@ Following existing naming (`parapet_waf_matches`, `parapet_ratelimit_total`):
   normalization path, so this is a feature (direct clients gain WS-over-h2),
   not a hazard.
 
-## Scope and non-goals
+## Edge public acceptance: WS-over-h2 from clients
 
-- **No WS-over-h2 on the edge's public listener.** The edge does not set the
-  `GODEBUG`; browsers keep opening h1 WebSocket connections to the edge. The
-  client→edge side has no tuple-exhaustion problem (many client IPs), and Go
-  offers no per-server opt-in — flipping it process-wide on the edge is all
-  risk, no need. Revisit if/when Go exposes structured opt-in
-  (`HTTP2Config` has no field for it as of Go 1.26).
+The edge's own `:443` (ALPN h2) accepts extended CONNECT from browsers
+(`Dockerfile.edge` bakes `GODEBUG=http2xconnect=1`; startup warning when a
+pod-spec `GODEBUG` clobbers it — h1 WebSocket is unaffected either way).
+There is no partial rollout inside one process: once the image ships, browsers
+WILL negotiate WS-over-h2, so the whole edge chain handles it unconditionally.
+
+- **Normalization is shared with the core** (`wsh2.NormalizeHandler`, mounted
+  first in the edge's `m` chain): the handshake is rewritten to the h1-upgrade
+  shape with the stream detached, so edge WAF/Coraza/rate limits/cache treat
+  h1 and h2 WebSocket handshakes identically, and client-supplied claim
+  headers still hit `StripWAFClaim` as usual.
+- **h2-inbound serving is tunnel-then-bridge, never ReverseProxy** (an h2
+  response stream has no `Hijacker`): the h2 tunnel relays stream-to-stream
+  (parked stream as the extended-CONNECT body, 200 answered on the client's
+  own stream); the **h1-upgrade bridge** (`edge/wsbridge.go`, the reverse of
+  the core's pod dial — generates the key, validates the core's accept, keeps
+  the WAF claim) is constructed unconditionally so h2-inbound WebSocket works
+  even with `EDGE_UPSTREAM_WS_H2` or `EDGE_UPSTREAM_HTTP2` off, or against a
+  core that doesn't advertise extended CONNECT.
+- **Fallback policy is strict**: only the provably pre-flight not-supported
+  error falls back from tunnel to bridge (no body goroutine ever started —
+  the parked stream is pristine). Any other tunnel failure may already have
+  streamed client frames as DATA frames, so it is a 502 — a bridge replay
+  would silently lose frames, and a stale x/net body reader could race the
+  bridge for later ones. (The h1-inbound path can fall back more broadly
+  because its request body is a pipe that holds nothing until the 101.)
+- Accounting stays one-event-per-request on `parapet_edge_ws_upstream`:
+  tunnel outcome `{h2,ok}`; not-supported→bridge `{http1,fallback}` (still
+  the "core lost its GODEBUG" alarm); bridge-direct `{http1,ok}`; terminal
+  failures `{…,error}`.
+
+## Scope and non-goals
 - **No QUIC / HTTP/3** — separate concern, separate document if ever.
 - **No WS frame inspection** — the tunnel is byte-transparent after the
   handshake, exactly like today's h1 splice.
@@ -349,13 +379,18 @@ Following existing naming (`parapet_waf_matches`, `parapet_ratelimit_total`):
 
 ```
 wsh2/                       # shared, pure, edge-importable (like corazawaf/):
-                            #   IsExtendedConnect/Normalize (+ stream detach via ctx),
-                            #   Sec-WebSocket-Key/Accept synth+check, splice loop
+                            #   IsExtendedConnect/Normalize/NormalizeHandler (+ stream
+                            #   detach via ctx), Sec-WebSocket-Key/Accept synth+check,
+                            #   splice loop
 proxy/wstunnel.go           # core: tunnel path for ctx-flagged requests (phase 1)
 cmd/parapet-ingress-controller/wsnormalize.go  # normalize middleware (mounted first in main.go's m chain)
 cmd/parapet-ingress-controller/main.go   # middleware mount + GODEBUG startup check
-Dockerfile                  # ENV GODEBUG=http2xconnect=1
+Dockerfile                  # ENV GODEBUG=http2xconnect=1 (controller)
+Dockerfile.edge             # ENV GODEBUG=http2xconnect=1 (edge public acceptance)
 edge/wstunnel.go            # edge: translate + dedicated tunnel transports (phase 2)
+                            #   + serveH2Inbound (h2-inbound stream-to-stream relay)
+edge/wsbridge.go            # edge: h1-upgrade bridge to the core (unconditional
+                            #   fallback for h2-inbound WebSocket)
 metric/ws.go                # core counters/gauge
 metric/observe/ws.go        # edge counter (leaf package — edge binaries stay off metric)
 proxy/wsh2c.go              # phase 3: pod-side extended CONNECT (dedicated h2c transport,

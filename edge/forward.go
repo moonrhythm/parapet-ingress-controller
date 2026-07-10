@@ -14,6 +14,8 @@ import (
 
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/upstream"
+
+	"github.com/moonrhythm/parapet-ingress-controller/wsh2"
 )
 
 // Forwarder is the terminal middleware that forwards a request to the in-cluster
@@ -31,8 +33,9 @@ import (
 // IP flows through. X-Forwarded-Country / X-Forwarded-ASN are set by
 // forwardGeoHeaders.
 type Forwarder struct {
-	rp *httputil.ReverseProxy
-	ws *wsTunnel // non-nil when EDGE_UPSTREAM_WS_H2 is on AND the upstream hop is h2
+	rp     *httputil.ReverseProxy
+	ws     *wsTunnel // non-nil when EDGE_UPSTREAM_WS_H2 is on AND the upstream hop is h2
+	bridge *wsBridge // always non-nil: the h1-upgrade fallback for h2-inbound WebSocket
 }
 
 // defaultMaxIdleConnsPerHost mirrors parapet's upstream.defaultMaxIdleConns (32):
@@ -166,7 +169,11 @@ func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, tuning Forw
 		},
 	}
 
-	f := &Forwarder{rp: rp}
+	// The bridge is constructed unconditionally: an h2-inbound WebSocket (a client
+	// speaking WS-over-h2 to the edge's public listener) can never fall back to
+	// ReverseProxy, so it always needs the h1-upgrade path to the core — even when
+	// the h2 tunnel is off.
+	f := &Forwarder{rp: rp, bridge: newWSBridge(addr, useTLS, sni, getClientCert)}
 	if wsH2 && enableHTTP2 {
 		f.ws = newWSTunnel(addr, scheme, useTLS, sni, getClientCert)
 	}
@@ -279,10 +286,25 @@ func (t *h2TLSTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 // is ignored (the request is forwarded upstream).
 func (f *Forwarder) ServeHandler(_ http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if f.ws != nil && isWebSocketUpgrade(r) {
-			// serve returns false only before any byte reaches the client, so the
-			// fallback re-serves the original request on the h1 upgrade path.
-			if f.ws.serve(w, r) {
+		if isWebSocketUpgrade(r) {
+			if stream, ok := wsh2.TunnelStream(r.Context()); ok {
+				// h2-inbound WebSocket (client WS-over-h2, normalized): the response
+				// writer has no Hijacker, so ReverseProxy can't serve it. Try the h2
+				// tunnel first (if enabled), then the h1-upgrade bridge — never
+				// ReverseProxy. serveH2Inbound returns false ONLY on a not-supported
+				// core (provably pre-flight, parked stream pristine); any later
+				// tunnel failure it owns as a 502, so the bridge never replays a
+				// partially-consumed stream.
+				if f.ws != nil && f.ws.serveH2Inbound(w, r, stream) {
+					return
+				}
+				f.bridge.serve(w, r, stream, f.ws != nil)
+				return
+			}
+			// h1-inbound WebSocket: serve returns false only before any byte reaches
+			// the client, so the fallback re-serves the original request on the h1
+			// ReverseProxy upgrade path.
+			if f.ws != nil && f.ws.serve(w, r) {
 				return
 			}
 		}
