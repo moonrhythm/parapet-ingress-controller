@@ -38,11 +38,11 @@ import (
 	"github.com/moonrhythm/parapet"
 )
 
-// MatchEvent is one matched rule, delivered to Options.OnMatch for metrics and
-// logging. It carries only what types.MatchedRule exposes: the error callback is
-// installed at WAF-build time and cannot see the *http.Request, so request
-// context (host, method) is not available here — scope is supplied by the caller
-// when it builds the OnMatch closure.
+// MatchEvent is one logged rule match, delivered to Options.OnMatch for metrics
+// and logging. It carries only what types.MatchedRule exposes: the error
+// callback is installed at WAF-build time and cannot see the *http.Request, so
+// request context (host, method) is not available here — scope is supplied by
+// the caller when it builds the OnMatch closure.
 type MatchEvent struct {
 	RuleID     int
 	Severity   string
@@ -74,10 +74,19 @@ type Options struct {
 	// back to the RemoteAddr host.
 	ClientIP func(*http.Request) string
 
-	// OnMatch, when set, is called once per matched rule after the request phases
-	// run — wire it to metrics and logging (the caller adds the scope label). It
-	// reads tx.MatchedRules() rather than Coraza's error callback, so it fires for
-	// every match regardless of whether the rule engaged logging.
+	// OnMatch, when set, is called once per matched rule that engages logging —
+	// wire it to metrics and logging (the caller adds the scope/zone labels). It
+	// is Coraza's error callback (ModSecurity error-log semantics): a rule's log
+	// flag is raised only by the `log` action or a `SecDefaultAction` that
+	// includes `log` (the CRS setup does), never by default, and `nolog` clears
+	// it. That keeps the CRS's administrative matches (initialization SecActions,
+	// paranoia-level flow rules, scoring bookkeeping — all nolog, ~63 on every
+	// clean request through the full CRS) out of the hot path and the metrics,
+	// while every detection and the anomaly-blocking rule 949110 engage logging
+	// and surface in enforce and detect mode alike. tx.MatchedRules() cannot make
+	// this distinction: types.MatchedRule does not expose the log flag, and
+	// Disruptive() folds the admin rules' `pass` action into "disruptive" under
+	// SecRuleEngine On (and everything into non-disruptive under DetectionOnly).
 	OnMatch func(MatchEvent)
 
 	// Observe, when set, is called once per evaluated request with the
@@ -125,9 +134,14 @@ func (in *Instance) SetDirectives(docs ...string) error {
 			WithRequestBodyInMemoryLimit(in.opts.RequestBodyLimit)
 	}
 	// Response-body access is intentionally never enabled (see package doc).
-	// Matches are surfaced from tx.MatchedRules() per request (see ServeHandler),
-	// not via WithErrorCallback — the callback fires only for rules that engaged
-	// logging, which would silently miss matches for metrics.
+	// Matches surface through Coraza's error callback — logged rules only, which
+	// is the operator-meaningful set (see Options.OnMatch for why
+	// tx.MatchedRules() can't substitute).
+	if onMatch := in.opts.OnMatch; onMatch != nil {
+		cfg = cfg.WithErrorCallback(func(mr types.MatchedRule) {
+			onMatch(toEvent(mr))
+		})
+	}
 	cfg = cfg.WithDirectives(directives)
 
 	w, err := coraza.NewWAF(cfg)
@@ -167,11 +181,6 @@ func (in *Instance) ServeHandler(next http.Handler) http.Handler {
 		it := in.inspectRequest(tx, r)
 		if in.opts.Observe != nil {
 			in.opts.Observe(time.Since(start), it != nil)
-		}
-		if onMatch := in.opts.OnMatch; onMatch != nil {
-			for _, mr := range tx.MatchedRules() {
-				onMatch(toEvent(mr))
-			}
 		}
 		if it != nil {
 			handleInterruption(w, r, it)

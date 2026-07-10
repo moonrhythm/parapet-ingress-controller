@@ -50,8 +50,8 @@ func CorazaEval(scope string) func(d time.Duration, blocked bool) {
 	}
 }
 
-// CorazaMatch returns the corazawaf.Options.OnMatch hook counting every rule
-// that fires as parapet_coraza_matches{rule_id,severity,scope,zone} — the
+// CorazaMatch returns the corazawaf.Options.OnMatch hook counting every logged
+// rule match as parapet_coraza_matches{rule_id,severity,scope,zone} — the
 // Coraza analogue of WAFMatch and the same metric (same label set) the
 // controller's metric.CorazaMatch records. scope is "global"/"zone"; zone is
 // the zone-registry key ("" for scope=global) that makes CRS matches

@@ -62,9 +62,20 @@ streaming, the edge response cache, and HTTP/2. CRS rules that target the
 response simply don't fire.
 
 A block writes the rule's status (default `403`; a `redirect` action with a
-target becomes an HTTP redirect). Matches are surfaced from
-`tx.MatchedRules()` (not Coraza's error callback, which only fires for rules that
-engaged logging), so metrics count every match.
+target becomes an HTTP redirect). Matches are surfaced through Coraza's **error
+callback**, which fires only for rules that engage logging (ModSecurity
+error-log semantics): the CRS's `nolog` administrative rules — initialization
+SecActions, paranoia-level flow rules, scoring bookkeeping, ~63 matches on
+every clean request — never reach metrics or logs, while every CRS detection
+and the anomaly-blocking rule 949110 carry `log` and are counted in enforce
+**and** detect (`SecRuleEngine DetectionOnly`) mode. (`tx.MatchedRules()` can't
+make this distinction: it doesn't expose the log flag, and its `Disruptive()`
+folds the admin rules' `pass` into "disruptive" under `SecRuleEngine On`.) An
+operator rule that should be counted must engage logging: coraza raises the
+flag only via the `log` action or a `SecDefaultAction` that includes `log` (as
+the CRS setup does) — a rule with neither still enforces, but its match isn't
+counted (the block itself still shows in
+`parapet_coraza_eval_duration_seconds{outcome="block"}`).
 
 ## Hot reload
 
@@ -105,7 +116,7 @@ edge stays off the `metric` package.
 
 | Metric | Notes |
 |---|---|
-| `parapet_coraza_matches{rule_id,severity,scope,zone}` | one per matched rule; `scope` = `global\|zone`; `zone` = the zone registry key `<ns>/<name>` (`""` for global) — rule ids are shared CRS ids, so `zone` is what attributes a match to a tenant |
+| `parapet_coraza_matches{rule_id,severity,scope,zone}` | one per matched rule that engages logging (`nolog` administrative CRS matches are excluded); `scope` = `global\|zone`; `zone` = the zone registry key `<ns>/<name>` (`""` for global) — rule ids are shared CRS ids, so `zone` is what attributes a match to a tenant |
 | `parapet_coraza_eval_duration_seconds{outcome,scope}` | per-request request-phase eval latency; `outcome` = `pass\|block` |
 
 ## Example
@@ -150,7 +161,7 @@ metadata:
 data:
   rules.conf: |
     SecRuleEngine On
-    SecRule REQUEST_URI "@contains /wp-admin" "id:100001,phase:1,deny,status:403,msg:'blocked wp-admin'"
+    SecRule REQUEST_URI "@contains /wp-admin" "id:100001,phase:1,deny,status:403,log,msg:'blocked wp-admin'"
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
