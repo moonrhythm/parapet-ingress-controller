@@ -1,0 +1,21 @@
+# Headless Service over the controller pods so the deploys-app collector can
+# discover replicas with a plain DNS A-record lookup and poll each pod's WAF
+# match-event cursor endpoint (:9188, SPEC-waf-events). clusterIP: None — never
+# a LoadBalancer/Ingress: the endpoint serves sampled client IPs for every
+# zone in the location and is bearer-token-gated (WAF_EVENTS_TOKEN) precisely
+# because tenant workloads share the cluster network. Only needed when the
+# WAF match-event sampling is enabled; harmless otherwise.
+apiVersion: v1
+kind: Service
+metadata:
+  name: parapet-ingress-controller-pods
+  namespace: parapet-ingress-controller
+  labels:
+    app: parapet-ingress-controller
+spec:
+  clusterIP: None
+  selector:
+    app: parapet-ingress-controller
+  ports:
+  - name: waf-events
+    port: 9188

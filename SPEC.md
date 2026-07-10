@@ -169,6 +169,25 @@ loaded, the resolved value is also sent **upstream** as the `X-Forwarded-ASN` he
 (overwriting any client-supplied value); when ASN lookup is off the header is left
 untouched.
 
+**Match events (sampled, opt-in)**: when `WAF_EVENTS_TOKEN` is set (and
+`WAF_EVENTS_LISTEN` isn't emptied), each pod keeps a bounded in-memory ring of
+sampled **zone**-scope match events — ULID id, time, zone key, rule id, action,
+status, client IP, country/ASN (GeoIP), method, host, path (no query string;
+host/path truncated to 255/200 bytes) — and serves them to an in-cluster
+poller on `GET /waf/events?after=<seq>&boot=<bootID>&max=<n≤1000>` (`:9188`,
+`Authorization: Bearer` required, 401 otherwise; a `boot` mismatch or an
+`after` older than the ring's tail replays from the oldest retained event).
+Sampling caps per (zone, pod), per minute: 10 per rule (`block` events exempt)
+and 60 per zone; the cap check runs before the ULID mint and GeoIP enrichment,
+so a saturated flood pays only a mutex hit and two map reads per match.
+Capped/evicted events count `parapet_waf_event_drops{zone}`. Global-scope
+matches are never captured, rule semantics are untouched (the
+[`conformance/`](conformance/) corpus is unaffected), and the token is
+**required** because tenant workloads share the cluster network and the ring
+holds client IPs — never expose `:9188` through a LoadBalancer or Ingress. See
+`wafevent/` and `deploy/03-service-pods.yaml` (headless Service for poller
+discovery).
+
 ## Rate limiting (ConfigMap-driven)
 
 Full design in **[RATELIMIT.md](RATELIMIT.md)**. Summary: gated by
@@ -300,6 +319,8 @@ invariants:
 | `PROFILER` / `PROFILER_NAME` | `false` | Cloud Profiler |
 | `WAF_COST_LIMIT` / `WAF_INSPECT_BODY` / `WAF_DISABLE_MACROS` | — | CEL cost cap / body-bytes inspection / macro kill-switch (see WAF.md) |
 | `WAF_VALIDATED_PROXY` | `""` | Skip the core's global+zone WAF for requests whose peer already ran the same rules (the edge proxy). Comma list of `edge-mtls` (peer client cert chains to the live edge CA; requires `EDGE_TRUST_CP_ENDPOINT`) and/or CIDRs/named groups (immediate TCP peer). Also requires the per-request `X-Parapet-Waf` claim the edge stamps after evaluating. `true` is refused; a bad spec is fatal at startup. Skips counted in `parapet_waf_skips{scope}`. See [EDGE.md](EDGE.md#skipping-the-core-re-run-waf_validated_proxy-opt-in) |
+| `WAF_EVENTS_LISTEN` | `:9188` | Listen address of the sampled WAF match-event cursor endpoint (`GET /waf/events`); `""` disables. Cluster-local only — never expose via LoadBalancer/Ingress (events carry client IPs). Starts only when `WAF_EVENTS_TOKEN` is also set and `WAF_ENABLED` is on |
+| `WAF_EVENTS_TOKEN` | `""` (off) | Bearer token **required** to serve the match-event endpoint; unset leaves the whole feature inert (no ring, no listener). Supply from a Secret shared with the in-cluster poller (the deploys-app collector) |
 | `UPSTREAM_AUTO_H2C` | `false` | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The verdict (h2c or HTTP/1.1-only) is cached per-Service with a TTL and re-probed on expiry; concurrent probes for a cold/expired upstream are single-flighted so they can't stampede failed connections. If a Service loses h2c support mid-TTL, a cached-positive request recovers instead of failing until expiry — a bodyless request re-verdicts and replays over HTTP/1.1, a bodied one drops the verdict so the next bodyless request re-probes. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
 | `UPSTREAM_AUTO_H2C_TTL` | `10m` | How long a cached auto-h2c verdict is trusted before the upstream is re-probed (only when `UPSTREAM_AUTO_H2C` is on) |
 | `UPSTREAM_WS_H2C` | `true` | Kill switch for core→pod WebSocket-over-h2c: a tunneled WebSocket to an h2c-capable pod (explicit `appProtocol: h2c`, or a fresh auto-h2c positive verdict) is attempted as an RFC 8441 extended CONNECT stream instead of an h1 upgrade dial; a pod that doesn't advertise the capability falls back to h1 (negative verdict cached 10m per Service). See [WEBSOCKET.md](WEBSOCKET.md) |
@@ -322,6 +343,7 @@ Prometheus, served on `:9187`.
 | `parapet_waf_matches{rule_id,action,scope}` | note: **no** `_total` suffix |
 | `parapet_waf_skips{scope}` | requests that bypassed WAF evaluation via `WAF_VALIDATED_PROXY` (already validated at the edge); `scope` = `global\|zone`, no `_total` suffix |
 | `parapet_waf_eval_duration_seconds{outcome,scope}` | histogram of per-request rule-eval latency; `outcome` = `pass\|allow\|block\|error`, fired once per evaluated request — the pass path `parapet_waf_matches` can't see |
+| `parapet_waf_event_drops{zone}` | sampled WAF match events dropped by the per-(zone, rule) / per-zone sampling caps or by ring overwrite — nonzero means sampling is active; `zone` = `<ns>/<name>`, no `_total` suffix |
 | `parapet_coraza_matches{rule_id,severity,scope}` | Coraza (OWASP CRS / SecLang) rule matches; `scope` = `global\|zone`, no `_total` suffix |
 | `parapet_coraza_eval_duration_seconds{outcome,scope}` | histogram of per-request Coraza request-phase eval latency; `outcome` = `pass\|block` |
 | `parapet_ratelimit_total{name,result}` | `result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names |

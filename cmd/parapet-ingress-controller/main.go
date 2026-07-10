@@ -32,6 +32,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 	"github.com/moonrhythm/parapet-ingress-controller/trust"
 	"github.com/moonrhythm/parapet-ingress-controller/trustcidr"
+	"github.com/moonrhythm/parapet-ingress-controller/wafevent"
 )
 
 var version = "HEAD"
@@ -289,6 +290,32 @@ func main() {
 			slog.Warn("WAF_VALIDATED_PROXY set but WAF_ENABLED is off — nothing to skip", "spec", spec)
 		} else if pred != nil {
 			slog.Info("waf: skipping evaluation for traffic already validated at a trusted hop", "validated_proxy", spec)
+		}
+	}
+
+	// WAF match events (SPEC-waf-events): a per-pod sampled ring of zone match
+	// samples served to the in-cluster collector on a bearer-authed cursor
+	// endpoint. Off unless WAF_EVENTS_TOKEN is set — the token is REQUIRED, not
+	// optional like the :9187 counters' trust stance, because tenant workloads
+	// share the flat cluster network and the ring holds client IPs + paths for
+	// every zone in the location. Inert until polled.
+	if wafConfig.Enabled {
+		wafEventsListen := config.StringDefault("WAF_EVENTS_LISTEN", ":9188")
+		wafEventsToken := config.String("WAF_EVENTS_TOKEN")
+		if wafEventsListen != "" && wafEventsToken != "" {
+			buf := wafevent.NewBuffer(wafevent.DefaultCapacity)
+			buf.OnDrop = metric.WAFEventDrop
+			wafConfig.Events = buf
+			slog.Info("waf: match-event sampling enabled", "listen", wafEventsListen)
+			go func() {
+				srv := &http.Server{
+					Addr:              wafEventsListen,
+					Handler:           wafevent.NewHandler(buf, wafEventsToken),
+					ReadHeaderTimeout: 10 * time.Second,
+				}
+				err := srv.ListenAndServe()
+				slog.Error("waf: events endpoint stopped", "error", err)
+			}()
 		}
 	}
 

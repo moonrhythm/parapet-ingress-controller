@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/moonrhythm/parapet/pkg/waf"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
 	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
+	"github.com/moonrhythm/parapet-ingress-controller/wafevent"
 )
 
 func newWAFController() *Controller {
@@ -453,4 +455,68 @@ func TestReloadWAF_DisabledIsNoop(t *testing.T) {
 	assert.NotPanics(t, ctrl.reloadWAFDebounced)
 	assert.Nil(t, ctrl.GlobalWAF())
 	assert.Nil(t, ctrl.LookupZone("any/zone"))
+}
+
+func TestZoneWAFMatchFeedsEventRing(t *testing.T) {
+	t.Parallel()
+
+	// The OnMatch → event-ring wiring: a zone instance's matches land in the
+	// buffer tagged with the zone registry key, enriched with country/ASN (the
+	// "XX" unresolved sentinel normalized to ""), path stripped of its query
+	// string; global-scope matches never do.
+	ctrl := New("", proxy.New())
+	ctrl.PodNamespace = "ctrl-ns"
+	buf := wafevent.NewBuffer(16)
+	ctrl.WAFConfig = WAFConfig{
+		Enabled: true,
+		Events:  buf,
+		Country: func(*http.Request) string { return "XX" },
+		ASN:     func(*http.Request) int64 { return 4750 },
+	}
+	ctrl.InitWAF()
+
+	r := httptest.NewRequest(http.MethodPost, "http://example.com/wp-login.php?log=admin", nil)
+	match := waf.MatchEvent{
+		Request:  r,
+		RuleID:   "1234-abcd",
+		Action:   waf.ActionBlock,
+		Status:   403,
+		ClientIP: "203.0.113.9",
+	}
+
+	ctrl.newZoneWAF("cust1/acme").OnMatch(match)
+
+	events, _, _ := buf.Read("", 0, 10)
+	require.Len(t, events, 1)
+	e := events[0]
+	assert.Equal(t, "cust1/acme", e.Zone)
+	assert.Equal(t, "1234-abcd", e.RuleID)
+	assert.Equal(t, "block", e.Action)
+	assert.Equal(t, 403, e.Status)
+	assert.Equal(t, "203.0.113.9", e.ClientIP)
+	assert.Equal(t, http.MethodPost, e.Method)
+	assert.Equal(t, "example.com", e.Host)
+	assert.Equal(t, "/wp-login.php", e.Path, "URL.Path only — the query string is never captured")
+	assert.Equal(t, "", e.Country, `the resolver's "XX" unresolved sentinel becomes ""`)
+	assert.Equal(t, int64(4750), e.ASN)
+	assert.Len(t, e.ID, 26)
+
+	// Global-scope matches are platform data, never buffered.
+	ctrl.globalWAF.OnMatch(match)
+	events, _, _ = buf.Read("", 0, 10)
+	assert.Len(t, events, 1)
+}
+
+func TestZoneWAFMatchNoEventBuffer(t *testing.T) {
+	t.Parallel()
+
+	// WAFConfig.Events nil (WAF_EVENTS_TOKEN unset): matches must not capture
+	// anything and must not panic — the feature is entirely inert.
+	ctrl := newWAFController()
+	r := httptest.NewRequest(http.MethodGet, "http://example.com/x", nil)
+	assert.NotPanics(t, func() {
+		ctrl.newZoneWAF("cust1/acme").OnMatch(waf.MatchEvent{
+			Request: r, RuleID: "r1", Action: waf.ActionLog, Status: 403, ClientIP: "203.0.113.9",
+		})
+	})
 }
