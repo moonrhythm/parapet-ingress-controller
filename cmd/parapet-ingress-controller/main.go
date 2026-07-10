@@ -309,12 +309,24 @@ func main() {
 			slog.Info("waf: match-event sampling enabled", "listen", wafEventsListen)
 			go func() {
 				srv := &http.Server{
-					Addr:              wafEventsListen,
-					Handler:           wafevent.NewHandler(buf, wafEventsToken),
+					Addr:    wafEventsListen,
+					Handler: wafevent.NewHandler(buf, wafEventsToken),
+					// Tenant pods can reach this port (auth is token-gated but
+					// TCP isn't), so bound every connection phase — otherwise
+					// unauthenticated keep-alive connections could pin
+					// goroutines/FDs in the data-plane process indefinitely.
 					ReadHeaderTimeout: 10 * time.Second,
+					ReadTimeout:       10 * time.Second,
+					WriteTimeout:      30 * time.Second,
+					IdleTimeout:       60 * time.Second,
 				}
+				// The operator opted in (token set), so a failed listen is
+				// misconfig, not a degraded mode: the ring would mint + enrich
+				// forever with no possible consumer while only the collector's
+				// poll failures notice. Fail fast, like WAF_VALIDATED_PROXY.
 				err := srv.ListenAndServe()
-				slog.Error("waf: events endpoint stopped", "error", err)
+				slog.Error("waf: events endpoint failed", "error", err)
+				os.Exit(1)
 			}()
 		}
 	}

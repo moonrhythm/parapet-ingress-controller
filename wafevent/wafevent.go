@@ -140,19 +140,24 @@ func (b *Buffer) Append(e Event, enrich func(*Event)) (stored bool) {
 	e.ID = mintULID(now)
 	e.Host = truncate(e.Host, maxHostBytes)
 	e.Path = truncate(e.Path, maxPathBytes)
-	if enrich != nil {
-		enrich(&e)
-	}
 
+	var slot *Event
 	if b.size == len(b.buf) {
 		// Full: evict the oldest to admit the new event (newest wins — the
 		// poller lagging a whole ring means it will replay from here anyway).
 		b.drop(b.buf[b.start].Zone)
-		b.buf[b.start] = e
+		slot = &b.buf[b.start]
 		b.start = (b.start + 1) % len(b.buf)
 	} else {
-		b.buf[(b.start+b.size)%len(b.buf)] = e
+		slot = &b.buf[(b.start+b.size)%len(b.buf)]
 		b.size++
+	}
+	*slot = e
+	// Enrich the ring slot, not e: handing &e to an unknown func would move
+	// the whole Event copy to the heap on every call — including the
+	// cap-rejected flood path the doc comment promises is allocation-free.
+	if enrich != nil {
+		enrich(slot)
 	}
 	return true
 }

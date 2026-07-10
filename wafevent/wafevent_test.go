@@ -1,7 +1,10 @@
 package wafevent
 
 import (
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -228,6 +231,98 @@ func TestReadEmptyBuffer(t *testing.T) {
 	assert.Empty(t, events)
 	assert.Zero(t, next)
 	assert.Len(t, boot, 16, "boot id is 16 hex chars")
+}
+
+// TestConcurrentAppendRead hammers the one mutex-guarded structure every
+// request goroutine shares: writers append across zones while a reader pages
+// with the echoed cursor, and the small ring forces constant eviction under
+// the reads. The clock advances one minute per Append so the sampling caps
+// never bind and every append is admitted. Meaningful under -race.
+func TestConcurrentAppendRead(t *testing.T) {
+	t.Parallel()
+
+	const capacity = 64
+	b := NewBuffer(capacity)
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	var tick atomic.Int64 // b.now runs under b.mu, but writers race to lock it
+	b.now = func() time.Time { return base.Add(time.Duration(tick.Add(1)) * time.Minute) }
+	var drops atomic.Int64
+	b.OnDrop = func(string) { drops.Add(1) }
+
+	const writers = 8
+	const perWriter = 500
+
+	var wg sync.WaitGroup
+	var stored atomic.Int64
+	for w := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			zone := "ns/z" + strconv.Itoa(w)
+			for i := range perWriter {
+				if b.Append(blockEvent(zone, "r"+strconv.Itoa(i%3)), nil) {
+					stored.Add(1)
+				}
+			}
+		}()
+	}
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+
+	// Within one boot the reader must never see a duplicate or rewound seq —
+	// even when eviction outruns it and Read replays from the ring tail — and
+	// every ULID must be unique.
+	seenIDs := make(map[string]bool)
+	var last uint64
+	boot, after := "", uint64(0)
+	for drained := false; !drained; {
+		events, next, gotBoot := b.Read(boot, after, 50)
+		boot, after = gotBoot, next
+		for _, e := range events {
+			require.Greater(t, e.Seq, last, "seqs must be strictly increasing across pages")
+			last = e.Seq
+			require.False(t, seenIDs[e.ID], "duplicate ULID %s", e.ID)
+			seenIDs[e.ID] = true
+			require.Len(t, e.ID, 26)
+			require.NotEmpty(t, e.Zone)
+		}
+		if len(events) == 0 {
+			select {
+			case <-done:
+				drained = true
+			default:
+			}
+		}
+	}
+
+	// Every append landed in a fresh minute, so all were admitted; the only
+	// drops are ring evictions, one per admit past capacity.
+	require.EqualValues(t, writers*perWriter, stored.Load())
+	assert.EqualValues(t, stored.Load(), b.seq, "seq counts exactly the admitted events")
+	assert.EqualValues(t, stored.Load(), after, "reader drained through the final seq")
+	assert.EqualValues(t, stored.Load()-capacity, drops.Load())
+}
+
+// TestSaturatedAppendDoesNotAllocate pins the Buffer doc claim for the
+// flood path: past the caps, Append is mutex + map reads — no ULID mint, no
+// enrich call, no allocation. The enrich closure captures a local (like the
+// controller's OnMatch capturing the request) to prove the call site itself
+// stays allocation-free too. AllocsPerRun reads the global malloc counter,
+// so this test must not run in parallel with others.
+func TestSaturatedAppendDoesNotAllocate(t *testing.T) {
+	b, _ := newTestBuffer(128)
+	for range maxPerZonePerMinute {
+		require.True(t, b.Append(blockEvent("ns/z", "r1"), nil))
+	}
+
+	e := blockEvent("ns/z", "r1")
+	allocs := testing.AllocsPerRun(100, func() {
+		ip := e.ClientIP
+		if b.Append(e, func(out *Event) { out.ClientIP = ip }) {
+			t.Fatal("zone must stay saturated")
+		}
+	})
+	assert.Zero(t, allocs)
 }
 
 func TestULIDEncoding(t *testing.T) {
