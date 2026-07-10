@@ -62,6 +62,12 @@ FROM gcr.io/distroless/static-debian12
 COPY --from=build /workspace/edge-proxy /usr/local/bin/edge-proxy
 COPY --from=geoip /geoip/ /geoip/
 
+# RFC 8441 extended CONNECT (WebSocket over HTTP/2) acceptance on the public :443
+# listener is gated by this real GODEBUG env var, read by the h2 server at startup.
+# A user-supplied GODEBUG in the pod spec REPLACES this value entirely — main.go
+# warns at startup when http2xconnect=1 is missing. See WEBSOCKET.md.
+ENV GODEBUG=http2xconnect=1
+
 # HTTPS (public TLS terminated here), plaintext HTTP, and the metrics endpoint.
 EXPOSE 443 80 9187
 

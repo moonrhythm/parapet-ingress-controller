@@ -988,7 +988,16 @@ into the controller Dockerfile) to advertise acceptance; against a core that
 doesn't, the attempt fails **pre-flight with zero wire cost** and the edge falls
 back to the HTTP/1.1 path per request — rollout is order-free. Fallbacks count in
 `parapet_edge_ws_upstream{protocol="http1",result="fallback"}` (a persistent
-non-zero rate is the "core lost its GODEBUG" alarm). Full design in
+non-zero rate is the "core lost its GODEBUG" alarm).
+
+The edge's **public `:443` also accepts WS-over-h2 from clients** (browsers):
+`Dockerfile.edge` bakes `GODEBUG=http2xconnect=1`, the shared normalize
+middleware rewrites the extended CONNECT into the h1-upgrade shape first in the
+chain (so edge WAF/rate-limit/cache treat h1 and h2 handshakes identically),
+and the Forwarder relays it stream-to-stream — h2 tunnel first, then an
+unconditional h1-upgrade bridge (`edge/wsbridge.go`), never ReverseProxy (an h2
+response stream has no `Hijacker`) — so h2-inbound WebSocket works even with
+the tunnel disabled or against an old core. Full design in
 [WEBSOCKET.md](WEBSOCKET.md).
 
 **Opt-out (`EDGE_UPSTREAM_HTTP2=false`)** forces HTTP/1.1 on both hops. Use it for

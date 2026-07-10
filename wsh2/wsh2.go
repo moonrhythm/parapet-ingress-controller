@@ -73,6 +73,30 @@ func Normalize(r *http.Request) *http.Request {
 	return r.WithContext(ctx)
 }
 
+// NormalizeHandler wraps next with the extended-CONNECT normalization used by
+// both the core and the edge. A non-extended-CONNECT request passes through
+// paying only the two header checks in IsExtendedConnect; a `:protocol` other
+// than `websocket` is refused with 501 (we bridge WebSocket only), invoking
+// onBadProtocol first when non-nil (the core counts a metric there; the edge
+// passes nil). It is framework-neutral so each binary wraps it in its own
+// middleware type — keeping wsh2 free of a parapet import.
+func NormalizeHandler(next http.Handler, onBadProtocol func()) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !IsExtendedConnect(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Header.Get(":protocol") != "websocket" {
+			if onBadProtocol != nil {
+				onBadProtocol()
+			}
+			http.Error(w, "Not Implemented", http.StatusNotImplemented)
+			return
+		}
+		next.ServeHTTP(w, Normalize(r))
+	})
+}
+
 type tunnelCtxKey struct{}
 
 // MarkTunnel returns a child context carrying the parked client→server stream of

@@ -19,18 +19,6 @@ import (
 // code that never fires.
 func wsNormalize() parapet.Middleware {
 	return parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !wsh2.IsExtendedConnect(r) {
-				h.ServeHTTP(w, r)
-				return
-			}
-			if r.Header.Get(":protocol") != "websocket" {
-				// We bridge WebSocket only.
-				metric.WSTunnel("bad_protocol")
-				http.Error(w, "Not Implemented", http.StatusNotImplemented)
-				return
-			}
-			h.ServeHTTP(w, wsh2.Normalize(r))
-		})
+		return wsh2.NormalizeHandler(h, func() { metric.WSTunnel("bad_protocol") })
 	})
 }

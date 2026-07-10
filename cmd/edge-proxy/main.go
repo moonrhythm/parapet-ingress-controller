@@ -34,6 +34,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/edge"
 	"github.com/moonrhythm/parapet-ingress-controller/geoip"
 	"github.com/moonrhythm/parapet-ingress-controller/trustcidr"
+	"github.com/moonrhythm/parapet-ingress-controller/wsh2"
 )
 
 var version = "HEAD"
@@ -87,6 +88,17 @@ func main() {
 	if upstreamWSH2 && !upstreamHTTP2 {
 		slog.Warn("EDGE_UPSTREAM_WS_H2 is ignored when EDGE_UPSTREAM_HTTP2=false; WebSocket rides HTTP/1.1")
 		upstreamWSH2 = false
+	}
+
+	// Accepting WS-over-HTTP/2 (RFC 8441 extended CONNECT) from clients on the
+	// public :443 listener is gated by the real GODEBUG env var, read by the h2
+	// server in package init(). A user-supplied GODEBUG in the pod spec REPLACES the
+	// Dockerfile's ENV entirely, silently disabling it — so verify at startup and
+	// warn (not fatal: h1 WebSocket is unaffected; clients just can't use WS-over-h2).
+	if !strings.Contains(os.Getenv("GODEBUG"), "http2xconnect=1") {
+		slog.Warn("WS-over-HTTP/2 acceptance DISABLED: GODEBUG does not contain http2xconnect=1 " +
+			"(a user-supplied GODEBUG replaces the image default); the edge will not accept " +
+			"WS-over-h2 from clients; h1 WebSocket unaffected")
 	}
 	// Per-host connection ceiling to the core (mirrors the controller's
 	// TR_MAX_CONNS_PER_HOST / TR_MAX_IDLE_CONNS_PER_HOST). MAX_CONNS_PER_HOST=0
@@ -453,6 +465,15 @@ func main() {
 	// before forwarding; the cache wraps the forwarder; X-Forwarded-Country/-ASN
 	// are set just before forwarding.
 	m := parapet.Middlewares{}
+	// First in the chain, unconditional: rewrite a client's RFC 8441 extended
+	// CONNECT WebSocket handshake into the h1-upgrade shape the rest of the chain
+	// (WAF/Coraza/rate limits/cache/forward) understands, so h1 and h2 WebSocket
+	// handshakes behave identically. A non-extended-CONNECT request pays only the
+	// two header checks. onBadProtocol is nil — a non-websocket :protocol is a
+	// malformed-client 501, not an edge metric.
+	m.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		return wsh2.NormalizeHandler(h, nil)
+	}))
 	m.Use(health)
 	m.Use(host.StripPort())
 	m.Use(host.ToLower())
