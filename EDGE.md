@@ -730,6 +730,23 @@ cacheable object locally removes a full origin round trip. Enabled with
   metric is only registered when the response cache is enabled
   (`EDGE_CACHE_BACKEND` is set).
 
+  **Capacity / volume gauges** (registered with the cache via
+  `edge.RegisterCacheStorageMetrics`, scrape-sampled — not on the request path):
+
+  | Metric | Labels | When | Meaning |
+  |---|---|---|---|
+  | `parapet_cache_storage_bytes` | `edge_id` | cache on | Body bytes currently held by the LRU (eviction weight = `Meta.Size`; excludes `.meta` sidecar / shard-dir overhead) |
+  | `parapet_cache_storage_max_bytes` | `edge_id` | cache on | `EDGE_CACHE_MAX_SIZE` body-byte cap (fill ratio = `storage_bytes / storage_max_bytes`) |
+  | `parapet_cache_disk_size_bytes` | `edge_id` | disk backend | Total size of the filesystem that holds `EDGE_CACHE_DIR` (`statfs` blocks × bsize) |
+  | `parapet_cache_disk_available_bytes` | `edge_id` | disk backend | Free bytes available to an unprivileged process on that filesystem (`statfs` Bavail) |
+
+  Disk series are **omitted** (not zeroed) on the memory backend and when
+  `statfs` fails, so a zero never looks like "the volume is full". Storage size
+  is **O(1)** via parapet `DiskStorage`/`MemoryStorage` `Size()`/`MaxSize()`
+  (LRU body-byte weight vs configured cap — never a `Storage.Range` walk on
+  scrape). Disk `Size()` may lag the on-disk footprint while the backend's
+  background startup scan re-admits surviving entries (same lag as the byte cap).
+
 ### On-disk layout (sharded by hash)
 
 ```
