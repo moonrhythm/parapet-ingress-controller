@@ -334,6 +334,7 @@ func main() {
 		maxFile := envBytes("EDGE_CACHE_MAX_FILE_SIZE", 8<<20)
 		var storage cache.Storage
 		var purgeStatePath string // disk backend persists purge state alongside the cache
+		var cacheDir string       // non-empty only for the disk backend (storage + disk metrics)
 		switch envOr("EDGE_CACHE_BACKEND", "disk") {
 		case "memory":
 			storage = cache.NewMemory(maxSize)
@@ -345,11 +346,15 @@ func main() {
 				slog.Error("edge cache: cannot init cache dir; caching disabled", "dir", dir, "error", err)
 			} else {
 				storage = d
+				cacheDir = dir
 				purgeStatePath = filepath.Join(dir, "purge-state")
 				slog.Info("edge cache enabled (disk-backed)", "dir", dir, "max_size", maxSize, "max_file", maxFile)
 			}
 		}
 		if storage != nil {
+			// Capacity + volume gauges (parapet_cache_storage_* / parapet_cache_disk_*).
+			// Registered only when the cache is live so a cache-off edge stays quiet.
+			edge.RegisterCacheStorageMetrics(storage, maxSize, cacheDir)
 			// Cache outcomes: the host-bounded parapet_cache_total{host,result,
 			// edge_id} counter (host collapsed to "other" off the knownHost oracle,
 			// the same serve-all bounding parapet_requests uses, so the per-project
