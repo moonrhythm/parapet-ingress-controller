@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux || darwin
 
 package edge
 
@@ -7,6 +7,9 @@ import "golang.org/x/sys/unix"
 // diskUsage reports the total and unprivileged-available bytes of the filesystem
 // that holds path (typically EDGE_CACHE_DIR). ok is false when statfs fails
 // (missing mount, permission denied, etc.).
+//
+// Build-constrained to linux|darwin: those are the platforms the edge ships/runs
+// on, and unix.Statfs is not available on every "unix" GOOS (e.g. netbsd).
 func diskUsage(path string) (size, available uint64, ok bool) {
 	var st unix.Statfs_t
 	if err := unix.Statfs(path, &st); err != nil {
