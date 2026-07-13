@@ -25,6 +25,15 @@ const defaultH2CProbeTTL = 10 * time.Minute
 // HTTP/1.1 instead of piling on a herd of failed h2c connections. A fresh cached
 // outcome takes the fast path and never reaches the single-flight guard, so
 // steady h2c traffic is fully multiplexed and never serialized.
+//
+// The fast path self-heals a stale h2c-positive verdict: if a Service drops h2c
+// support mid-TTL (e.g. rolled back to an HTTP/1.1-only build) a cached request
+// gets a non-dial error, which retryMiddleware would NOT retry. A bodyless
+// request re-verdicts and replays over HTTP/1.1 exactly like the cold probe; a
+// bodied request can't replay (the h2c client may have consumed the body as DATA
+// frames), so it drops the entry so the next bodyless request re-probes and
+// returns the error. Dial errors leave the cache alone — a down pod is not an
+// h2c signal.
 type autoH2CTransport struct {
 	h2c      http.RoundTripper // *h2cTransport — HTTP/2 cleartext
 	fallback http.RoundTripper // *http.Transport — HTTP/1.1
@@ -68,10 +77,32 @@ func (t *autoH2CTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	// Fast path: a fresh cached outcome routes directly — no probing, no
 	// single-flight, so steady h2c traffic is fully multiplexed. A cached-h2c upstream
 	// serves bodied requests (POST/gRPC) over h2c here; the body restriction below only
-	// gates probing, not steady-state routing.
+	// gates probing, not steady-state routing. A stale h2c-positive verdict (Service
+	// dropped h2c mid-TTL) self-heals instead of hard-502ing until expiry.
 	if e, ok := t.lookup(key); ok {
 		if e.h2c {
-			return t.h2c.RoundTrip(r)
+			resp, err := t.h2c.RoundTrip(r)
+			if err == nil {
+				return resp, nil
+			}
+			// A dial error means the pod is down, not that it lost h2c: propagate it
+			// untouched and leave the cache alone so retryMiddleware can handle it.
+			if isDialError(err) {
+				return nil, err
+			}
+			// The Service lost h2c support mid-TTL. A bodyless request re-verdicts and
+			// replays over HTTP/1.1 (safe); a bodied request can't replay — the h2c client
+			// may already have streamed the body as DATA frames — so drop the entry to
+			// force a re-probe on the next bodyless request and return the error.
+			if hasBody(r) {
+				t.entries.Delete(key)
+				return nil, err
+			}
+			t.store(key, false)
+			slog.Info("proxy: upstream does not support h2c, falling back to http/1.1",
+				"upstream", key, "error", err)
+			r.URL.Scheme = "http"
+			return t.fallback.RoundTrip(r)
 		}
 		return t.fallback.RoundTrip(r)
 	}
