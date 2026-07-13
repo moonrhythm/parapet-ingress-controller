@@ -102,10 +102,22 @@ func RedirectRules(ctx Context) {
 				"ingress", ctx.ingressID(), "error", err)
 			return
 		}
+		owned := ownedHosts(ctx.Ingress)
 		for srcHost, targetURL := range obj {
 			if srcHost == "" || targetURL == "" || strings.HasPrefix(srcHost, "/") {
 				continue
 			}
+
+			// The Routes map is shared across every ingress in the watch
+			// namespace(s) — last writer wins. Only let an ingress register a
+			// source host it actually owns via spec.rules / spec.tls, otherwise
+			// one tenant could hijack another tenant's host.
+			if h, _, _ := strings.Cut(srcHost, "/"); !hostOwned(owned, strings.ToLower(h)) {
+				slog.Error("plugin/RedirectRules: source host not owned by ingress, skipping",
+					"ingress", ctx.ingressID(), "src", srcHost)
+				continue
+			}
+
 			if !strings.HasSuffix(srcHost, "/") {
 				srcHost += "/"
 			}
@@ -114,10 +126,15 @@ func RedirectRules(ctx Context) {
 			status := http.StatusFound
 			if ts := strings.SplitN(targetURL, ",", 2); len(ts) == 2 {
 				st, _ := strconv.Atoi(ts[0])
-				if st > 0 {
-					status = st
-					target = ts[1]
+				// Only a 3xx status makes sense for a redirect; reject anything
+				// else outright rather than mistaking "<status>,<url>" for a URL.
+				if st < 300 || st > 399 {
+					slog.Error("plugin/RedirectRules: redirect status must be 3xx, skipping",
+						"ingress", ctx.ingressID(), "src", srcHost, "status", ts[0])
+					continue
 				}
+				status = st
+				target = ts[1]
 			}
 
 			ctx.Routes[srcHost] = ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -126,6 +143,40 @@ func RedirectRules(ctx Context) {
 			slog.Debug("plugin/RedirectRules: registered", "src", srcHost, "target", target, "status", status)
 		}
 	}
+}
+
+// ownedHosts returns the lowercased set of hosts the ingress declares via
+// spec.rules[].host and spec.tls[].hosts.
+func ownedHosts(ing *networking.Ingress) map[string]struct{} {
+	owned := make(map[string]struct{})
+	for _, rule := range ing.Spec.Rules {
+		if rule.Host != "" {
+			owned[strings.ToLower(rule.Host)] = struct{}{}
+		}
+	}
+	for _, t := range ing.Spec.TLS {
+		for _, h := range t.Hosts {
+			if h != "" {
+				owned[strings.ToLower(h)] = struct{}{}
+			}
+		}
+	}
+	return owned
+}
+
+// hostOwned reports whether host is in the owned set, either by exact match or
+// by an owned single-label wildcard (owned "*.example.com" matches source
+// "foo.example.com") — the same one-label semantics as cert/table.go's climb.
+func hostOwned(owned map[string]struct{}, host string) bool {
+	if _, ok := owned[host]; ok {
+		return true
+	}
+	if i := strings.IndexByte(host, '.'); i >= 0 {
+		if _, ok := owned["*"+host[i:]]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // RateLimit injects rate limit middleware
