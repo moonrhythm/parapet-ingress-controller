@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"time"
 
 	"github.com/moonrhythm/parapet-ingress-controller/proxy"
@@ -35,6 +37,13 @@ func retryMiddleware(h http.Handler) http.Handler {
 					// retry
 					return
 				}
+				// Anything reaching here isn't an expected retryable dial
+				// failure, so it's likely a programming error (e.g. nil
+				// deref) somewhere in the middleware chain. Log it so it's
+				// distinguishable from an ordinary upstream failure — the
+				// 502 stays the response since re-panicking would reset the
+				// client connection and complicate the retry loop.
+				slog.Error("retry: recovered panic", "error", e, "stack", string(debug.Stack()))
 				http.Error(w, "Bad Gateway", http.StatusBadGateway)
 			}
 			ok = true

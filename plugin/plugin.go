@@ -18,6 +18,7 @@ import (
 	"gopkg.in/yaml.v3"
 	networking "k8s.io/api/networking/v1"
 
+	"github.com/moonrhythm/parapet-ingress-controller/geoip"
 	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
@@ -290,8 +291,12 @@ func AllowRemote(ctx Context) {
 			return false
 		}
 
-		remoteHost, _, _ := net.SplitHostPort(r.RemoteAddr)
-		remoteIP := net.ParseIP(remoteHost)
+		// Match the parapet-resolved client IP (X-Real-Ip, trusted per
+		// TRUST_PROXY), not the immediate TCP peer: behind the edge or any
+		// trusted L7 hop, r.RemoteAddr is the hop's IP, so an allowlist keyed
+		// on it would never match. geoip.ClientIP mirrors WAF/rate-limit/geo
+		// precedence and falls back to RemoteAddr when no header is set.
+		remoteIP := geoip.ClientIP(r)
 		for _, allow := range allowList {
 			if allow.Contains(remoteIP) {
 				return false
