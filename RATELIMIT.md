@@ -26,6 +26,14 @@ This complements, not replaces, the existing limiters:
 | **Zone rate limits** | ConfigMap `…/ratelimit: zone` + `ratelimit-zone` annotation | request rate across a tenant's ingresses |
 | Annotation rate limits | `ratelimit-s/-m/-h` on one ingress | request rate per single ingress |
 
+The annotation limiters are **best-effort**: `plugin.RateLimit` builds a fresh
+strategy on every plugin run (every mux reload — any Ingress/Service/Secret
+change in the watch scope), so their counters silently reset on cluster churn,
+and they're per controller replica (no shared state). For durable,
+churn-resistant enforcement, use a rate-limit zone instead — `SetLimits`
+carries its `Limiter` (and therefore its counters) across reloads for
+unchanged limits.
+
 ## Limit schema (the contract)
 
 Each ConfigMap `data` value is one `limits:` document; multiple keys (and

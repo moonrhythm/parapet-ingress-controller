@@ -95,6 +95,30 @@ func TestCertStore_OnDemandFetchOnMiss(t *testing.T) {
 	assert.False(t, get(s, "denied.com"))
 }
 
+func TestCertStore_OnDemandFetchKeyNormalizesTrailingDotAndCase(t *testing.T) {
+	s := NewCertStore()
+	var got []string
+	s.SetOnDemand(func(sni string) {
+		got = append(got, sni)
+		if sni == "lazy.com" {
+			c, k := genCertPEM(t, "lazy.com")
+			s.Update(sni, c, k, "")
+		}
+	})
+	// RFC 6066 forbids a trailing dot, but non-compliant clients send one; the
+	// fetch key must match the lowercase, dot-trimmed form the control plane
+	// (and cert.Table.Get) normalize to, or every variant re-fetches/negative-
+	// caches as a distinct domain.
+	assert.True(t, get(s, "Lazy.Com."), "on-demand fetch normalizes SNI before fetching")
+	require.Len(t, got, 1)
+	assert.Equal(t, "lazy.com", got[0], "fetch key is lowercased and trailing-dot-trimmed")
+	// a subsequent lookup with a different case/dot variant is served from the
+	// already-populated store without another fetch.
+	assert.True(t, get(s, "lazy.com"))
+	assert.True(t, get(s, "LAZY.COM."))
+	assert.Len(t, got, 1)
+}
+
 func TestCertStore_OnDemandNegativeCacheSuppressesRepeat(t *testing.T) {
 	s := NewCertStore()
 	var calls int32

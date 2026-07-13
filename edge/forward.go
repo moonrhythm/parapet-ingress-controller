@@ -113,13 +113,10 @@ func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, tuning Forw
 		if getClientCert != nil {
 			tlsConfig.GetClientCertificate = getClientCert
 		}
-		// HTTPSTransport sets r.URL.Scheme = "https" and dials r.URL.Host with TLS,
-		// HTTP/1.1 only (net/http won't auto-enable h2 with a custom TLS config).
-		h1 := &upstream.HTTPSTransport{
-			TLSClientConfig: tlsConfig,
-			MaxConn:         tuning.MaxConnsPerHost,
-			MaxIdleConns:    tuning.idle(),
-		}
+		// h1 dials r.URL.Host (set to "https" by the Director) with TLS, HTTP/1.1
+		// only (net/http won't auto-enable h2 with a custom TLS config). It carries
+		// WebSocket/Upgrade requests and, when HTTP/2 is disabled, the whole hop.
+		h1 := h1TLSTransport(tlsConfig, tuning)
 		if enableHTTP2 {
 			tr = newH2TLSTransport(tlsConfig, tuning, h1)
 		} else {
@@ -130,13 +127,11 @@ func NewForwarder(addr string, useTLS, enableHTTP2 bool, sni string, tuning Forw
 		// H2CTransport sets r.URL.Scheme = "http" and downgrades Upgrade/WebSocket
 		// requests to HTTP/1.1. The multiplexed h2 path has no per-host conn cap;
 		// the ceiling applies to the HTTP/1.1 Upgrade fallback we wire up here.
-		tr = &upstream.H2CTransport{HTTPTransport: h2cFallbackTransport(tuning)}
+		tr = &upstream.H2CTransport{HTTPTransport: plaintextH1Transport(tuning)}
 	default:
-		// HTTPTransport sets r.URL.Scheme = "http" and speaks HTTP/1.1.
-		tr = &upstream.HTTPTransport{
-			MaxConn:      tuning.MaxConnsPerHost,
-			MaxIdleConns: tuning.idle(),
-		}
+		// Plaintext HTTP/1.1 to the core (scheme "http" set by the Director). Same
+		// transport shape as the h2c Upgrade fallback below.
+		tr = plaintextH1Transport(tuning)
 	}
 
 	scheme := "http"
@@ -241,7 +236,7 @@ func newH2TLSTransport(tlsConfig *tls.Config, tuning ForwarderTuning, h1 http.Ro
 		// MaxConnsPerHost caps total conns to the core (net/http enforces it for the h2
 		// and HTTP/1.1-fallback conns it manages); 0 leaves it unbounded.
 		h2: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			// Proxy left nil: fixed edge-to-core hop, must never ride an environment proxy.
 			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 			TLSClientConfig:       tlsConfig,
 			ForceAttemptHTTP2:     true,
@@ -256,18 +251,43 @@ func newH2TLSTransport(tlsConfig *tls.Config, tuning ForwarderTuning, h1 http.Ro
 	}
 }
 
-// h2cFallbackTransport builds the HTTP/1.1 transport that upstream.H2CTransport
-// uses for Upgrade/WebSocket requests (the multiplexed h2c path can't carry
-// them). It mirrors parapet's own default h2c fallback but threads the connection
-// ceiling through, so EDGE_UPSTREAM_MAX_CONNS_PER_HOST also bounds the plaintext
-// Upgrade path. A 0 ceiling leaves it unbounded, matching parapet's default.
-func h2cFallbackTransport(tuning ForwarderTuning) *http.Transport {
+// plaintextH1Transport builds the plaintext HTTP/1.1 transport to the core. It
+// serves two roles: the whole hop when EDGE_UPSTREAM_HTTP2=false, and the
+// Upgrade/WebSocket fallback that upstream.H2CTransport uses (the multiplexed h2c
+// path can't carry Upgrade requests). It mirrors parapet's upstream.HTTPTransport /
+// default h2c fallback but threads the connection ceiling through, so
+// EDGE_UPSTREAM_MAX_CONNS_PER_HOST also bounds the plaintext path. A 0 ceiling
+// leaves it unbounded, matching parapet's default. Unlike parapet's upstream
+// transports it leaves Proxy nil: fixed edge-to-core hop, must never ride an
+// environment proxy.
+func plaintextH1Transport(tuning ForwarderTuning) *http.Transport {
 	return &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		// Proxy left nil: fixed edge-to-core hop, must never ride an environment proxy.
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 		MaxConnsPerHost:       tuning.MaxConnsPerHost,
 		MaxIdleConnsPerHost:   tuning.idle(),
 		IdleConnTimeout:       10 * time.Minute,
+		ResponseHeaderTimeout: time.Minute,
+		DisableCompression:    true,
+	}
+}
+
+// h1TLSTransport builds the HTTP/1.1-over-TLS transport for the re-encrypt hop. It
+// carries WebSocket/Upgrade requests (an h2 connection rejects the Connection/Upgrade
+// headers) and, when EDGE_UPSTREAM_HTTP2=false, the entire re-encrypt hop. It mirrors
+// parapet's upstream.HTTPSTransport defaults and, like it, stays HTTP/1.1-only —
+// net/http won't auto-enable h2 with a custom TLSClientConfig + DialContext. Unlike
+// parapet's upstream transports it leaves Proxy nil: fixed edge-to-core hop, must
+// never ride an environment proxy.
+func h1TLSTransport(tlsConfig *tls.Config, tuning ForwarderTuning) *http.Transport {
+	return &http.Transport{
+		// Proxy left nil: fixed edge-to-core hop, must never ride an environment proxy.
+		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+		TLSClientConfig:       tlsConfig,
+		MaxConnsPerHost:       tuning.MaxConnsPerHost,
+		MaxIdleConnsPerHost:   tuning.idle(),
+		IdleConnTimeout:       10 * time.Minute,
+		TLSHandshakeTimeout:   5 * time.Second,
 		ResponseHeaderTimeout: time.Minute,
 		DisableCompression:    true,
 	}
