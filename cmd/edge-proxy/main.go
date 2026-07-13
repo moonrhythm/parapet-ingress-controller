@@ -64,11 +64,15 @@ func main() {
 	}
 	var caPEM []byte
 	if p := os.Getenv("EDGE_CP_CA"); p != "" {
-		if b, err := os.ReadFile(p); err == nil {
-			caPEM = b
-		} else {
-			slog.Warn("edge: cannot read EDGE_CP_CA; using system roots", "path", p, "error", err)
+		// An explicit CA pin must never fail open to system roots: this channel
+		// carries the bearer token and TLS private keys, so an unreadable file is
+		// fatal rather than a silent fall-back.
+		b, err := os.ReadFile(p)
+		if err != nil {
+			slog.Error("edge: cannot read EDGE_CP_CA", "path", p, "error", err)
+			os.Exit(1)
 		}
+		caPEM = b
 	}
 	upstreamAddr := envOr("EDGE_UPSTREAM_ADDR", "parapet:80")
 	upstreamTLS := envOr("EDGE_UPSTREAM_TLS", "false") == "true"

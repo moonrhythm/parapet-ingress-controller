@@ -38,8 +38,10 @@ type CpClient struct {
 }
 
 // NewCpClient builds a client for base (e.g. https://controlplane:8443). caPEM,
-// when non-empty, is added as a trusted root (for a private CA); an unparseable
-// CA is ignored (system roots are used). A bad/empty base is reported.
+// when non-empty, is added as a trusted root (for a private CA) — an explicit
+// pin, so a caPEM that yields zero certs is an error rather than a silent
+// fall-back to system roots (this connection carries the bearer token and TLS
+// private keys; it must never fail open). A bad/empty base is also reported.
 func NewCpClient(base, token string, caPEM []byte) (*CpClient, error) {
 	if _, err := url.Parse(base); err != nil {
 		return nil, fmt.Errorf("edge: invalid control-plane endpoint %q: %w", base, err)
@@ -48,9 +50,10 @@ func NewCpClient(base, token string, caPEM []byte) (*CpClient, error) {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
 	if len(caPEM) > 0 {
 		pool := x509.NewCertPool()
-		if pool.AppendCertsFromPEM(caPEM) {
-			tlsConfig.RootCAs = pool
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("edge: EDGE_CP_CA does not contain a valid PEM certificate")
 		}
+		tlsConfig.RootCAs = pool
 	}
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
