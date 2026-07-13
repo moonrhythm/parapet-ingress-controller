@@ -56,7 +56,7 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 | `redirect-https` | `"true"` | 301 HTTP→HTTPS (skips `/.well-known/acme-challenge`) |
 | `hsts` | `"preload"` / any | Strict-Transport-Security header |
 | `redirect` | YAML map `host: url` (or `host: "code,url"`) | Host-level redirect rules |
-| `ratelimit-s` / `-m` / `-h` | integer | Fixed-window requests per second / minute / hour |
+| `ratelimit-s` / `-m` / `-h` | integer | Fixed-window requests per second / minute / hour — best-effort: per controller replica (no shared state), and counters reset on every route reload (any Ingress/Service/Secret change in the watch scope) since the strategy is rebuilt from scratch each time. For durable enforcement whose counters survive reloads, use `ratelimit-zone` (see [RATELIMIT.md](RATELIMIT.md)) instead |
 | `body-limitrequest` | bytes (int64) | Max request body size (413 above) |
 | `upstream-protocol` | `http` / `https` | Force upstream scheme |
 | `upstream-host` | hostname | Override `Host` sent upstream |
