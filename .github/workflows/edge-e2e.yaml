@@ -30,6 +30,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.5'
+          # Self-hosted runner: local GOMODCACHE/GOCACHE beat the remote
+          # actions-cache restore (see go-test.yaml for the numbers).
+          cache: false
       - name: Install test deps (openssl, curl, python3, nc)
         run: |
           sudo apt-get update
