@@ -39,13 +39,16 @@ used as-is). The referenced port must still be declared in the Service's
 forwarded by default). A pod-backed route always wins over an ExternalName one
 for the same Service host (only briefly possible across a type change).
 
-**Retry is connection-only**: a dial failure — or a
-connection broken before any response — is retried up to 5× with backoff,
-marking the pod bad and round-robining to another. An upstream that *responds* —
-**including with 502/503** — is **never** retried; its response passes through to
-the client unchanged. A responding upstream has already received and processed
-the request, so retrying could duplicate side effects and amplify load on a
-failing backend. Non-idempotent requests (body already read) are never retried.
+**Retry is dial-only**: only a dial failure — no connection established, so the
+request never left this process — is retried up to 5× with backoff, marking the
+pod bad and round-robining to another. Once a connection is established, any
+failure — including a connection broken before response headers, or a request
+deadline hit while waiting for a response — is **never** retried, same as an
+upstream that *responds* (**including with 502/503**): its response passes
+through to the client unchanged. A connected-but-failed or responding upstream
+may already have received and processed the request, so retrying could
+duplicate side effects and amplify load on a failing backend. Non-idempotent
+requests (body already read) are never retried.
 
 ## Annotations
 
