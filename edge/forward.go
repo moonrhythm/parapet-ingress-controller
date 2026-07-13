@@ -241,7 +241,7 @@ func newH2TLSTransport(tlsConfig *tls.Config, tuning ForwarderTuning, h1 http.Ro
 		// MaxConnsPerHost caps total conns to the core (net/http enforces it for the h2
 		// and HTTP/1.1-fallback conns it manages); 0 leaves it unbounded.
 		h2: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
+			// Proxy left nil: fixed edge-to-core hop, must never ride an environment proxy.
 			DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 			TLSClientConfig:       tlsConfig,
 			ForceAttemptHTTP2:     true,
@@ -263,7 +263,7 @@ func newH2TLSTransport(tlsConfig *tls.Config, tuning ForwarderTuning, h1 http.Ro
 // Upgrade path. A 0 ceiling leaves it unbounded, matching parapet's default.
 func h2cFallbackTransport(tuning ForwarderTuning) *http.Transport {
 	return &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		// Proxy left nil: fixed edge-to-core hop, must never ride an environment proxy.
 		DialContext:           (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
 		MaxConnsPerHost:       tuning.MaxConnsPerHost,
 		MaxIdleConnsPerHost:   tuning.idle(),

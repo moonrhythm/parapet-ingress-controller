@@ -65,6 +65,29 @@ func TestForwarderTuning_AppliesToEveryTransport(t *testing.T) {
 	})
 }
 
+// The edge-to-core hop is a fixed cluster address, not an arbitrary external
+// endpoint — an inherited HTTP_PROXY/HTTPS_PROXY env var must never silently
+// divert it, unlike a client that legitimately talks to arbitrary destinations.
+func TestForwarder_NeverUsesEnvironmentProxy(t *testing.T) {
+	tuning := ForwarderTuning{}
+
+	t.Run("re-encrypt h2", func(t *testing.T) {
+		f := NewForwarder("core:443", true, true, "", tuning, nil, nil, false)
+		h2 := f.rp.Transport.(*h2TLSTransport).h2.(*http.Transport)
+		if h2.Proxy != nil {
+			t.Fatal("h2 transport Proxy must be nil, not ProxyFromEnvironment")
+		}
+	})
+
+	t.Run("plaintext h2c Upgrade fallback", func(t *testing.T) {
+		f := NewForwarder("core:80", false, true, "", tuning, nil, nil, false)
+		tr := f.rp.Transport.(*upstream.H2CTransport)
+		if tr.HTTPTransport.Proxy != nil {
+			t.Fatal("h2c fallback transport Proxy must be nil, not ProxyFromEnvironment")
+		}
+	})
+}
+
 // The zero value keeps the historical behavior: no connection ceiling, idle pool
 // defaulting to parapet's 32.
 func TestForwarderTuning_ZeroValueDefaults(t *testing.T) {
