@@ -76,6 +76,23 @@ func TestWSTunnel_TranslateCloneShape(t *testing.T) {
 	assert.Empty(t, r.Header.Get(":protocol"))
 }
 
+// A client-supplied Content-Length/Expect on the upgrade GET describes that h1
+// request, not the tunnel's live, lengthless stream — carrying either onto the
+// extended CONNECT would desync the core's h2 request framing.
+func TestWSTunnel_TranslateStripsContentLengthAndExpect(t *testing.T) {
+	tun := &wsTunnel{scheme: "https", addr: "core:443"}
+	r := newWSHandshake("/chat")
+	r.Header.Set("Content-Length", "42")
+	r.Header.Set("Expect", "100-continue")
+
+	pr, pw := io.Pipe()
+	defer pw.Close()
+	c := tun.translate(context.Background(), r, pr)
+
+	assert.Empty(t, c.Header.Get("Content-Length"), "Content-Length dropped (stream has no length)")
+	assert.Empty(t, c.Header.Get("Expect"), "Expect dropped (no body to negotiate)")
+}
+
 func TestWSTunnel_NotSupportedFallsBack(t *testing.T) {
 	rt := &stubRT{err: errors.New("net/http: extended connect not supported by peer")}
 	tun := &wsTunnel{tr: rt, scheme: "http", addr: "core:80"}

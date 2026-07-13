@@ -19,12 +19,12 @@ func TestForwarderTuning_AppliesToEveryTransport(t *testing.T) {
 
 	t.Run("plaintext HTTP/1.1", func(t *testing.T) {
 		f := NewForwarder("core:80", false, false, "", tuning, nil, nil, false)
-		tr := f.rp.Transport.(*upstream.HTTPTransport)
-		if tr.MaxConn != maxConns {
-			t.Fatalf("MaxConn = %d, want %d", tr.MaxConn, maxConns)
+		tr := f.rp.Transport.(*http.Transport)
+		if tr.MaxConnsPerHost != maxConns {
+			t.Fatalf("MaxConnsPerHost = %d, want %d", tr.MaxConnsPerHost, maxConns)
 		}
-		if tr.MaxIdleConns != maxIdle {
-			t.Fatalf("MaxIdleConns = %d, want %d", tr.MaxIdleConns, maxIdle)
+		if tr.MaxIdleConnsPerHost != maxIdle {
+			t.Fatalf("MaxIdleConnsPerHost = %d, want %d", tr.MaxIdleConnsPerHost, maxIdle)
 		}
 	})
 
@@ -53,14 +53,76 @@ func TestForwarderTuning_AppliesToEveryTransport(t *testing.T) {
 		}
 	})
 
+	t.Run("re-encrypt h2 Upgrade (h1) sub-path", func(t *testing.T) {
+		f := NewForwarder("core:443", true, true, "", tuning, nil, nil, false)
+		h1 := f.rp.Transport.(*h2TLSTransport).h1.(*http.Transport)
+		if h1.MaxConnsPerHost != maxConns {
+			t.Fatalf("h1 MaxConnsPerHost = %d, want %d", h1.MaxConnsPerHost, maxConns)
+		}
+		if h1.MaxIdleConnsPerHost != maxIdle {
+			t.Fatalf("h1 MaxIdleConnsPerHost = %d, want %d", h1.MaxIdleConnsPerHost, maxIdle)
+		}
+	})
+
 	t.Run("re-encrypt HTTP/1.1", func(t *testing.T) {
 		f := NewForwarder("core:443", true, false, "", tuning, nil, nil, false)
-		tr := f.rp.Transport.(*upstream.HTTPSTransport)
-		if tr.MaxConn != maxConns {
-			t.Fatalf("MaxConn = %d, want %d", tr.MaxConn, maxConns)
+		tr := f.rp.Transport.(*http.Transport)
+		if tr.MaxConnsPerHost != maxConns {
+			t.Fatalf("MaxConnsPerHost = %d, want %d", tr.MaxConnsPerHost, maxConns)
 		}
-		if tr.MaxIdleConns != maxIdle {
-			t.Fatalf("MaxIdleConns = %d, want %d", tr.MaxIdleConns, maxIdle)
+		if tr.MaxIdleConnsPerHost != maxIdle {
+			t.Fatalf("MaxIdleConnsPerHost = %d, want %d", tr.MaxIdleConnsPerHost, maxIdle)
+		}
+	})
+}
+
+// The edge-to-core hop is a fixed cluster address, not an arbitrary external
+// endpoint — an inherited HTTP_PROXY/HTTPS_PROXY env var must never silently
+// divert it, unlike a client that legitimately talks to arbitrary destinations.
+// Every transport NewForwarder can select for the hop must leave Proxy nil,
+// INCLUDING the h1/HTTPS sub-paths that WebSocket/Upgrade requests ride under the
+// re-encrypt-mTLS scenario the finding cites (parapet's upstream.HTTPS/HTTP
+// transports default Proxy to http.ProxyFromEnvironment, so they can't be used).
+func TestForwarder_NeverUsesEnvironmentProxy(t *testing.T) {
+	tuning := ForwarderTuning{}
+
+	t.Run("plaintext HTTP/1.1", func(t *testing.T) {
+		f := NewForwarder("core:80", false, false, "", tuning, nil, nil, false)
+		tr := f.rp.Transport.(*http.Transport)
+		if tr.Proxy != nil {
+			t.Fatal("plaintext HTTP/1.1 transport Proxy must be nil, not ProxyFromEnvironment")
+		}
+	})
+
+	t.Run("plaintext h2c Upgrade fallback", func(t *testing.T) {
+		f := NewForwarder("core:80", false, true, "", tuning, nil, nil, false)
+		tr := f.rp.Transport.(*upstream.H2CTransport)
+		if tr.HTTPTransport.Proxy != nil {
+			t.Fatal("h2c fallback transport Proxy must be nil, not ProxyFromEnvironment")
+		}
+	})
+
+	t.Run("re-encrypt h2", func(t *testing.T) {
+		f := NewForwarder("core:443", true, true, "", tuning, nil, nil, false)
+		h2 := f.rp.Transport.(*h2TLSTransport).h2.(*http.Transport)
+		if h2.Proxy != nil {
+			t.Fatal("h2 transport Proxy must be nil, not ProxyFromEnvironment")
+		}
+	})
+
+	t.Run("re-encrypt h2 Upgrade (h1) sub-path", func(t *testing.T) {
+		f := NewForwarder("core:443", true, true, "", tuning, nil, nil, false)
+		h1 := f.rp.Transport.(*h2TLSTransport).h1.(*http.Transport)
+		if h1.Proxy != nil {
+			t.Fatal("re-encrypt h1 (WebSocket/Upgrade) transport Proxy must be nil, not ProxyFromEnvironment")
+		}
+	})
+
+	t.Run("re-encrypt HTTP/1.1", func(t *testing.T) {
+		f := NewForwarder("core:443", true, false, "", tuning, nil, nil, false)
+		tr := f.rp.Transport.(*http.Transport)
+		if tr.Proxy != nil {
+			t.Fatal("re-encrypt HTTP/1.1 transport Proxy must be nil, not ProxyFromEnvironment")
 		}
 	})
 }
@@ -72,11 +134,11 @@ func TestForwarderTuning_ZeroValueDefaults(t *testing.T) {
 		t.Fatalf("zero idle() = %d, want %d", got, defaultMaxIdleConnsPerHost)
 	}
 	f := NewForwarder("core:80", false, false, "", ForwarderTuning{}, nil, nil, false)
-	tr := f.rp.Transport.(*upstream.HTTPTransport)
-	if tr.MaxConn != 0 {
-		t.Fatalf("MaxConn = %d, want 0 (unlimited)", tr.MaxConn)
+	tr := f.rp.Transport.(*http.Transport)
+	if tr.MaxConnsPerHost != 0 {
+		t.Fatalf("MaxConnsPerHost = %d, want 0 (unlimited)", tr.MaxConnsPerHost)
 	}
-	if tr.MaxIdleConns != defaultMaxIdleConnsPerHost {
-		t.Fatalf("MaxIdleConns = %d, want %d", tr.MaxIdleConns, defaultMaxIdleConnsPerHost)
+	if tr.MaxIdleConnsPerHost != defaultMaxIdleConnsPerHost {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want %d", tr.MaxIdleConnsPerHost, defaultMaxIdleConnsPerHost)
 	}
 }

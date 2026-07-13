@@ -1,8 +1,10 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -78,4 +80,28 @@ func TestRetryMiddleware(t *testing.T) {
 		assert.Equal(t, int32(1), calls.Load(), "non-retryable error served once")
 		assert.Equal(t, http.StatusBadGateway, w.Code)
 	})
+}
+
+// A non-retryable panic is a programming error (e.g. nil deref) somewhere in
+// the middleware chain, indistinguishable from an upstream dial failure
+// unless it's logged. It must still answer 502 without retrying.
+func TestRetryMiddlewareLogsUnexpectedPanic(t *testing.T) {
+	// Not parallel: temporarily swaps the slog default to capture output. (Go runs
+	// non-parallel tests sequentially, so no concurrent slog user races the swap.)
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelError})))
+	defer slog.SetDefault(prev)
+
+	var calls atomic.Int32
+	r := httptest.NewRequest(http.MethodGet, "http://svc/", nil)
+	w := httptest.NewRecorder()
+	retryMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+		panic(errors.New("boom"))
+	})).ServeHTTP(w, r)
+
+	assert.Equal(t, int32(1), calls.Load(), "non-retryable error served once")
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, buf.String(), "boom", "the recovered panic must be logged")
 }

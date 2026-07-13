@@ -36,6 +36,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/cors"
 	"github.com/moonrhythm/parapet/pkg/headers"
 	"github.com/moonrhythm/parapet/pkg/waf"
+	"golang.org/x/net/http/httpguts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -285,12 +286,18 @@ func compileReqOps(ops []Op) ([]reqOp, error) {
 	for i, op := range ops {
 		switch op.Type {
 		case opSetHeader:
+			if err := validateHeaderNameValue(op.Name, op.Value); err != nil {
+				return nil, fmt.Errorf("set-header: %w", err)
+			}
 			name, value := op.Name, op.Value
 			out = append(out, func(_ http.ResponseWriter, r *http.Request, _ string) bool {
 				r.Header.Set(name, value)
 				return false
 			})
 		case opRemoveHeader:
+			if err := validateHeaderName(op.Name); err != nil {
+				return nil, fmt.Errorf("remove-header: %w", err)
+			}
 			name := op.Name
 			out = append(out, func(_ http.ResponseWriter, r *http.Request, _ string) bool {
 				r.Header.Del(name)
@@ -378,14 +385,42 @@ func compileRewriteQuery(op Op) (reqOp, error) {
 	}, nil
 }
 
+// validateHeaderName rejects a header-name op.Name that would misbehave at
+// emit time (net/http silently drops an invalid Set/Del token), so the
+// all-or-nothing compile catches a typo instead of shipping garbage.
+func validateHeaderName(name string) error {
+	if !httpguts.ValidHeaderFieldName(name) {
+		return fmt.Errorf("invalid header name %q", name)
+	}
+	return nil
+}
+
+// validateHeaderNameValue additionally rejects a header value carrying
+// disallowed bytes (e.g. a bare CR/LF), same rationale as validateHeaderName.
+func validateHeaderNameValue(name, value string) error {
+	if err := validateHeaderName(name); err != nil {
+		return err
+	}
+	if !httpguts.ValidHeaderFieldValue(value) {
+		return fmt.Errorf("invalid header value for %q", name)
+	}
+	return nil
+}
+
 func compileRespOps(ops []Op) ([]respOp, error) {
 	out := make([]respOp, 0, len(ops))
 	for i, op := range ops {
 		switch op.Type {
 		case opSetHeader:
+			if err := validateHeaderNameValue(op.Name, op.Value); err != nil {
+				return nil, fmt.Errorf("set-header: %w", err)
+			}
 			name, value := op.Name, op.Value
 			out = append(out, respOp{mutate: func(h http.Header) { h.Set(name, value) }})
 		case opRemoveHeader:
+			if err := validateHeaderName(op.Name); err != nil {
+				return nil, fmt.Errorf("remove-header: %w", err)
+			}
 			name := op.Name
 			out = append(out, respOp{mutate: func(h http.Header) { h.Del(name) }})
 		case opSetStatus:
