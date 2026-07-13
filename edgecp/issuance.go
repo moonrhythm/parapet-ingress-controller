@@ -160,15 +160,20 @@ func (s *Server) handleTrustBundle(w http.ResponseWriter, r *http.Request) {
 			}
 			s.genMu.Lock()
 			notify := s.genNotify
-			s.genMu.Unlock()
-			select {
-			case <-notify:
-			case <-time.After(watchTimeout):
-			case <-r.Context().Done():
-				return
-			}
-			// Re-load the snapshot: a SetSigner may have advanced it while we blocked.
+			// SetSigner stores signerState BEFORE it closes+replaces genNotify (both under
+			// genMu), so re-loading here observes any bump that raced our subscribe.
 			st = s.signerState.Load()
+			s.genMu.Unlock()
+			if st.gen <= since {
+				select {
+				case <-notify:
+				case <-time.After(watchTimeout):
+				case <-r.Context().Done():
+					return
+				}
+				// Re-load the snapshot: a SetSigner may have advanced it while we blocked.
+				st = s.signerState.Load()
+			}
 		}
 	}
 
