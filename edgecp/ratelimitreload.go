@@ -84,9 +84,9 @@ func (r *RateLimitReloader) drain(ctx context.Context, ch <-chan watch.Event) {
 
 // reload lists rate-limit ConfigMaps across the watch namespace and rebuilds
 // the global set (podNamespace only) and the zone registry (any namespace). A
-// ConfigMap that also carries the WAF label is refused (one ConfigMap per
-// feature, mirroring the controller: both reloaders would consume all its data
-// values and the lenient YAML parsers cross-parse the other feature's
+// ConfigMap that also carries another feature's label is refused (one ConfigMap
+// per feature, mirroring the controller: both reloaders would consume all its
+// data values and the lenient YAML parsers cross-parse the other feature's
 // documents to zero entries silently).
 func (r *RateLimitReloader) reload(ctx context.Context) error {
 	cms, err := k8s.GetConfigMaps(ctx, r.watchNamespace, RateLimitLabelKey)
@@ -98,9 +98,9 @@ func (r *RateLimitReloader) reload(ctx context.Context) error {
 		cm := &cms[i]
 		role := cm.Labels[RateLimitLabelKey]
 		if role == wafRoleGlobal || role == wafRoleZone {
-			if _, alsoWAF := cm.Labels[WAFLabelKey]; alsoWAF {
-				slog.Warn("edgecp: ignoring configmap that carries both the ratelimit and waf labels; use one configmap per feature",
-					"configmap", cm.Namespace+"/"+cm.Name)
+			if other, ok := carriesOtherFeatureLabel(cm.Labels, RateLimitLabelKey); ok {
+				slog.Warn("edgecp: ignoring configmap that carries the ratelimit label and another feature label; use one configmap per feature",
+					"configmap", cm.Namespace+"/"+cm.Name, "other_label", other)
 				continue
 			}
 		}

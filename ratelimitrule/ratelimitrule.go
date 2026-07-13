@@ -114,6 +114,17 @@ func Parse(docs ...string) ([]Limit, error) {
 			errs = append(errs, fmt.Errorf("ratelimit: parse document: %w", err))
 			continue
 		}
+		// A non-whitespace document that unmarshals to zero limits is almost always
+		// a wrong root key (e.g. a WAF "rules:" doc that landed in a rate-limit
+		// ConfigMap): struct unmarshal silently drops unknown keys, so without this
+		// the caller would apply an empty set and advance its fingerprint, wiping
+		// the last-good limits. Treat it as a per-doc error so SetLimits keeps the
+		// previous set. The sanctioned way to clear is deleting the ConfigMap or
+		// emptying its data (a whitespace-only doc, skipped above).
+		if len(d.Limits) == 0 {
+			errs = append(errs, errors.New(`ratelimit: document has no limits (wrong root key? expected "limits:")`))
+			continue
+		}
 		out = append(out, d.Limits...)
 	}
 	return out, errors.Join(errs...)

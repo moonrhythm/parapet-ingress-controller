@@ -424,6 +424,26 @@ rules:
 	}
 }
 
+func TestReloadWAF_IgnoresMultiLabeledConfigMap(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newWAFController()
+	cm := wafCM("cust1", "acme", roleZone, `
+rules:
+  - id: r1
+    expression: "true"
+    action: log
+`)
+	// also labeled for the rate limiter: a ConfigMap must carry one feature label,
+	// else both reloaders consume its data and cross-parse to empty sets.
+	cm.Labels[rateLimitLabelKey] = roleZone
+	ctrl.watchedConfigMaps.Store("cust1/acme", cm)
+	ctrl.reloadWAFDebounced()
+
+	assert.Nil(t, ctrl.LookupZone("cust1/acme"),
+		"a multi-feature-labeled configmap is refused by the waf reload")
+}
+
 func TestReloadWAF_DisabledIsNoop(t *testing.T) {
 	t.Parallel()
 

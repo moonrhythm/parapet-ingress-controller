@@ -158,15 +158,12 @@ func (ctrl *Controller) reloadTransformDebounced() {
 		// Refuse a ConfigMap labeled for more than one feature (one ConfigMap per
 		// feature, by deployer policy): every reloader consumes all data values, so
 		// a multi-labeled ConfigMap would feed each side the other's documents,
-		// which the lenient YAML parsers cross-parse to empty/garbage sets silently.
-		if _, ok := cm.Labels[wafLabelKey]; ok {
-			slog.Warn("transform: ignoring configmap that also carries the waf label; use one configmap per feature",
-				"configmap", cm.Namespace+"/"+cm.Name)
-			return true
-		}
-		if _, ok := cm.Labels[rateLimitLabelKey]; ok {
-			slog.Warn("transform: ignoring configmap that also carries the ratelimit label; use one configmap per feature",
-				"configmap", cm.Namespace+"/"+cm.Name)
+		// which the lenient YAML parsers cross-parse to empty/garbage sets. The
+		// role check above already gated on a recognized transform role (the fs
+		// backend rationale).
+		if other, ok := carriesOtherFeatureLabel(cm, transformLabelKey); ok {
+			slog.Warn("transform: ignoring configmap that also carries another feature label; use one configmap per feature",
+				"configmap", cm.Namespace+"/"+cm.Name, "other_label", other)
 			return true
 		}
 		if role == roleGlobal {

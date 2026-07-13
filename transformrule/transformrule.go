@@ -197,6 +197,17 @@ func Parse(opts Options, docs ...string) (*Zone, error) {
 		if err := yaml.Unmarshal([]byte(doc), &d); err != nil {
 			return nil, fmt.Errorf("transform: parse document: %w", err)
 		}
+		// A non-whitespace document that unmarshals to zero transforms is almost
+		// always a wrong root key (e.g. a WAF "rules:" doc that landed in a
+		// transform ConfigMap): struct unmarshal silently drops unknown keys, so
+		// without this the caller would apply an empty (all-or-nothing) set and
+		// advance its fingerprint, wiping the last-good Zone. Reject it so the
+		// controller keeps the previous Zone. The sanctioned way to clear is
+		// deleting the ConfigMap or emptying its data (a whitespace-only doc,
+		// skipped above).
+		if len(d.Transforms) == 0 {
+			return nil, errors.New(`transform: document has no transforms (wrong root key? expected "transforms:")`)
+		}
 		rules = append(rules, d.Transforms...)
 	}
 
@@ -563,9 +574,10 @@ func (z *Zone) IDs() []string {
 	return out
 }
 
-// Empty reports whether the zone has no rules (a valid inert zone, e.g. from an
-// empty `transforms:` document). The plugin still mounts it as a cheap
-// pass-through.
+// Empty reports whether the zone has no rules (a valid inert zone, e.g. from a
+// ConfigMap whose data values are all whitespace — a non-whitespace document
+// that yields zero transforms is rejected by Parse). The plugin still mounts it
+// as a cheap pass-through.
 func (z *Zone) Empty() bool {
 	return len(z.reqRules) == 0 && len(z.respRules) == 0 && len(z.corsRules) == 0
 }

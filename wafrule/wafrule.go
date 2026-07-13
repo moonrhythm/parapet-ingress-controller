@@ -66,6 +66,17 @@ func Parse(docs ...string) ([]waf.Rule, error) {
 			errs = append(errs, fmt.Errorf("waf: parse document: %w", err))
 			continue
 		}
+		// A non-whitespace document that unmarshals to zero rules is almost always
+		// a wrong root key (e.g. a rate-limit "limits:" doc that landed in a WAF
+		// ConfigMap): struct unmarshal silently drops unknown keys, so without this
+		// the caller would apply an empty ruleset and advance its fingerprint,
+		// wiping the last-good rules. Treat it as a per-doc error so SetRules keeps
+		// the previous ruleset. The sanctioned way to clear is deleting the
+		// ConfigMap or emptying its data (a whitespace-only doc, skipped above).
+		if len(d.Rules) == 0 {
+			errs = append(errs, errors.New(`waf: document has no rules (wrong root key? expected "rules:")`))
+			continue
+		}
 		for i, r := range d.Rules {
 			action, err := ParseAction(r.Action)
 			if err != nil {
