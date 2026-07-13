@@ -24,6 +24,12 @@ jobs:
     - uses: actions/setup-go@v5
       with:
         go-version: ${{ matrix.go }}
+        # Self-hosted runner: GOMODCACHE/GOCACHE persist on local disk between
+        # runs, so the default cache:true only re-downloads a multi-GB blob from
+        # GitHub's remote cache service every run (measured: ~7.5 min restore vs
+        # ~15 s of actual vet+test). The toolchain itself stays cached in the
+        # runner's tool cache regardless.
+        cache: false
     - run: go get -t -v ./...
     - run: go vet ./...
     - run: go test -race ./...
