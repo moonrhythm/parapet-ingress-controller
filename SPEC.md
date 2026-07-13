@@ -63,8 +63,8 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 | `upstream-path` | path prefix | Prepend path (+ optional query) upstream |
 | `allow-remote` | comma-sep CIDRs | IP allowlist (403 otherwise; skips ACME) |
 | `strip-prefix` | path prefix | Strip prefix from request path |
-| `basic-auth` | `user:pass` | HTTP Basic Auth |
-| `forward-auth` | YAML (`url`, `authRequestHeaders`, `authResponseHeaders`) | Delegate auth to an external service |
+| `basic-auth` | `user:pass` | HTTP Basic Auth. A non-empty but malformed value (no colon, empty user, or empty pass) fails closed: all requests get 403, logged once at plugin time |
+| `forward-auth` | YAML (`url`, `authRequestHeaders`, `authResponseHeaders`) | Delegate auth to an external service. A non-empty but malformed value (bad YAML, missing/empty `url`, or unparsable `url`) fails closed: all requests get 403, logged once at plugin time |
 | `waf-zone` | zone id, or `ns/id` | Bind the Ingress to a WAF zone (see [WAF.md](WAF.md)) |
 | `coraza-zone` | zone id, or `ns/id` | Bind the Ingress to a Coraza (OWASP CRS / SecLang) zone (see [CORAZA.md](CORAZA.md)); inert when `CORAZA_ENABLED` is off. Cross-namespace refs allowed (the WAF model — rulesets are stateless) |
 | `ratelimit-zone` | zone id (same-namespace only) | Bind the Ingress to a rate-limit zone (see [RATELIMIT.md](RATELIMIT.md)); inert when `RATELIMIT_ENABLED` is off. Cross-namespace refs are NOT honored (zones carry shared counter state) |
