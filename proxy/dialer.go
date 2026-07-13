@@ -53,11 +53,13 @@ func isDialError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// go1.19 i/o timeout error will now satisfy errors.Is(err, context.DeadlineExceeded)
-	if errors.Is(err, context.DeadlineExceeded) {
-		return true
-	}
-
+	// net.Dialer.DialContext always wraps its failures — including a ctx
+	// timeout mid-dial — in *net.OpError{Op: "dial"}, so that's the only
+	// signal that no connection was established and the request never left
+	// this process. A bare context.DeadlineExceeded (or any other error) can
+	// also surface after a successful connect (e.g. while awaiting response
+	// headers), and retrying that would replay a request the upstream may
+	// have already received.
 	var netOpError *net.OpError
 	return errors.As(err, &netOpError) && netOpError.Op == "dial"
 }

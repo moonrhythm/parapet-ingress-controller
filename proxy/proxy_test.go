@@ -88,13 +88,18 @@ func TestProxy(t *testing.T) {
 func TestIsRetryable(t *testing.T) {
 	t.Parallel()
 
-	// Only connection failures are retryable.
+	// Only a dial failure (no connection established, request never sent) is
+	// retryable — including one that timed out on the ctx deadline mid-dial.
 	assert.True(t, IsRetryable(&net.OpError{Op: "dial", Err: errors.New("connection refused")}))
-	assert.True(t, IsRetryable(context.DeadlineExceeded))
+	assert.True(t, IsRetryable(&net.OpError{Op: "dial", Err: context.DeadlineExceeded}))
 
-	// An upstream that responded (even 5xx) has processed the request — not a
-	// connection error, so not retryable. Neither is a mid-flight (non-dial)
-	// transport error or nil.
+	// Once a connection is established, any failure is never retried — even
+	// one that unwraps to context.DeadlineExceeded (e.g. hit while awaiting
+	// response headers) — because the upstream may already have received the
+	// request. Also not retryable: an upstream that responded (even 5xx), a
+	// non-dial (e.g. "read") transport error, and nil.
+	assert.False(t, IsRetryable(context.DeadlineExceeded))
+	assert.False(t, IsRetryable(&net.OpError{Op: "read", Err: context.DeadlineExceeded}))
 	assert.False(t, IsRetryable(errors.New("upstream returned 503")))
 	assert.False(t, IsRetryable(&net.OpError{Op: "read", Err: errors.New("connection reset")}))
 	assert.False(t, IsRetryable(nil))
