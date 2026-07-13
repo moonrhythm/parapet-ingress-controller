@@ -62,6 +62,49 @@ func TestBasicAuth(t *testing.T) {
 	})
 }
 
+// TestBasicAuthMalformedFailsClosed guards against fail-open: a present but
+// malformed basic-auth annotation must deny every request with 403 rather
+// than silently mounting nothing (which would leave the ingress
+// unauthenticated).
+func TestBasicAuthMalformedFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		auth string
+	}{
+		{"NoColon", "nocolon"},
+		{"EmptyUser", ":onlypass"},
+		{"EmptyPass", "user:"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := Context{
+				Middlewares: &parapet.Middlewares{},
+				Ingress: &networking.Ingress{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							"parapet.moonrhythm.io/basic-auth": c.auth,
+						},
+					},
+				},
+			}
+			BasicAuth(ctx)
+
+			var called bool
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			w := httptest.NewRecorder()
+			ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+			})).ServeHTTP(w, r)
+
+			assert.False(t, called)
+			assert.Equal(t, http.StatusForbidden, w.Code)
+		})
+	}
+}
+
 func TestForwardAuth(t *testing.T) {
 	t.Parallel()
 
@@ -124,6 +167,47 @@ authRequestHeaders:
 		})).ServeHTTP(w, r)
 		assert.False(t, called)
 	})
+}
+
+// TestForwardAuthMalformedFailsClosed guards against fail-open: a present
+// but malformed forward-auth annotation (bad YAML or a missing/empty url)
+// must deny every request with 403 rather than silently mounting nothing.
+func TestForwardAuthMalformedFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		config string
+	}{
+		{"BadYAML", "url: [unterminated"},
+		{"EmptyURL", "authRequestHeaders:\n- authorization\n"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ctx := Context{
+				Middlewares: &parapet.Middlewares{},
+				Ingress: &networking.Ingress{
+					ObjectMeta: metav1.ObjectMeta{
+						Annotations: map[string]string{
+							"parapet.moonrhythm.io/forward-auth": c.config,
+						},
+					},
+				},
+			}
+			ForwardAuth(ctx)
+
+			var called bool
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			w := httptest.NewRecorder()
+			ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+			})).ServeHTTP(w, r)
+
+			assert.False(t, called)
+			assert.Equal(t, http.StatusForbidden, w.Code)
+		})
+	}
 }
 
 // TestForwardAuthDoesNotFollowRedirect guards against a fail-open: an auth

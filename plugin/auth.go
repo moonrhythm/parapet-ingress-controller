@@ -1,15 +1,30 @@
 package plugin
 
 import (
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
+	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/authn"
 	"github.com/moonrhythm/parapet/pkg/headers"
 	"gopkg.in/yaml.v3"
 )
+
+// denyAll mounts a middleware that answers 403 Forbidden to every request,
+// without ever reaching the upstream. Used when an auth annotation is
+// present but malformed: failing open (mounting nothing) would let
+// unauthenticated traffic through an ingress that declares itself gated, so
+// a bad annotation must fail closed instead.
+func denyAll(ctx Context) {
+	ctx.Use(parapet.MiddlewareFunc(func(h http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+		})
+	}))
+}
 
 var authHTTPClient = &http.Client{
 	Timeout: 10 * time.Second,
@@ -38,10 +53,16 @@ func BasicAuth(ctx Context) {
 
 	xs := strings.SplitN(ba, ":", 2)
 	if len(xs) != 2 {
+		slog.Error("plugin/BasicAuth: malformed basic-auth annotation, failing closed",
+			"ingress", ctx.ingressID())
+		denyAll(ctx)
 		return
 	}
 	user, pass := xs[0], xs[1]
 	if user == "" || pass == "" {
+		slog.Error("plugin/BasicAuth: malformed basic-auth annotation, failing closed",
+			"ingress", ctx.ingressID())
+		denyAll(ctx)
 		return
 	}
 
@@ -61,10 +82,22 @@ func ForwardAuth(ctx Context) {
 	}
 	err := yaml.Unmarshal([]byte(a), &obj)
 	if err != nil {
+		slog.Error("plugin/ForwardAuth: malformed forward-auth annotation, failing closed",
+			"ingress", ctx.ingressID(), "error", err)
+		denyAll(ctx)
+		return
+	}
+	if obj.URL == "" {
+		slog.Error("plugin/ForwardAuth: malformed forward-auth annotation, failing closed",
+			"ingress", ctx.ingressID(), "error", "missing url")
+		denyAll(ctx)
 		return
 	}
 	u, err := url.Parse(obj.URL)
 	if err != nil {
+		slog.Error("plugin/ForwardAuth: malformed forward-auth annotation, failing closed",
+			"ingress", ctx.ingressID(), "error", err)
+		denyAll(ctx)
 		return
 	}
 	// Make every response on a forward-auth-gated ingress non-cacheable at the
