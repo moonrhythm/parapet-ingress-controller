@@ -404,6 +404,36 @@ func TestAllowRemote(t *testing.T) {
 		assert.True(t, called)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
+
+	// X-Real-Ip is the parapet-resolved client IP (set by the trust middleware;
+	// overwritten for untrusted peers, so it is safe to trust mid-chain). It must
+	// take precedence over RemoteAddr, which behind the edge/any trusted L7 hop is
+	// only the hop's IP.
+	t.Run("X-Real-Ip allow overrides denying RemoteAddr", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("X-Real-Ip", "192.168.0.32")
+		r.RemoteAddr = "10.0.0.1:1234" // hop IP, not in the allow-list
+		w := httptest.NewRecorder()
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.True(t, called)
+		assert.Equal(t, http.StatusOK, w.Code)
+	})
+
+	t.Run("X-Real-Ip deny overrides allowing RemoteAddr", func(t *testing.T) {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.Header.Set("X-Real-Ip", "192.168.1.32")
+		r.RemoteAddr = "127.0.0.1:1234" // hop IP, in the allow-list
+		w := httptest.NewRecorder()
+		var called bool
+		ctx.ServeHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			called = true
+		})).ServeHTTP(w, r)
+		assert.False(t, called)
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
 }
 
 func TestAllowRemoteAllInvalidCIDRsLogsAndBlocks(t *testing.T) {
