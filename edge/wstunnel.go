@@ -282,6 +282,10 @@ func (t *wsTunnel) translate(ctx context.Context, r *http.Request, body io.ReadC
 	c.Header.Del("Upgrade")
 	c.Header.Del("Transfer-Encoding")
 	c.Header.Del("Sec-WebSocket-Key")
+	// A client-sent Content-Length/Expect describes the h1 upgrade GET, not the
+	// tunnel's live, lengthless stream (mirrors wsh2.Normalize's rationale).
+	c.Header.Del("Content-Length")
+	c.Header.Del("Expect")
 	c.Header.Set(":protocol", "websocket")
 	c.URL.Scheme = t.scheme
 	c.URL.Host = t.addr
