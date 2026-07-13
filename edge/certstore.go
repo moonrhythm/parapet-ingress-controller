@@ -13,6 +13,7 @@ package edge
 
 import (
 	"crypto/tls"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -118,12 +119,26 @@ func (s *CertStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 		return c, nil
 	}
 	if s.onDemand != nil && hello.ServerName != "" {
-		s.fetchOnDemand(hello.ServerName)
-		if c, _ := s.table.Get(hello); c != nil {
-			return c, nil
+		// Normalize identically to cert.Table.Get and the control plane's authz/store
+		// (RFC 6066 forbids a trailing dot, but non-compliant clients send one) so the
+		// fetch key, negative cache, and CP authorization all agree on the same SNI —
+		// otherwise "example.com." and "example.com" fetch (and negative-cache) as two
+		// distinct domains, causing repeated on-demand churn.
+		sni := normalizeSNI(hello.ServerName)
+		if sni != "" {
+			s.fetchOnDemand(sni)
+			if c, _ := s.table.Get(hello); c != nil {
+				return c, nil
+			}
 		}
 	}
 	return nil, nil // -> self-signed fallback (client sees "unknown authority")
+}
+
+// normalizeSNI lowercases and trims a trailing dot, matching cert.Table.Get and
+// edgecp's CertStore.Get/Authz.Allowed so lookup, fetch key, and CP authz agree.
+func normalizeSNI(sni string) string {
+	return strings.ToLower(strings.TrimSuffix(sni, "."))
 }
 
 // fetchOnDemand resolves a missing SNI through the control plane under three guards:
