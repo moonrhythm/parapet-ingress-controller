@@ -426,6 +426,98 @@ func TestAutoH2C_TTLExpiryReprobe(t *testing.T) {
 	assert.True(t, e.h2c, "verdict flipped to h2c after re-probe")
 }
 
+// A stale h2c-positive verdict + a bodyless request that now fails with a non-dial
+// error re-verdicts to negative and replays over HTTP/1.1 — recovering instead of
+// hard-502ing until the TTL expires.
+func TestAutoH2C_StalePositiveBodylessReverdicts(t *testing.T) {
+	t.Parallel()
+
+	const key = "10.0.0.1:8080"
+	var fallbackCalled bool
+	h2cRT := rtFunc(func(*http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF // Service lost h2c support
+	})
+	fallback := rtFunc(func(r *http.Request) (*http.Response, error) {
+		fallbackCalled = true
+		assert.Equal(t, "http", r.URL.Scheme)
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	})
+	tr := newAutoH2C(h2cRT, fallback)
+	tr.store(key, true) // fresh cached h2c-positive
+
+	r := httptest.NewRequest(http.MethodGet, "http://"+key, nil)
+	resp, err := tr.RoundTrip(r)
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+	assert.True(t, fallbackCalled, "stale positive must replay over HTTP/1.1")
+	e, ok := tr.rawEntry(key)
+	require.True(t, ok)
+	assert.False(t, e.h2c, "verdict flipped to negative")
+}
+
+// A stale h2c-positive verdict + a bodied request that now fails with a non-dial
+// error cannot replay (the body may already be consumed): it returns the error and
+// deletes the entry so the next bodyless request re-probes.
+func TestAutoH2C_StalePositiveBodiedDeletesEntry(t *testing.T) {
+	t.Parallel()
+
+	const key = "10.0.0.1:8080"
+	var (
+		fallbackCalled bool
+		h2cBodyless    int32
+	)
+	h2cRT := rtFunc(func(r *http.Request) (*http.Response, error) {
+		if !hasBody(r) {
+			atomic.AddInt32(&h2cBodyless, 1)
+		}
+		return nil, io.ErrUnexpectedEOF // Service lost h2c support
+	})
+	fallback := rtFunc(func(*http.Request) (*http.Response, error) {
+		fallbackCalled = true
+		return &http.Response{StatusCode: http.StatusOK}, nil
+	})
+	tr := newAutoH2C(h2cRT, fallback)
+	tr.store(key, true) // fresh cached h2c-positive
+
+	// bodied request over stale h2c fails and must NOT replay
+	r := httptest.NewRequest(http.MethodPost, "http://"+key, strings.NewReader("payload"))
+	_, err := tr.RoundTrip(r)
+	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.False(t, fallbackCalled, "bodied request must not replay")
+	_, ok := tr.rawEntry(key)
+	assert.False(t, ok, "entry deleted so the next request re-probes")
+
+	// a following bodyless request re-probes (reaches the h2c transport again)
+	_, err = tr.RoundTrip(httptest.NewRequest(http.MethodGet, "http://"+key, nil))
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&h2cBodyless), "next bodyless request re-probed")
+}
+
+// A dial error on the cached-positive fast path is propagated untouched and leaves
+// the cache intact — a down pod is not an h2c signal (retryMiddleware owns it).
+func TestAutoH2C_StalePositiveDialErrorPropagates(t *testing.T) {
+	t.Parallel()
+
+	const key = "10.0.0.1:8080"
+	dialErr := &net.OpError{Op: "dial", Err: io.EOF}
+	h2cRT := rtFunc(func(*http.Request) (*http.Response, error) { return nil, dialErr })
+	var fallbackCalled bool
+	fallback := rtFunc(func(*http.Request) (*http.Response, error) {
+		fallbackCalled = true
+		return nil, nil
+	})
+	tr := newAutoH2C(h2cRT, fallback)
+	tr.store(key, true) // fresh cached h2c-positive
+
+	r := httptest.NewRequest(http.MethodGet, "http://"+key, nil)
+	_, err := tr.RoundTrip(r)
+	assert.ErrorIs(t, err, dialErr)
+	assert.False(t, fallbackCalled, "dial error must not fall back")
+	e, ok := tr.rawEntry(key)
+	require.True(t, ok, "dial error leaves the cache intact")
+	assert.True(t, e.h2c, "positive verdict untouched")
+}
+
 // Concurrent requests to a cold HTTP/1.1-only upstream collapse to a single h2c
 // probe; the rest fall back to HTTP/1.1 instead of stampeding failed connections.
 func TestAutoH2C_SingleflightProbe(t *testing.T) {
