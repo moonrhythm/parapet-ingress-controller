@@ -61,7 +61,7 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 | `upstream-protocol` | `http` / `https` | Force upstream scheme |
 | `upstream-host` | hostname | Override `Host` sent upstream |
 | `upstream-path` | path prefix | Prepend path (+ optional query) upstream |
-| `allow-remote` | comma-sep CIDRs | IP allowlist (403 otherwise; skips ACME) |
+| `allow-remote` | comma-sep CIDRs | IP allowlist (403 otherwise; skips ACME); matches the parapet-resolved client IP (`X-Real-Ip`, trusted per `TRUST_PROXY`), not the TCP peer — same resolution as WAF/rate-limit/geo (`geoip.ClientIP`). Behind the edge or any trusted L7 hop this means an allowlist keyed on the *original client*, not the hop; configs that intentionally allowlisted a proxy/hop CIDR will need to allowlist the real client CIDR instead |
 | `strip-prefix` | path prefix | Strip prefix from request path |
 | `basic-auth` | `user:pass` | HTTP Basic Auth |
 | `forward-auth` | YAML (`url`, `authRequestHeaders`, `authResponseHeaders`) | Delegate auth to an external service |
