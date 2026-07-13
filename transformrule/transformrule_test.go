@@ -361,3 +361,87 @@ transforms:
 `)
 	require.Error(t, err, "redirect must be the only op in its rule")
 }
+
+func TestParse_InvalidHeaderNameRejectsWholeDocument(t *testing.T) {
+	t.Parallel()
+
+	// An invalid header-name token only misbehaved at emit time before this
+	// check; it must now reject the whole document all-or-nothing, alongside a
+	// rule that is otherwise fine.
+	z, err := transformrule.Parse(transformrule.Options{}, `
+transforms:
+- id: good
+  phase: response
+  ops:
+  - type: set-header
+    name: X-Good
+    value: "1"
+  priority: 0
+- id: bad-set-header
+  phase: request
+  ops:
+  - type: set-header
+    name: "Bad Header"
+    value: "1"
+  priority: 0
+`)
+	require.Error(t, err, "an invalid header name rejects the whole document")
+	assert.Nil(t, z)
+
+	z, err = transformrule.Parse(transformrule.Options{}, `
+transforms:
+- id: bad-remove-header
+  phase: response
+  ops:
+  - type: remove-header
+    name: "Bad Header"
+  priority: 0
+`)
+	require.Error(t, err, "an invalid header name rejects the whole document")
+	assert.Nil(t, z)
+}
+
+func TestParse_InvalidHeaderValueRejectsWholeDocument(t *testing.T) {
+	t.Parallel()
+
+	// A header value carrying a bare CR/LF is invalid and must reject the
+	// whole document, same as an invalid name.
+	z, err := transformrule.Parse(transformrule.Options{}, "transforms:\n"+
+		"- id: bad-value\n"+
+		"  phase: response\n"+
+		"  ops:\n"+
+		"  - type: set-header\n"+
+		"    name: X-Bad\n"+
+		"    value: \"line1\\rline2\"\n"+
+		"  priority: 0\n")
+	require.Error(t, err, "an invalid header value rejects the whole document")
+	assert.Nil(t, z)
+}
+
+func TestParse_ValidHeaderNameValueUnchanged(t *testing.T) {
+	t.Parallel()
+
+	// Valid header names/values (including hyphenated, mixed-case names and an
+	// ordinary value) still compile and apply exactly as before.
+	z, err := transformrule.Parse(transformrule.Options{}, `
+transforms:
+- id: ok
+  phase: response
+  ops:
+  - type: set-header
+    name: X-Custom-Header
+    value: "some value; with=punctuation"
+  - type: remove-header
+    name: Server
+  priority: 0
+`)
+	require.NoError(t, err)
+	require.NotNil(t, z)
+
+	w := serve(t, z, httptest.NewRequest(http.MethodGet, "/", nil), func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Server", "origin/1.0")
+		w.WriteHeader(http.StatusOK)
+	})
+	assert.Equal(t, "some value; with=punctuation", w.Header().Get("X-Custom-Header"))
+	assert.Empty(t, w.Header().Get("Server"))
+}

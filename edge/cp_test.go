@@ -9,6 +9,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestNewCpClient_EmptyCAUsesSystemRoots(t *testing.T) {
+	cp, err := NewCpClient("https://controlplane:8443", "tok", nil)
+	require.NoError(t, err)
+	assert.NotNil(t, cp)
+}
+
+func TestNewCpClient_ValidCAPEMIsOK(t *testing.T) {
+	caPEM, _ := genCertPEM(t, "controlplane")
+	cp, err := NewCpClient("https://controlplane:8443", "tok", caPEM)
+	require.NoError(t, err)
+	assert.NotNil(t, cp)
+}
+
+func TestNewCpClient_GarbageCAPEMIsFatalError(t *testing.T) {
+	// An explicit EDGE_CP_CA pin must never silently fall back to system roots
+	// (this channel carries the bearer token and TLS private keys).
+	cp, err := NewCpClient("https://controlplane:8443", "tok", []byte("not a pem certificate"))
+	assert.Error(t, err)
+	assert.Nil(t, cp)
+}
+
 func TestCpClient_FetchCert200ParsesBodyAndEtagAndSendsBearer(t *testing.T) {
 	var gotAuth, gotPath, gotQuery string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

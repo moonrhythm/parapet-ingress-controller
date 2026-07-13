@@ -27,7 +27,10 @@ func (t *Table) Get(clientHello *tls.ClientHelloInfo) (*tls.Certificate, error) 
 	certs := t.nameToCertificate
 	t.mu.RUnlock()
 
-	name := strings.ToLower(clientHello.ServerName)
+	// RFC 6066 forbids a trailing dot in SNI, but some non-compliant clients
+	// send one anyway; trim it so "example.com." still matches the SAN
+	// "example.com".
+	name := strings.TrimSuffix(strings.ToLower(clientHello.ServerName), ".")
 
 	// exact name
 	if cert, ok := certs[name]; ok {
