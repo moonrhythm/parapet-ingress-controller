@@ -50,20 +50,23 @@ func CorazaEval(scope string) func(d time.Duration, blocked bool) {
 	}
 }
 
-// CorazaMatch returns the corazawaf.Options.OnMatch hook counting every rule that
-// fires as parapet_coraza_matches{rule_id,severity,scope} — the Coraza analogue
-// of WAFMatch and the same metric the controller's metric.CorazaMatch records.
-// scope is "global"/"zone"; all three labels are bounded (rule_id and severity
-// come from the operator's ruleset, scope is caller-fixed). It takes the rule id
-// and severity raw rather than a corazawaf.MatchEvent so observe stays decoupled
-// from corazawaf (mirroring CorazaEval's raw signature). Lazy registration, same
+// CorazaMatch returns the corazawaf.Options.OnMatch hook counting every logged
+// rule match as parapet_coraza_matches{rule_id,severity,scope,zone} — the
+// Coraza analogue of WAFMatch and the same metric (same label set) the
+// controller's metric.CorazaMatch records. scope is "global"/"zone"; zone is
+// the zone-registry key ("" for scope=global) that makes CRS matches
+// attributable per zone, since Coraza rule ids are shared by every zone. All
+// four labels are bounded (rule_id and severity come from the operator's
+// ruleset, scope and zone are caller-fixed). It takes the rule id and severity
+// raw rather than a corazawaf.MatchEvent so observe stays decoupled from
+// corazawaf (mirroring CorazaEval's raw signature). Lazy registration, same
 // reasoning as WAFMatch; call only when Coraza is enabled.
-func CorazaMatch(scope string) func(ruleID int, severity string) {
+func CorazaMatch(scope, zone string) func(ruleID int, severity string) {
 	_corazaMatch.once.Do(func() {
 		_corazaMatch.vec = prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: prom.Namespace,
 			Name:      "coraza_matches",
-		}, []string{"rule_id", "severity", "scope"})
+		}, []string{"rule_id", "severity", "scope", "zone"})
 		prom.Registry().MustRegister(_corazaMatch.vec)
 	})
 	return func(ruleID int, severity string) {
@@ -71,6 +74,7 @@ func CorazaMatch(scope string) func(ruleID int, severity string) {
 			"rule_id":  strconv.Itoa(ruleID),
 			"severity": severity,
 			"scope":    scope,
+			"zone":     zone,
 		}).Inc()
 	}
 }

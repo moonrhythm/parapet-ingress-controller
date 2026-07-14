@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,9 +15,11 @@ import (
 )
 
 // blockOnURIRule denies any request whose URI contains "/attack" with 403.
+// `log` is explicit: coraza raises a rule's log flag only via the log action or
+// a SecDefaultAction including log, and OnMatch surfaces logged matches only.
 const blockOnURIRule = `
 SecRuleEngine On
-SecRule REQUEST_URI "@contains /attack" "id:1001,phase:1,deny,status:403,msg:'blocked uri'"
+SecRule REQUEST_URI "@contains /attack" "id:1001,phase:1,deny,status:403,log,msg:'blocked uri'"
 `
 
 // blockOnBodyRule denies any request whose body contains "evil" with 403.
@@ -72,6 +75,35 @@ func TestBlockOnURI(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+func TestOnMatchLoggedRulesOnly(t *testing.T) {
+	// OnMatch is Coraza's error callback: a matched rule surfaces only when it
+	// engages logging. Rule 2001 (nolog — the CRS administrative pattern) and
+	// rule 2003 (no log action, no SecDefaultAction — coraza's log flag defaults
+	// to off) must not surface; the explicitly logged rule 2002 must. Pinned at
+	// the SecLang level so the contract holds independent of the CRS corpus.
+	const rules = `
+SecRuleEngine On
+SecAction "id:2001,phase:1,pass,t:none,nolog,setvar:tx.admin=1"
+SecRule REQUEST_URI "@contains /attack" "id:2003,phase:1,pass,msg:'unlogged match'"
+SecRule REQUEST_URI "@contains /attack" "id:2002,phase:1,deny,status:403,log,msg:'blocked uri'"
+`
+	var mu sync.Mutex
+	var matched []int
+	in := New(Options{OnMatch: func(ev MatchEvent) {
+		mu.Lock()
+		matched = append(matched, ev.RuleID)
+		mu.Unlock()
+	}})
+	require.NoError(t, in.SetDirectives(rules))
+
+	in.ServeHandler(okHandler()).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/attack", nil))
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Contains(t, matched, 2002, "logged match must surface")
+	assert.NotContains(t, matched, 2001, "nolog match must not surface")
+	assert.NotContains(t, matched, 2003, "match without a log action must not surface")
+}
+
 func TestBadDirectivesKeepLastGood(t *testing.T) {
 	in := New(Options{})
 	require.NoError(t, in.SetDirectives(blockOnURIRule))
@@ -124,8 +156,29 @@ func TestBodyNotInspectedWhenLimitZero(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("payload=evil"))
 	in.ServeHandler(echo).ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code, "body rules don't run when inspection is off")
+	assert.Equal(t, http.StatusOK, rec.Code, "phase 2 still runs but sees no body bytes when inspection is off")
 	assert.Equal(t, "payload=evil", got, "untouched body reaches upstream")
+}
+
+func TestPhase2RunsWithoutBody(t *testing.T) {
+	// A phase-2 rule over the query args must fire for a bodyless GET even with
+	// request-body inspection off — most CRS detections and the CRS
+	// anomaly-blocking evaluation rule (949110) are phase 2, so phase 2 always
+	// runs (URI/args/headers; body bytes only feed it when a limit opts in).
+	const blockOnArgsPhase2 = `
+SecRuleEngine On
+SecRule ARGS "@contains evil" "id:1005,phase:2,deny,status:403,msg:'blocked args'"
+`
+	in := New(Options{}) // RequestBodyLimit 0 -> no body buffered
+	require.NoError(t, in.SetDirectives(blockOnArgsPhase2))
+
+	rec := httptest.NewRecorder()
+	in.ServeHandler(okHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?q=evil", nil))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "phase-2 rules must evaluate for bodyless requests")
+
+	rec = httptest.NewRecorder()
+	in.ServeHandler(okHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/?q=safe", nil))
+	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestObserveCalled(t *testing.T) {
