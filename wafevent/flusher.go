@@ -12,9 +12,10 @@ import (
 	"time"
 )
 
-// DefaultFlushInterval is how often the flusher drains the ring. A constant
-// band of 30–60s is fine (SPEC-waf-events §F); 30s halves the worst-case
-// console lag for free. Overridable via WAF_EVENTS_PUSH_INTERVAL.
+// DefaultFlushInterval is how often the flusher drains the ring. A constant,
+// like the sampling caps — SPEC-waf-events §F keeps the cadence out of the
+// env surface (retunable in a release; anything in the 30–60s band is fine,
+// and 30s halves the worst-case console lag for free).
 const DefaultFlushInterval = 30 * time.Second
 
 const (
@@ -71,7 +72,7 @@ type Flusher struct {
 	URL      string        // WAF_EVENTS_PUSH_URL — the collector.setWAFEvents endpoint
 	Token    string        // WAF_EVENTS_PUSH_TOKEN — the location's collector token (Bearer)
 	Location string        // WAF_EVENTS_PUSH_LOCATION — sent as the request's location
-	Interval time.Duration // 0 → DefaultFlushInterval
+	Interval time.Duration // 0 → DefaultFlushInterval (test seam; not operator-configurable)
 	Client   *http.Client  // nil → a client with pushTimeout
 
 	// OnPush, when set, is called with the number of events confirmed stored

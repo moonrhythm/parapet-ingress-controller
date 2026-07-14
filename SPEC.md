@@ -175,7 +175,7 @@ keeps a bounded in-memory ring of sampled **zone**-scope match events — ULID
 id, time, zone key, rule id, action, status, client IP, country/ASN (GeoIP),
 method, host, path (no query string; host/path truncated to 255/200 bytes) —
 and a per-pod background flusher drains events past a local high-water mark
-every `WAF_EVENTS_PUSH_INTERVAL` (30s) and POSTs one JSON batch (≤5000
+every 30s (a constant, like the sampling caps) and POSTs one JSON batch (≤5000
 events) directly to the deploys-app apiserver's `collector.setWAFEvents` RPC
 (`Authorization: Bearer` the location's collector token). The mark advances
 only on a confirmed `{"ok":true}` response; failures retry next tick
@@ -324,7 +324,6 @@ invariants:
 | `WAF_EVENTS_PUSH_URL` | `""` (off) | Full URL of the deploys-app `collector.setWAFEvents` RPC the sampled WAF match events are pushed to (e.g. `https://api.deploys.app/collector.setWAFEvents`). Requires `WAF_ENABLED`; URL or token unset leaves the whole feature inert (no ring, no flusher goroutine) |
 | `WAF_EVENTS_PUSH_TOKEN` | `""` (off) | Bearer token presented on every push — the location's deploys-app collector token. Supply from a Secret (events carry client IPs) |
 | `WAF_EVENTS_PUSH_LOCATION` | `""` | Location id sent as the request's `location` (e.g. `gke.cluster-rcf2`); the RPC checks the token against this location. **Required** once URL + token are set — missing is fatal at startup (half-config is misconfig, not a degraded mode) |
-| `WAF_EVENTS_PUSH_INTERVAL` | `30s` | How often the per-pod flusher drains the ring and pushes a batch (replicas de-phase with a random startup delay) |
 | `UPSTREAM_AUTO_H2C` | `false` | Speculatively try h2c on plain-`http` upstreams, fall back to HTTP/1.1 when unsupported. The verdict (h2c or HTTP/1.1-only) is cached per-Service with a TTL and re-probed on expiry; concurrent probes for a cold/expired upstream are single-flighted so they can't stampede failed connections. If a Service loses h2c support mid-TTL, a cached-positive request recovers instead of failing until expiry — a bodyless request re-verdicts and replays over HTTP/1.1, a bodied one drops the verdict so the next bodyless request re-probes. WebSocket/Upgrade always uses HTTP/1.1; `https` and explicit `appProtocol: h2c` upstreams are unaffected |
 | `UPSTREAM_AUTO_H2C_TTL` | `10m` | How long a cached auto-h2c verdict is trusted before the upstream is re-probed (only when `UPSTREAM_AUTO_H2C` is on) |
 | `UPSTREAM_WS_H2C` | `true` | Kill switch for core→pod WebSocket-over-h2c: a tunneled WebSocket to an h2c-capable pod (explicit `appProtocol: h2c`, or a fresh auto-h2c positive verdict) is attempted as an RFC 8441 extended CONNECT stream instead of an h1 upgrade dial; a pod that doesn't advertise the capability falls back to h1 (negative verdict cached 10m per Service). See [WEBSOCKET.md](WEBSOCKET.md) |

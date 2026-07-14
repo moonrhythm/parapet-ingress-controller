@@ -370,7 +370,6 @@ The engine is free (`pkg/waf`); the work is plumbing.
 | `WAF_EVENTS_PUSH_URL` | `""` (off) | deploys-app `collector.setWAFEvents` RPC URL sampled match events are pushed to (see "Match events" below) |
 | `WAF_EVENTS_PUSH_TOKEN` | `""` (off) | Bearer token for the push — the location's collector token (from a Secret); URL or token unset = the whole feature is inert |
 | `WAF_EVENTS_PUSH_LOCATION` | `""` | Location id sent with each batch; required once URL + token are set (missing = fatal at startup) |
-| `WAF_EVENTS_PUSH_INTERVAL` | `30s` | Flush cadence of the per-pod push goroutine |
 
 ### Match events (sampled ring + direct push)
 
@@ -382,8 +381,8 @@ match events fed from the same `OnMatch` hook as the metric — ULID id, time,
 zone key, rule id, action, status, client IP, GeoIP country/ASN, method, host
 (≤255 B), path (≤200 B, never the query string). The ring is a **send
 buffer**: a per-pod background flusher drains events past a local high-water
-mark every `WAF_EVENTS_PUSH_INTERVAL` (30s; replicas de-phase with a random
-startup delay) and POSTs one JSON batch (≤5000 events) directly to the
+mark every 30s (a constant, like the sampling caps; replicas de-phase with a
+random startup delay) and POSTs one JSON batch (≤5000 events) directly to the
 deploys-app apiserver:
 
 ```

@@ -299,11 +299,17 @@ func main() {
 	// the location's collector token. Push, not serve: nothing tenant-reachable
 	// is added to the data plane — no listener, no port, no Service. With the
 	// push envs unset the feature is fully inert (no ring, no goroutine).
-	if wafConfig.Enabled {
+	{
 		pushURL := config.String("WAF_EVENTS_PUSH_URL")
 		pushToken := config.String("WAF_EVENTS_PUSH_TOKEN")
 		pushLocation := config.String("WAF_EVENTS_PUSH_LOCATION")
 		switch {
+		case !wafConfig.Enabled:
+			if pushURL != "" || pushToken != "" || pushLocation != "" {
+				// An explicit opt-in deserves feedback, same as
+				// WAF_VALIDATED_PROXY above: nothing is captured without the WAF.
+				slog.Warn("waf: WAF_EVENTS_PUSH_* set but WAF_ENABLED is off — match-event push stays disabled")
+			}
 		case pushURL == "" && pushToken == "":
 			// Not configured: fully inert.
 		case pushURL == "" || pushToken == "":
@@ -319,15 +325,16 @@ func main() {
 			buf := wafevent.NewBuffer(wafevent.DefaultCapacity)
 			buf.OnDrop = metric.WAFEventDrop
 			wafConfig.Events = buf
+			// Cadence stays a constant (SPEC-waf-events §F: retunable in a
+			// release, not an env) — Flusher.Interval is a test seam only.
 			flusher := &wafevent.Flusher{
 				Buffer:   buf,
 				URL:      pushURL,
 				Token:    pushToken,
 				Location: pushLocation,
-				Interval: config.DurationDefault("WAF_EVENTS_PUSH_INTERVAL", wafevent.DefaultFlushInterval),
 				OnPush:   metric.WAFEventPush,
 			}
-			slog.Info("waf: match-event push enabled", "url", pushURL, "location", pushLocation, "interval", flusher.Interval)
+			slog.Info("waf: match-event push enabled", "url", pushURL, "location", pushLocation, "interval", wafevent.DefaultFlushInterval)
 			go flusher.Run(context.Background())
 		}
 	}

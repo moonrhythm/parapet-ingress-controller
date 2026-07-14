@@ -10,8 +10,10 @@ package wafevent
 import (
 	"encoding/binary"
 	mrand "math/rand/v2"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // DefaultCapacity is the ring size used by the controller: 8192 events is a
@@ -50,8 +52,8 @@ type Event struct {
 	Country  string // ISO 3166-1 alpha-2, "" if unresolved
 	ASN      int64  // 0 if unresolved
 	Method   string
-	Host     string // truncated to 255 bytes
-	Path     string // URL.Path only (no query), truncated to 200 bytes
+	Host     string // valid UTF-8, ≤255 bytes (see truncate)
+	Path     string // URL.Path only (no query); valid UTF-8, ≤200 bytes (see truncate)
 }
 
 type ruleKey struct {
@@ -200,11 +202,24 @@ func (b *Buffer) Read(after uint64, max int) (events []Event, next uint64) {
 	return events, next
 }
 
+// truncate bounds s to at most n bytes as measured AFTER a JSON round trip,
+// which is what the ingest validates (len() of the decoded string against
+// WAFEventMaxHostLength/WAFEventMaxPathLength). Two byte-level hazards would
+// break that contract: json.Marshal substitutes U+FFFD (3 bytes) for every
+// invalid UTF-8 byte — binary path probes are exactly the traffic this
+// feature samples — and a naive s[:n] can split a multi-byte rune, turning
+// its tail into more U+FFFDs. So: coerce to valid UTF-8 first, then cut on a
+// rune boundary; the decoded length then equals the sent length and the
+// server cap holds.
 func truncate(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	s = strings.ToValidUTF8(s, "�")
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // crockford is the ULID base32 alphabet (no I, L, O, U).

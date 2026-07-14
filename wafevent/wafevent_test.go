@@ -1,12 +1,14 @@
 package wafevent
 
 import (
+	"encoding/json"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,6 +170,47 @@ func TestTruncation(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Len(t, events[0].Host, 255)
 	assert.Len(t, events[0].Path, 200)
+}
+
+// TestTruncateUTF8Contract pins the ingest length contract: the byte length
+// the apiserver validates is len() of the JSON-decoded string, so truncate
+// must yield valid UTF-8 (json.Marshal turns each invalid byte into a 3-byte
+// U+FFFD) and never split a multi-byte rune at the cut. A violation silently
+// loses the whole event server-side — binary path probes are exactly the
+// traffic this feature exists to show.
+func TestTruncateUTF8Contract(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		in   string
+		n    int
+	}{
+		{"ascii under", "/login", 200},
+		{"ascii cut", strings.Repeat("p", 300), 200},
+		{"multibyte rune split at cut", strings.Repeat("ก", 100), 200}, // 3-byte rune; 200 % 3 != 0
+		{"invalid utf8 binary probe", "/probe-" + strings.Repeat("\xff", 100), 200},
+		{"invalid utf8 long", strings.Repeat("\xff\xfe", 300), 200},
+		{"replacement runes at boundary", strings.Repeat("a\xff", 150), 200},
+		{"host cap", strings.Repeat("é", 200), 255}, // 2-byte rune; 255 is odd
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := truncate(tc.in, tc.n)
+			assert.True(t, utf8.ValidString(got), "truncate must emit valid UTF-8")
+			assert.LessOrEqual(t, len(got), tc.n)
+
+			// The round trip the wire performs must preserve the byte length
+			// the server checks.
+			raw, err := json.Marshal(got)
+			require.NoError(t, err)
+			var decoded string
+			require.NoError(t, json.Unmarshal(raw, &decoded))
+			assert.Equal(t, got, decoded)
+			assert.LessOrEqual(t, len(decoded), tc.n, "decoded length must respect the ingest cap")
+		})
+	}
 }
 
 func TestReadCursorPagination(t *testing.T) {
