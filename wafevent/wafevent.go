@@ -1,22 +1,23 @@
 // Package wafevent keeps a bounded, sampled in-memory ring of zone WAF match
-// events and serves them to an in-cluster poller (the deploys-app collector)
-// over a bearer-token-authenticated cursor endpoint. It is the engine half of
+// events and pushes them from a per-pod background flusher directly to the
+// deploys-app apiserver's collector.setWAFEvents RPC. It is the engine half of
 // SPEC-waf-events: counters (parapet_waf_matches) remain the source of truth
-// for counts; these are forensic samples, never a full request log.
+// for counts; these are forensic samples, never a full request log. The ring
+// is a send buffer — the only consumer is the in-process Flusher, which drains
+// events past its high-water mark; nothing here listens on the network.
 package wafevent
 
 import (
-	"crypto/rand"
 	"encoding/binary"
-	"encoding/hex"
 	mrand "math/rand/v2"
 	"sync"
 	"time"
 )
 
 // DefaultCapacity is the ring size used by the controller: 8192 events is a
-// few MiB worst-case and far more than one poll interval of admitted events
-// (the sampling caps bound admission, not the poller).
+// few MiB worst-case, larger than one push batch (maxBatch) and over two
+// hours of a single zone at its 60/min sampling cap — enough slack to ride
+// out an ingest outage before drop-oldest eviction engages.
 const DefaultCapacity = 8192
 
 // Sampling caps, applied per minute-aligned window. The buffer is per
@@ -34,23 +35,23 @@ const (
 	maxPathBytes = 200
 )
 
-// Event is one sampled WAF match. Wire format of the cursor endpoint
-// (SPEC-waf-events §C.1); field order and JSON names are the contract with
-// the collector.
+// Event is one sampled WAF match (SPEC-waf-events §C.1). The Flusher maps it
+// to the collector.setWAFEvents wire item (see flusher.go); Zone and Seq stay
+// ring-local and never go on the wire.
 type Event struct {
-	ID       string `json:"id"`     // ULID, minted at append (time-ordered, global dedupe key)
-	Seq      uint64 `json:"-"`      // pod-local monotonic cursor
-	At       int64  `json:"at"`     // unix seconds
-	Zone     string `json:"zone"`   // registry key <namespace>/<configmap>
-	RuleID   string `json:"ruleId"` // full project-prefixed id
-	Action   string `json:"action"` // log|allow|block
-	Status   int    `json:"status"` // configured block status (403 default)
-	ClientIP string `json:"clientIp"`
-	Country  string `json:"country"` // ISO 3166-1 alpha-2, "" if unresolved
-	ASN      int64  `json:"asn"`     // 0 if unresolved
-	Method   string `json:"method"`
-	Host     string `json:"host"` // truncated to 255 bytes
-	Path     string `json:"path"` // URL.Path only (no query), truncated to 200 bytes
+	ID       string // ULID, minted at append (time-ordered, global dedupe key)
+	Seq      uint64 // pod-local monotonic seq; the flusher's high-water mark counts these
+	At       int64  // unix seconds
+	Zone     string // registry key <namespace>/<configmap>
+	RuleID   string // full project-prefixed id (<projectID>-<rand>)
+	Action   string // log|allow|block
+	Status   int    // configured block status (403 default)
+	ClientIP string
+	Country  string // ISO 3166-1 alpha-2, "" if unresolved
+	ASN      int64  // 0 if unresolved
+	Method   string
+	Host     string // truncated to 255 bytes
+	Path     string // URL.Path only (no query), truncated to 200 bytes
 }
 
 type ruleKey struct {
@@ -71,9 +72,8 @@ type Buffer struct {
 	// runs under the buffer lock and must be cheap.
 	OnDrop func(zone string)
 
-	mu   sync.Mutex
-	boot string  // random per-process id; a mismatch tells the poller its cursor died with the old process
-	buf  []Event // ring: seqs inside are contiguous, oldest at start
+	mu  sync.Mutex
+	buf []Event // ring: seqs inside are contiguous, oldest at start
 	start,
 	size int
 	seq uint64 // last assigned; increments only for admitted (stored) events
@@ -90,10 +90,7 @@ func NewBuffer(capacity int) *Buffer {
 	if capacity <= 0 {
 		capacity = DefaultCapacity
 	}
-	var boot [8]byte
-	_, _ = rand.Read(boot[:])
 	return &Buffer{
-		boot:      hex.EncodeToString(boot[:]),
 		buf:       make([]Event, capacity),
 		zoneCount: map[string]int{},
 		ruleCount: map[ruleKey]int{},
@@ -144,7 +141,7 @@ func (b *Buffer) Append(e Event, enrich func(*Event)) (stored bool) {
 	var slot *Event
 	if b.size == len(b.buf) {
 		// Full: evict the oldest to admit the new event (newest wins — the
-		// poller lagging a whole ring means it will replay from here anyway).
+		// flusher lagging a whole ring means it will resume from here anyway).
 		b.drop(b.buf[b.start].Zone)
 		slot = &b.buf[b.start]
 		b.start = (b.start + 1) % len(b.buf)
@@ -169,17 +166,15 @@ func (b *Buffer) drop(zone string) {
 }
 
 // Read returns up to max events with Seq > after, oldest first, plus the
-// cursor to pass as after next time and the buffer's boot id. A boot mismatch
-// (process restarted) or an after older than the ring's tail restarts from the
-// oldest retained event — duplicates are possible and harmless (the consumer
-// dedupes on the ULID ID).
-func (b *Buffer) Read(boot string, after uint64, max int) (events []Event, next uint64, bootID string) {
+// cursor to pass as after next time (the flusher's high-water mark). An after
+// older than the ring's tail — drop-oldest eviction outran the flusher —
+// resumes from the oldest retained event; duplicates on the wire are possible
+// and harmless (the ingest dedupes on the ULID ID). Ring, mark, and process
+// restart together, so there is no cross-process cursor to reconcile.
+func (b *Buffer) Read(after uint64, max int) (events []Event, next uint64) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if boot != b.boot {
-		after = 0
-	}
 	if after > b.seq {
 		// A cursor from the future can't be served; restart from the tail.
 		after = 0
@@ -190,7 +185,7 @@ func (b *Buffer) Read(boot string, after uint64, max int) (events []Event, next 
 	}
 	next = after
 	if b.size == 0 || from > b.seq {
-		return nil, next, b.boot
+		return nil, next
 	}
 	n := b.seq - from + 1
 	if max > 0 && uint64(max) < n {
@@ -202,7 +197,7 @@ func (b *Buffer) Read(boot string, after uint64, max int) (events []Event, next 
 		events[i] = b.buf[(b.start+int(from-oldest)+i)%len(b.buf)]
 	}
 	next = from + n - 1
-	return events, next, b.boot
+	return events, next
 }
 
 func truncate(s string, n int) string {

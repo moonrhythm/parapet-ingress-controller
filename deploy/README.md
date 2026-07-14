@@ -25,9 +25,5 @@ $ kubectl apply -f https://raw.githubusercontent.com/moonrhythm/parapet-ingress-
 
 $ kubectl apply -f https://raw.githubusercontent.com/moonrhythm/parapet-ingress-controller/main/deploy/02-service.yaml
 
-# only when WAF match-event sampling is on (WAF_EVENTS_TOKEN set): headless
-# Service so the in-cluster poller discovers controller pods via DNS
-$ kubectl apply -f https://raw.githubusercontent.com/moonrhythm/parapet-ingress-controller/main/deploy/03-service-pods.yaml
-
 $ kubectl apply -f https://raw.githubusercontent.com/moonrhythm/parapet-ingress-controller/main/deploy/deployment.yaml
 ```

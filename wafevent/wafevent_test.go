@@ -45,7 +45,7 @@ func TestRingCapOverwritesOldest(t *testing.T) {
 		require.True(t, b.Append(blockEvent("ns/z", "r1"), nil))
 	}
 
-	events, next, _ := b.Read(b.boot, 0, 100)
+	events, next := b.Read(0, 100)
 	require.Len(t, events, 4, "ring keeps only the newest capacity events")
 	assert.Equal(t, uint64(3), events[0].Seq, "oldest two were overwritten")
 	assert.Equal(t, uint64(6), events[3].Seq)
@@ -145,7 +145,7 @@ func TestCapRejectionSkipsEnrichAndMint(t *testing.T) {
 	}
 	assert.Equal(t, 10, enriched, "enrich runs only for admitted events")
 
-	events, _, _ := b.Read(b.boot, 0, 100)
+	events, _ := b.Read(0, 100)
 	require.Len(t, events, 10)
 	for _, e := range events {
 		assert.Len(t, e.ID, 26, "admitted events carry a minted ULID")
@@ -164,7 +164,7 @@ func TestTruncation(t *testing.T) {
 	e.Path = strings.Repeat("p", 300)
 	require.True(t, b.Append(e, nil))
 
-	events, _, _ := b.Read(b.boot, 0, 1)
+	events, _ := b.Read(0, 1)
 	require.Len(t, events, 1)
 	assert.Len(t, events[0].Host, 255)
 	assert.Len(t, events[0].Path, 200)
@@ -178,27 +178,26 @@ func TestReadCursorPagination(t *testing.T) {
 		require.True(t, b.Append(blockEvent("ns/z", "r1"), nil))
 	}
 
-	events, next, boot := b.Read(b.boot, 0, 3)
+	events, next := b.Read(0, 3)
 	require.Len(t, events, 3)
 	assert.Equal(t, uint64(3), next)
-	assert.Equal(t, b.boot, boot)
 
-	events, next, _ = b.Read(boot, next, 3)
+	events, next = b.Read(next, 3)
 	require.Len(t, events, 3)
 	assert.Equal(t, uint64(4), events[0].Seq)
 	assert.Equal(t, uint64(6), next)
 
-	events, next, _ = b.Read(boot, 6, 100)
+	events, next = b.Read(6, 100)
 	require.Len(t, events, 4)
 	assert.Equal(t, uint64(10), next)
 
 	// Exhausted: no events, cursor echoes back.
-	events, next, _ = b.Read(boot, 10, 100)
+	events, next = b.Read(10, 100)
 	assert.Empty(t, events)
 	assert.Equal(t, uint64(10), next)
 }
 
-func TestReadBootMismatchReplaysFromTail(t *testing.T) {
+func TestReadClampsToRetainedTail(t *testing.T) {
 	t.Parallel()
 
 	b, _ := newTestBuffer(4)
@@ -206,20 +205,16 @@ func TestReadBootMismatchReplaysFromTail(t *testing.T) {
 		require.True(t, b.Append(blockEvent("ns/z", "r1"), nil))
 	}
 
-	// A cursor from a previous process (different boot) restarts from the
-	// oldest retained event, as does an after older than the ring tail.
-	events, next, _ := b.Read("stale-boot", 5, 100)
-	require.Len(t, events, 4)
+	// An after older than the ring tail (drop-oldest eviction outran the
+	// flusher) resumes from the oldest retained event.
+	events, next := b.Read(1, 100)
+	require.Len(t, events, 4, "after below the retained tail resumes from the tail")
 	assert.Equal(t, uint64(3), events[0].Seq)
 	assert.Equal(t, uint64(6), next)
 
-	events, _, _ = b.Read(b.boot, 1, 100)
-	require.Len(t, events, 4, "after below the retained tail replays from the tail")
-	assert.Equal(t, uint64(3), events[0].Seq)
-
-	// A future cursor (same boot — can't happen, but must not panic or hang)
-	// also replays from the tail.
-	events, _, _ = b.Read(b.boot, 99, 100)
+	// A future cursor (can't happen in-process, but must not panic or hang)
+	// also resumes from the tail.
+	events, _ = b.Read(99, 100)
 	require.Len(t, events, 4)
 }
 
@@ -227,10 +222,9 @@ func TestReadEmptyBuffer(t *testing.T) {
 	t.Parallel()
 
 	b, _ := newTestBuffer(8)
-	events, next, boot := b.Read("", 0, 100)
+	events, next := b.Read(0, 100)
 	assert.Empty(t, events)
 	assert.Zero(t, next)
-	assert.Len(t, boot, 16, "boot id is 16 hex chars")
 }
 
 // TestConcurrentAppendRead hammers the one mutex-guarded structure every
@@ -269,15 +263,15 @@ func TestConcurrentAppendRead(t *testing.T) {
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()
 
-	// Within one boot the reader must never see a duplicate or rewound seq —
-	// even when eviction outruns it and Read replays from the ring tail — and
-	// every ULID must be unique.
+	// The reader must never see a duplicate or rewound seq — even when
+	// eviction outruns it and Read resumes from the ring tail — and every
+	// ULID must be unique.
 	seenIDs := make(map[string]bool)
 	var last uint64
-	boot, after := "", uint64(0)
+	after := uint64(0)
 	for drained := false; !drained; {
-		events, next, gotBoot := b.Read(boot, after, 50)
-		boot, after = gotBoot, next
+		events, next := b.Read(after, 50)
+		after = next
 		for _, e := range events {
 			require.Greater(t, e.Seq, last, "seqs must be strictly increasing across pages")
 			last = e.Seq

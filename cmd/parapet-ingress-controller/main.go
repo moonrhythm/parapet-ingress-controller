@@ -294,40 +294,41 @@ func main() {
 	}
 
 	// WAF match events (SPEC-waf-events): a per-pod sampled ring of zone match
-	// samples served to the in-cluster collector on a bearer-authed cursor
-	// endpoint. Off unless WAF_EVENTS_TOKEN is set — the token is REQUIRED, not
-	// optional like the :9187 counters' trust stance, because tenant workloads
-	// share the flat cluster network and the ring holds client IPs + paths for
-	// every zone in the location. Inert until polled.
+	// samples drained by a background flusher that POSTs batches directly to
+	// the deploys-app apiserver's collector.setWAFEvents RPC, authenticated by
+	// the location's collector token. Push, not serve: nothing tenant-reachable
+	// is added to the data plane — no listener, no port, no Service. With the
+	// push envs unset the feature is fully inert (no ring, no goroutine).
 	if wafConfig.Enabled {
-		wafEventsListen := config.StringDefault("WAF_EVENTS_LISTEN", ":9188")
-		wafEventsToken := config.String("WAF_EVENTS_TOKEN")
-		if wafEventsListen != "" && wafEventsToken != "" {
+		pushURL := config.String("WAF_EVENTS_PUSH_URL")
+		pushToken := config.String("WAF_EVENTS_PUSH_TOKEN")
+		pushLocation := config.String("WAF_EVENTS_PUSH_LOCATION")
+		switch {
+		case pushURL == "" && pushToken == "":
+			// Not configured: fully inert.
+		case pushURL == "" || pushToken == "":
+			slog.Info("waf: match-event push stays disabled — WAF_EVENTS_PUSH_URL and WAF_EVENTS_PUSH_TOKEN must both be set")
+		case pushLocation == "":
+			// The operator opted in (URL + token set), so half-config is
+			// misconfig, not a degraded mode: without the location the RPC's
+			// per-location token check can never pass. Fail fast, like
+			// WAF_VALIDATED_PROXY.
+			slog.Error("waf: WAF_EVENTS_PUSH_LOCATION is required when WAF_EVENTS_PUSH_URL and WAF_EVENTS_PUSH_TOKEN are set")
+			os.Exit(1)
+		default:
 			buf := wafevent.NewBuffer(wafevent.DefaultCapacity)
 			buf.OnDrop = metric.WAFEventDrop
 			wafConfig.Events = buf
-			slog.Info("waf: match-event sampling enabled", "listen", wafEventsListen)
-			go func() {
-				srv := &http.Server{
-					Addr:    wafEventsListen,
-					Handler: wafevent.NewHandler(buf, wafEventsToken),
-					// Tenant pods can reach this port (auth is token-gated but
-					// TCP isn't), so bound every connection phase — otherwise
-					// unauthenticated keep-alive connections could pin
-					// goroutines/FDs in the data-plane process indefinitely.
-					ReadHeaderTimeout: 10 * time.Second,
-					ReadTimeout:       10 * time.Second,
-					WriteTimeout:      30 * time.Second,
-					IdleTimeout:       60 * time.Second,
-				}
-				// The operator opted in (token set), so a failed listen is
-				// misconfig, not a degraded mode: the ring would mint + enrich
-				// forever with no possible consumer while only the collector's
-				// poll failures notice. Fail fast, like WAF_VALIDATED_PROXY.
-				err := srv.ListenAndServe()
-				slog.Error("waf: events endpoint failed", "error", err)
-				os.Exit(1)
-			}()
+			flusher := &wafevent.Flusher{
+				Buffer:   buf,
+				URL:      pushURL,
+				Token:    pushToken,
+				Location: pushLocation,
+				Interval: config.DurationDefault("WAF_EVENTS_PUSH_INTERVAL", wafevent.DefaultFlushInterval),
+				OnPush:   metric.WAFEventPush,
+			}
+			slog.Info("waf: match-event push enabled", "url", pushURL, "location", pushLocation, "interval", flusher.Interval)
+			go flusher.Run(context.Background())
 		}
 	}
 

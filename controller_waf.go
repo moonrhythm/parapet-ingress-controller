@@ -57,10 +57,11 @@ type WAFConfig struct {
 	// here. Must be set before GlobalWAF() is mounted.
 	SkipValidated func(*http.Request) bool
 	// Events, when non-nil, receives sampled zone-scope match events (the
-	// per-pod ring served to the collector on WAF_EVENTS_LISTEN — see
-	// SPEC-waf-events). nil disables capture entirely; global-scope matches are
-	// never captured (the platform baseline is ours to debug, not tenant data).
-	// Set from WAF_EVENTS_* in main, before InitWAF().
+	// per-pod send-buffer ring a background flusher pushes to the deploys-app
+	// collector.setWAFEvents RPC — see SPEC-waf-events). nil disables capture
+	// entirely; global-scope matches are never captured (the platform baseline
+	// is ours to debug, not tenant data). Set from WAF_EVENTS_PUSH_* in main,
+	// before InitWAF().
 	Events *wafevent.Buffer
 }
 

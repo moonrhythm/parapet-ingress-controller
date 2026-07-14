@@ -486,7 +486,7 @@ func TestZoneWAFMatchFeedsEventRing(t *testing.T) {
 
 	ctrl.newZoneWAF("cust1/acme").OnMatch(match)
 
-	events, _, _ := buf.Read("", 0, 10)
+	events, _ := buf.Read(0, 10)
 	require.Len(t, events, 1)
 	e := events[0]
 	assert.Equal(t, "cust1/acme", e.Zone)
@@ -503,14 +503,14 @@ func TestZoneWAFMatchFeedsEventRing(t *testing.T) {
 
 	// Global-scope matches are platform data, never buffered.
 	ctrl.globalWAF.OnMatch(match)
-	events, _, _ = buf.Read("", 0, 10)
+	events, _ = buf.Read(0, 10)
 	assert.Len(t, events, 1)
 }
 
 func TestZoneWAFMatchNoEventBuffer(t *testing.T) {
 	t.Parallel()
 
-	// WAFConfig.Events nil (WAF_EVENTS_TOKEN unset): matches must not capture
+	// WAFConfig.Events nil (WAF_EVENTS_PUSH_* unset): matches must not capture
 	// anything and must not panic — the feature is entirely inert.
 	ctrl := newWAFController()
 	r := httptest.NewRequest(http.MethodGet, "http://example.com/x", nil)
