@@ -32,6 +32,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 	"github.com/moonrhythm/parapet-ingress-controller/trust"
 	"github.com/moonrhythm/parapet-ingress-controller/trustcidr"
+	"github.com/moonrhythm/parapet-ingress-controller/wafevent"
 )
 
 var version = "HEAD"
@@ -289,6 +290,52 @@ func main() {
 			slog.Warn("WAF_VALIDATED_PROXY set but WAF_ENABLED is off — nothing to skip", "spec", spec)
 		} else if pred != nil {
 			slog.Info("waf: skipping evaluation for traffic already validated at a trusted hop", "validated_proxy", spec)
+		}
+	}
+
+	// WAF match events (SPEC-waf-events): a per-pod sampled ring of zone match
+	// samples drained by a background flusher that POSTs batches directly to
+	// the deploys-app apiserver's collector.setWAFEvents RPC, authenticated by
+	// the location's collector token. Push, not serve: nothing tenant-reachable
+	// is added to the data plane — no listener, no port, no Service. With the
+	// push envs unset the feature is fully inert (no ring, no goroutine).
+	{
+		pushURL := config.String("WAF_EVENTS_PUSH_URL")
+		pushToken := config.String("WAF_EVENTS_PUSH_TOKEN")
+		pushLocation := config.String("WAF_EVENTS_PUSH_LOCATION")
+		switch {
+		case !wafConfig.Enabled:
+			if pushURL != "" || pushToken != "" || pushLocation != "" {
+				// An explicit opt-in deserves feedback, same as
+				// WAF_VALIDATED_PROXY above: nothing is captured without the WAF.
+				slog.Warn("waf: WAF_EVENTS_PUSH_* set but WAF_ENABLED is off — match-event push stays disabled")
+			}
+		case pushURL == "" && pushToken == "":
+			// Not configured: fully inert.
+		case pushURL == "" || pushToken == "":
+			slog.Info("waf: match-event push stays disabled — WAF_EVENTS_PUSH_URL and WAF_EVENTS_PUSH_TOKEN must both be set")
+		case pushLocation == "":
+			// The operator opted in (URL + token set), so half-config is
+			// misconfig, not a degraded mode: without the location the RPC's
+			// per-location token check can never pass. Fail fast, like
+			// WAF_VALIDATED_PROXY.
+			slog.Error("waf: WAF_EVENTS_PUSH_LOCATION is required when WAF_EVENTS_PUSH_URL and WAF_EVENTS_PUSH_TOKEN are set")
+			os.Exit(1)
+		default:
+			buf := wafevent.NewBuffer(wafevent.DefaultCapacity)
+			buf.OnDrop = metric.WAFEventDrop
+			wafConfig.Events = buf
+			// Cadence stays a constant (SPEC-waf-events §F: retunable in a
+			// release, not an env) — Flusher.Interval is a test seam only.
+			flusher := &wafevent.Flusher{
+				Buffer:   buf,
+				URL:      pushURL,
+				Token:    pushToken,
+				Location: pushLocation,
+				OnPush:   metric.WAFEventPush,
+			}
+			slog.Info("waf: match-event push enabled", "url", pushURL, "location", pushLocation, "interval", wafevent.DefaultFlushInterval)
+			go flusher.Run(context.Background())
 		}
 	}
 

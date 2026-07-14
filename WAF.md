@@ -367,6 +367,52 @@ The engine is free (`pkg/waf`); the work is plumbing.
 | `WAF_INSPECT_BODY` | `0` | Inspect up to N body bytes (0 = `request.body` is empty) |
 | `WAF_DISABLE_MACROS` | `false` | Refuse rules using `all`/`exists`/`map`/`filter` |
 | `WAF_VALIDATED_PROXY` | `""` | Skip evaluation for requests from hops that already ran the same rules (the edge): comma list of `edge-mtls` (peer client cert chains to the live edge CA) and/or CIDRs/named groups (immediate peer); also requires the edge's per-request `X-Parapet-Waf` claim. `true` refused; bad spec fatal at startup |
+| `WAF_EVENTS_PUSH_URL` | `""` (off) | deploys-app `collector.setWAFEvents` RPC URL sampled match events are pushed to (see "Match events" below) |
+| `WAF_EVENTS_PUSH_TOKEN` | `""` (off) | Bearer token for the push — the location's collector token (from a Secret); URL or token unset = the whole feature is inert |
+| `WAF_EVENTS_PUSH_LOCATION` | `""` | Location id sent with each batch; required once URL + token are set (missing = fatal at startup) |
+
+### Match events (sampled ring + direct push)
+
+Opt-in (`WAF_EVENTS_PUSH_URL` + `WAF_EVENTS_PUSH_TOKEN` +
+`WAF_EVENTS_PUSH_LOCATION`; requires `WAF_ENABLED`): counters answer "how
+often did rule X fire", not "what did it match". When enabled, each pod keeps
+a bounded in-memory ring (`wafevent/`, 8192 events) of sampled **zone**-scope
+match events fed from the same `OnMatch` hook as the metric — ULID id, time,
+zone key, rule id, action, status, client IP, GeoIP country/ASN, method, host
+(≤255 B), path (≤200 B, never the query string). The ring is a **send
+buffer**: a per-pod background flusher drains events past a local high-water
+mark every 30s (a constant, like the sampling caps; replicas de-phase with a
+random startup delay) and POSTs one JSON batch (≤5000 events) directly to the
+deploys-app apiserver:
+
+```
+POST <WAF_EVENTS_PUSH_URL>                       (collector.setWAFEvents)
+Authorization: Bearer <WAF_EVENTS_PUSH_TOKEN>    (the location's collector token)
+{"location":"<WAF_EVENTS_PUSH_LOCATION>","list":[{"id":"<ULID>","projectId":"…",
+ "ruleId":"…","action":"…","status":…,"at":…,"clientIp":"…","country":"…",
+ "asn":…,"method":"…","host":"…","path":"…"}, …]}
+
+200 {"ok":true}
+```
+
+`projectId` is parsed from the rule id's `<projectID>-` prefix (unattributable
+ids are skipped); the server re-checks the pairing. The high-water mark
+advances **only** on a confirmed `{"ok":true}` response — anything else keeps
+the mark and the next tick retries (one POST per batch per tick, never a hot
+loop), so delivery is at-least-once into a ULID-deduped ingest; drop-oldest
+ring eviction bounds memory when the apiserver is unreachable, an acceptable
+trade because events are samples and the counters stay exact. Sampling caps
+per (zone, pod), per minute-aligned window: **10 per rule** (`block` events
+exempt — blocks are what users came to see) and **60 per zone** (hard ceiling,
+blocks included). The cap check short-circuits before the ULID mint and the
+GeoIP enrichment, so a saturated flood costs one mutex hit + two map reads per
+match; drops (cap or ring overwrite) count `parapet_waf_event_drops{zone}` and
+confirmed-stored events count `parapet_waf_event_pushed`. Global-scope matches
+are never captured (platform data, not tenant data), and rule semantics are
+untouched — the conformance corpus doesn't change. N replicas are N
+independent pushers (per-pod rings, marks, ULIDs — zero coordination), and
+nothing tenant-reachable is added to the data plane: no listener, no port, no
+Service, no endpoint token.
 
 ### RBAC
 

@@ -19,6 +19,7 @@ import (
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
+	"github.com/moonrhythm/parapet-ingress-controller/wafevent"
 	"github.com/moonrhythm/parapet-ingress-controller/wafrule"
 )
 
@@ -55,6 +56,13 @@ type WAFConfig struct {
 	// WAF_VALIDATED_PROXY in main; nil (the default) evaluates every request
 	// here. Must be set before GlobalWAF() is mounted.
 	SkipValidated func(*http.Request) bool
+	// Events, when non-nil, receives sampled zone-scope match events (the
+	// per-pod send-buffer ring a background flusher pushes to the deploys-app
+	// collector.setWAFEvents RPC — see SPEC-waf-events). nil disables capture
+	// entirely; global-scope matches are never captured (the platform baseline
+	// is ours to debug, not tenant data). Set from WAF_EVENTS_PUSH_* in main,
+	// before InitWAF().
+	Events *wafevent.Buffer
 }
 
 // InitWAF builds the global WAF instance and the (empty) zone registry. Call
@@ -114,6 +122,18 @@ func (ctrl *Controller) LookupZone(key string) *waf.WAF {
 // newWAF builds a WAF instance with the configured tunables and wires match
 // events to metrics + logging. scope ("global"/"zone") is the metric label.
 func (ctrl *Controller) newWAF(scope string) *waf.WAF {
+	return ctrl.newScopedWAF(scope, "")
+}
+
+// newZoneWAF builds the WAF instance for one zone registry key
+// (<namespace>/<name>). newWAF is per-scope, not per-zone, so the zone
+// identity must be closed over at instance construction for sampled match
+// events to carry it — one waf.WAF belongs to exactly one registry key.
+func (ctrl *Controller) newZoneWAF(key string) *waf.WAF {
+	return ctrl.newScopedWAF(roleZone, key)
+}
+
+func (ctrl *Controller) newScopedWAF(scope, zoneKey string) *waf.WAF {
 	w := waf.New()
 	if ctrl.WAFConfig.FailClosed {
 		w.FailMode = waf.FailClosed
@@ -133,6 +153,12 @@ func (ctrl *Controller) newWAF(scope string) *waf.WAF {
 	// Eval latency + outcome, once per evaluated request — the pass path OnMatch
 	// can't see. Handles resolve here (per WAF instance), not per request.
 	w.Observe = observe.WAFEval(scope)
+	// The event ring only samples zone-scope matches (tenant data); resolved
+	// once at instance construction so the hook below stays branch-cheap.
+	events := ctrl.WAFConfig.Events
+	if zoneKey == "" {
+		events = nil
+	}
 	w.OnMatch = func(ev waf.MatchEvent) {
 		metric.WAFMatch(ev.RuleID, ev.Action.String(), scope)
 		lvl := slog.LevelDebug
@@ -143,6 +169,34 @@ func (ctrl *Controller) newWAF(scope string) *waf.WAF {
 			"scope", scope, "rule", ev.RuleID, "action", ev.Action.String(),
 			"status", ev.Status, "ip", ev.ClientIP, "method", ev.Request.Method,
 			"host", ev.Request.Host, "path", ev.Request.URL.Path)
+		if events != nil {
+			r := ev.Request
+			// The enrich callback runs only for events admitted past the
+			// sampling caps, so a cap-rejected flood never pays the GeoIP
+			// lookups. MatchEvent doesn't carry country/ASN, so they're
+			// re-resolved here (memory lookups, memoized per client IP).
+			events.Append(wafevent.Event{
+				Zone:     zoneKey,
+				RuleID:   ev.RuleID,
+				Action:   ev.Action.String(),
+				Status:   ev.Status,
+				ClientIP: ev.ClientIP,
+				Method:   r.Method,
+				Host:     r.Host,
+				Path:     r.URL.Path,
+			}, func(out *wafevent.Event) {
+				if f := ctrl.WAFConfig.Country; f != nil {
+					// The WAF resolver's "XX" sentinel means "DB loaded, IP
+					// unresolved"; the event wire format wants "" for that.
+					if cc := f(r); cc != "XX" {
+						out.Country = cc
+					}
+				}
+				if f := ctrl.WAFConfig.ASN; f != nil {
+					out.ASN = f(r)
+				}
+			})
+		}
 	}
 	return w
 }
@@ -283,7 +337,7 @@ func (ctrl *Controller) reloadWAFDebounced() {
 			continue
 		}
 		if !reused {
-			w = ctrl.newWAF(roleZone)
+			w = ctrl.newZoneWAF(key)
 		}
 		if rules, err := wafrule.Parse(docs...); err != nil {
 			slog.Error("waf: invalid zone ruleset, keeping previous", "zone", key, "error", err)
