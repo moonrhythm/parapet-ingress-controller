@@ -276,6 +276,49 @@ func TestTrustBundleWatchSlotReleaseReacquire(t *testing.T) {
 	waitSlots(0)
 }
 
+// A SetSigner that lands AFTER the watcher's initial stale-gen check but BEFORE it
+// captures the notify channel must not strand the watcher on the fresh (never-closed)
+// channel for watchTimeout: the handler re-loads signerState under genMu and returns the
+// already-available snapshot at once. We reproduce the window deterministically by holding
+// genMu so the watcher blocks at the capture, then applying SetSigner's store-then-swap
+// under the held lock before releasing.
+func TestTrustBundleWatchRechecksGenerationAfterSubscribe(t *testing.T) {
+	certPEM, keyPEM := testEdgeCA(t)
+	sg, _, _ := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)
+	srv := NewServer(NewCertStore(), NewAuthz(nil)).WithSigner(sg, 1)
+	h := srv.Handler()
+
+	srv.genMu.Lock()
+
+	done := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/v1/trust-bundle?watch=1&since=1", nil))
+		done <- rec.Code
+	}()
+
+	// Let the watcher pass its initial (stale, gen=1) check and block on genMu.Lock while we
+	// still hold it — so its snapshot is the pre-advance one.
+	time.Sleep(20 * time.Millisecond)
+
+	// Advance the served generation exactly as SetSigner does — store the new snapshot BEFORE
+	// closing+replacing genNotify — under the lock we hold. The watcher then captures the fresh
+	// (still-open) channel; only the re-check saves it from blocking on it.
+	srv.signerState.Store(&signerGen{sg: sg, gen: 2})
+	close(srv.genNotify)
+	srv.genNotify = make(chan struct{})
+	srv.genMu.Unlock()
+
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Fatalf("watcher after subscribe-race: want 200, got %d", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher blocked on the fresh notify channel instead of returning the available snapshot")
+	}
+}
+
 func TestTrustBundleEndpoint(t *testing.T) {
 	certPEM, keyPEM := testEdgeCA(t)
 	sg, _, _ := NewProvidedSigner(certPEM, keyPEM, time.Hour, time.Minute)
