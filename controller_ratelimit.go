@@ -149,18 +149,18 @@ func (ctrl *Controller) reloadRateLimitDebounced() {
 	ctrl.watchedRLConfigMaps.Range(func(_, value any) bool {
 		cm := value.(*v1.ConfigMap)
 		role := cm.Labels[rateLimitLabelKey]
-		// Refuse a ConfigMap labeled for BOTH features (one ConfigMap per
+		// Refuse a ConfigMap labeled for more than one feature (one ConfigMap per
 		// feature, by policy): both reloaders would consume all its data values,
 		// and the lenient YAML parsers cross-parse the other feature's documents
-		// to zero entries silently — a both-labeled ConfigMap would quietly feed
-		// each side an empty/garbage set instead of erroring. Gated on a
-		// recognized ratelimit role because the fs backend ignores label
-		// selectors, so this store also holds WAF-only ConfigMaps there — those
-		// must fall through silently, not warn.
+		// to zero entries — a multi-labeled ConfigMap would quietly feed each side
+		// an empty/garbage set instead of erroring. Gated on a recognized ratelimit
+		// role because the fs backend ignores label selectors, so this store also
+		// holds other features' ConfigMaps there — those must fall through
+		// silently, not warn.
 		if role == roleGlobal || role == roleZone {
-			if _, alsoWAF := cm.Labels[wafLabelKey]; alsoWAF {
-				slog.Warn("ratelimit: ignoring configmap that also carries the waf label; use one configmap per feature",
-					"configmap", cm.Namespace+"/"+cm.Name)
+			if other, ok := carriesOtherFeatureLabel(cm, rateLimitLabelKey); ok {
+				slog.Warn("ratelimit: ignoring configmap that also carries another feature label; use one configmap per feature",
+					"configmap", cm.Namespace+"/"+cm.Name, "other_label", other)
 				return true
 			}
 		}

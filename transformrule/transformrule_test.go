@@ -309,10 +309,12 @@ transforms:
 	assert.Equal(t, "1", gotB, "other rules still apply")
 }
 
-func TestParse_EmptyDocIsInert(t *testing.T) {
+func TestParse_WhitespaceDocsAreInert(t *testing.T) {
 	t.Parallel()
 
-	z, err := transformrule.Parse(transformrule.Options{}, "transforms:\n")
+	// The sanctioned way to clear a zone is emptying the ConfigMap data (or
+	// deleting it): whitespace-only docs are skipped, yielding a valid empty Zone.
+	z, err := transformrule.Parse(transformrule.Options{}, "", "   \n\t")
 	require.NoError(t, err)
 	require.NotNil(t, z)
 	assert.True(t, z.Empty())
@@ -321,6 +323,19 @@ func TestParse_EmptyDocIsInert(t *testing.T) {
 	var proxied bool
 	serve(t, z, r, func(http.ResponseWriter, *http.Request) { proxied = true })
 	assert.True(t, proxied, "an empty zone is a pass-through")
+}
+
+func TestParse_WrongRootKeyErrors(t *testing.T) {
+	t.Parallel()
+
+	// A WAF "rules:" document that landed in a transform ConfigMap unmarshals to
+	// zero transforms with no YAML error; without the zero-transforms guard it
+	// would wipe the last-good Zone. It must error (all-or-nothing) so the
+	// controller keeps the previous Zone.
+	z, err := transformrule.Parse(transformrule.Options{}, "rules:\n  - id: a\n    expression: \"true\"")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no transforms")
+	assert.Nil(t, z)
 }
 
 func TestParse_CORSWildcardWithCredentialsRejected(t *testing.T) {

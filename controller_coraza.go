@@ -152,7 +152,22 @@ func (ctrl *Controller) reloadCorazaDebounced() {
 
 	ctrl.watchedCorazaConfigMaps.Range(func(_, value any) bool {
 		cm := value.(*v1.ConfigMap)
-		switch cm.Labels[corazaLabelKey] {
+		role := cm.Labels[corazaLabelKey]
+		// Refuse a ConfigMap labeled for more than one feature (one ConfigMap per
+		// feature, by policy): both reloaders would consume all its data values,
+		// and the lenient YAML parsers cross-parse the other feature's documents to
+		// zero entries — a multi-labeled ConfigMap would quietly feed each side an
+		// empty/garbage set. Gated on a recognized Coraza role because the fs
+		// backend ignores label selectors, so this store also holds other features'
+		// ConfigMaps there — those must fall through silently, not warn.
+		if role == roleGlobal || role == roleZone {
+			if other, ok := carriesOtherFeatureLabel(cm, corazaLabelKey); ok {
+				slog.Warn("coraza: ignoring configmap that also carries another feature label; use one configmap per feature",
+					"configmap", cm.Namespace+"/"+cm.Name, "other_label", other)
+				return true
+			}
+		}
+		switch role {
 		case roleGlobal:
 			// Global rules are platform-owned: only honored from the controller's
 			// own namespace so a tenant can't inject baseline rules.

@@ -55,6 +55,31 @@ limits:
 		assert.Equal(t, "ok", limits[0].ID)
 	})
 
+	t.Run("wrong root key yields zero limits and errors", func(t *testing.T) {
+		// A WAF "rules:" document that landed in a rate-limit ConfigMap unmarshals
+		// to zero limits with no YAML error; without the zero-limits guard it would
+		// wipe the last-good set. It must error so SetLimits keeps the previous
+		// limits, and the good doc alongside it still parses (per-doc collection).
+		limits, err := ratelimitrule.Parse(
+			"rules:\n  - id: a\n    expression: \"true\"",
+			`
+limits:
+  - id: ok
+    rate: 1
+    window: 1s
+`)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no limits")
+		require.Len(t, limits, 1)
+		assert.Equal(t, "ok", limits[0].ID)
+	})
+
+	t.Run("whitespace-only docs stay skipped (no error)", func(t *testing.T) {
+		limits, err := ratelimitrule.Parse("", "   \n\t")
+		require.NoError(t, err)
+		assert.Empty(t, limits)
+	})
+
 	t.Run("all fields map", func(t *testing.T) {
 		limits, err := ratelimitrule.Parse(`
 limits:

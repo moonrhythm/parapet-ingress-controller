@@ -84,7 +84,10 @@ func (r *WafReloader) drain(ctx context.Context, ch <-chan watch.Event) {
 }
 
 // reload lists WAF ConfigMaps across the watch namespace and rebuilds the global
-// ruleset (podNamespace only) and the zone registry (any namespace).
+// ruleset (podNamespace only) and the zone registry (any namespace). A ConfigMap
+// that also carries another feature's label is refused (one ConfigMap per
+// feature, mirroring the controller: the edge's lenient YAML parsers would
+// cross-parse the other feature's documents to zero entries silently).
 func (r *WafReloader) reload(ctx context.Context) error {
 	cms, err := k8s.GetConfigMaps(ctx, r.watchNamespace, WAFLabelKey)
 	if err != nil {
@@ -93,6 +96,14 @@ func (r *WafReloader) reload(ctx context.Context) error {
 	projected := make([]wafConfigMap, 0, len(cms))
 	for i := range cms {
 		cm := &cms[i]
+		role := cm.Labels[WAFLabelKey]
+		if role == wafRoleGlobal || role == wafRoleZone {
+			if other, ok := carriesOtherFeatureLabel(cm.Labels, WAFLabelKey); ok {
+				slog.Warn("edgecp: ignoring configmap that carries the waf label and another feature label; use one configmap per feature",
+					"configmap", cm.Namespace+"/"+cm.Name, "other_label", other)
+				continue
+			}
+		}
 		projected = append(projected, wafConfigMap{
 			namespace: cm.Namespace,
 			name:      cm.Name,

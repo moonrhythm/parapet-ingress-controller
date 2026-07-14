@@ -81,7 +81,10 @@ func (r *CorazaReloader) drain(ctx context.Context, ch <-chan watch.Event) {
 }
 
 // reload lists Coraza ConfigMaps across the watch namespace and rebuilds the
-// global ruleset (podNamespace only) and the zone registry (any namespace).
+// global ruleset (podNamespace only) and the zone registry (any namespace). A
+// ConfigMap that also carries another feature's label is refused (one ConfigMap
+// per feature, mirroring the controller: the edge's lenient YAML parsers would
+// cross-parse the other feature's documents to zero entries silently).
 func (r *CorazaReloader) reload(ctx context.Context) error {
 	cms, err := k8s.GetConfigMaps(ctx, r.watchNamespace, CorazaLabelKey)
 	if err != nil {
@@ -90,6 +93,14 @@ func (r *CorazaReloader) reload(ctx context.Context) error {
 	projected := make([]wafConfigMap, 0, len(cms))
 	for i := range cms {
 		cm := &cms[i]
+		role := cm.Labels[CorazaLabelKey]
+		if role == corazaRoleGlobal || role == corazaRoleZone {
+			if other, ok := carriesOtherFeatureLabel(cm.Labels, CorazaLabelKey); ok {
+				slog.Warn("edgecp: ignoring configmap that carries the coraza label and another feature label; use one configmap per feature",
+					"configmap", cm.Namespace+"/"+cm.Name, "other_label", other)
+				continue
+			}
+		}
 		projected = append(projected, wafConfigMap{
 			namespace: cm.Namespace,
 			name:      cm.Name,

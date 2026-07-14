@@ -96,6 +96,27 @@ rules:
 		require.Error(t, err)
 	})
 
+	t.Run("wrong root key yields zero rules and errors", func(t *testing.T) {
+		// A rate-limit "limits:" document that landed in a WAF ConfigMap unmarshals
+		// to zero rules with no YAML error; without the zero-rules guard it would
+		// wipe the last-good ruleset. It must error so SetRules keeps the previous
+		// rules, and the good doc alongside it still parses (per-doc collection).
+		rules, err := wafrule.Parse(
+			"limits:\n  - id: a\n    rate: 1\n    window: 1s",
+			"rules:\n  - id: ok\n    expression: \"true\"",
+		)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no rules")
+		require.Len(t, rules, 1)
+		assert.Equal(t, "ok", rules[0].ID)
+	})
+
+	t.Run("whitespace-only docs stay skipped (no error)", func(t *testing.T) {
+		rules, err := wafrule.Parse("", "   \n\t")
+		require.NoError(t, err)
+		assert.Empty(t, rules)
+	})
+
 	t.Run("rules feed waf.SetRules", func(t *testing.T) {
 		rules, err := wafrule.Parse(`
 rules:

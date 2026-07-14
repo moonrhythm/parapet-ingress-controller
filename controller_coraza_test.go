@@ -176,6 +176,21 @@ func TestReloadCoraza_ConcurrentReloadsRaceFree(t *testing.T) {
 	require.NotNil(t, ctrl.LookupCorazaZone("cust/gamma"))
 }
 
+func TestReloadCoraza_IgnoresMultiLabeledConfigMap(t *testing.T) {
+	t.Parallel()
+
+	ctrl := newCorazaController()
+	cm := corazaCM("cust", "acme", roleZone, denyAttackURI)
+	// also labeled for the WAF: a ConfigMap must carry one feature label, else
+	// both reloaders consume its data and cross-parse to empty/garbage sets.
+	cm.Labels[wafLabelKey] = roleZone
+	ctrl.watchedCorazaConfigMaps.Store("cust/acme", cm)
+	ctrl.reloadCorazaDebounced()
+
+	assert.Nil(t, ctrl.LookupCorazaZone("cust/acme"),
+		"a multi-feature-labeled configmap is refused by the coraza reload")
+}
+
 func TestReloadCoraza_DisabledIsNoop(t *testing.T) {
 	t.Parallel()
 

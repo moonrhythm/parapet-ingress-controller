@@ -84,10 +84,10 @@ func (r *CacheReloader) drain(ctx context.Context, ch <-chan watch.Event) {
 
 // reload lists cache ConfigMaps across the watch namespace and rebuilds the
 // global set (podNamespace only) and the zone registry (any namespace). A
-// ConfigMap that also carries the WAF or rate-limit label is refused (one
-// ConfigMap per feature, mirroring the controller and the other reloaders: the
-// lenient YAML parsers would cross-parse the other feature's documents to zero
-// entries silently).
+// ConfigMap that also carries another feature's label is refused (one ConfigMap
+// per feature, mirroring the controller and the other reloaders: the lenient
+// YAML parsers would cross-parse the other feature's documents to zero entries
+// silently).
 func (r *CacheReloader) reload(ctx context.Context) error {
 	cms, err := k8s.GetConfigMaps(ctx, r.watchNamespace, CacheLabelKey)
 	if err != nil {
@@ -98,14 +98,9 @@ func (r *CacheReloader) reload(ctx context.Context) error {
 		cm := &cms[i]
 		role := cm.Labels[CacheLabelKey]
 		if role == wafRoleGlobal || role == wafRoleZone {
-			if _, alsoWAF := cm.Labels[WAFLabelKey]; alsoWAF {
-				slog.Warn("edgecp: ignoring configmap that carries both the cache and waf labels; use one configmap per feature",
-					"configmap", cm.Namespace+"/"+cm.Name)
-				continue
-			}
-			if _, alsoRL := cm.Labels[RateLimitLabelKey]; alsoRL {
-				slog.Warn("edgecp: ignoring configmap that carries both the cache and ratelimit labels; use one configmap per feature",
-					"configmap", cm.Namespace+"/"+cm.Name)
+			if other, ok := carriesOtherFeatureLabel(cm.Labels, CacheLabelKey); ok {
+				slog.Warn("edgecp: ignoring configmap that carries the cache label and another feature label; use one configmap per feature",
+					"configmap", cm.Namespace+"/"+cm.Name, "other_label", other)
 				continue
 			}
 		}
