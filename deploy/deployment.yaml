@@ -67,6 +67,23 @@ spec:
         # custom path. Uncomment to enable:
         # - name: WAF_ENABLED
         #   value: "true"
+        # Opt into pushing sampled WAF match events straight to the deploys-app
+        # apiserver's collector.setWAFEvents RPC (SPEC-waf-events; requires
+        # WAF_ENABLED). Each pod keeps a bounded sampled ring and a background
+        # flusher POSTs batches every 30s, authenticated by the location's
+        # collector token — supply it from a Secret; the events carry client
+        # IPs, so never put the token in the pod spec. All three envs are
+        # required; leaving URL/token unset keeps the feature fully inert.
+        # Uncomment to enable:
+        # - name: WAF_EVENTS_PUSH_URL
+        #   value: https://api.deploys.app/collector.setWAFEvents
+        # - name: WAF_EVENTS_PUSH_LOCATION
+        #   value: gke.my-location
+        # - name: WAF_EVENTS_PUSH_TOKEN
+        #   valueFrom:
+        #     secretKeyRef:
+        #       name: waf-events-push-token
+        #       key: token
         # Opt into ConfigMap-driven rate limiting (global + zone sets, the same
         # label/zone model as the WAF). See RATELIMIT.md. Uncomment to enable:
         # - name: RATELIMIT_ENABLED
