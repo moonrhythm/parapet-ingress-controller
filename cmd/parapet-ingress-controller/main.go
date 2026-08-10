@@ -67,8 +67,11 @@ func main() {
 		RequestBodyLimit: config.Int("CORAZA_REQUEST_BODY_LIMIT"), // 0 = headers/URI only
 	}
 	if corazaConfig.Enabled {
-		// Embedded OWASP Core Rule Set, so a ruleset can `Include @owasp_crs`
-		// (and `Include @crs-setup`) without shipping rule files in the ConfigMap.
+		// Embedded OWASP Core Rule Set, so a ruleset can `Include
+		// @crs-setup.conf.example` + `Include @owasp_crs/*.conf` without shipping
+		// rule files in the ConfigMap. Those are the only forms that resolve:
+		// coraza's Include is a plain fs.ReadFile that globs only on '*', so the
+		// bare `@crs-setup` / `@owasp_crs` forms fail to compile.
 		corazaConfig.RootFS = coreruleset.FS
 		// Resolve the true client IP with the same precedence the CEL WAF uses, so
 		// Coraza's REMOTE_ADDR / connection match the WAF and the access log.

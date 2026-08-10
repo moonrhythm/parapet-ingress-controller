@@ -31,7 +31,7 @@ type EdgeCoraza struct {
 	zones   atomic.Pointer[map[string]*corazawaf.Instance] // zoneKey -> compiled zone
 	matcher atomic.Pointer[zoneMatcher]                    // host+path -> zoneKey (core ServeMux semantics)
 
-	newZone func() *corazawaf.Instance
+	newZone func(key string) *corazawaf.Instance
 
 	// generation of the currently-loaded snapshot (0 until the first clean CP
 	// apply). Atomic; reserved for parity/observability.
@@ -42,8 +42,9 @@ type EdgeCoraza struct {
 }
 
 // NewEdgeCoraza builds an empty edge Coraza. rootFS resolves Include directives
-// (wire the embedded OWASP CRS so a ruleset can `Include @owasp_crs`);
-// requestBodyLimit caps request-body inspection (<= 0 = URI + headers only). The
+// (wire the embedded OWASP CRS so a ruleset can `Include @crs-setup.conf.example`
+// + `Include @owasp_crs/*.conf` — the bare forms don't resolve);
+// requestBodyLimit caps request-body inspection (<= 0 = no body bytes fed). The
 // true client IP is resolved with the same precedence the edge WAF uses.
 func NewEdgeCoraza(rootFS fs.FS, requestBodyLimit int) *EdgeCoraza {
 	clientIP := func(r *http.Request) string {
@@ -52,11 +53,12 @@ func NewEdgeCoraza(rootFS fs.FS, requestBodyLimit int) *EdgeCoraza {
 		}
 		return ""
 	}
-	newInstance := func(scope string) *corazawaf.Instance {
-		// Per-rule match counter (parapet_coraza_matches), same metric as the
-		// controller — recorded through observe (not metric) so the controller's
+	newInstance := func(scope, zone string) *corazawaf.Instance {
+		// Per-rule match counter (parapet_coraza_matches), same metric and label
+		// set as the controller (zone = zone-registry key, "" for global) —
+		// recorded through observe (not metric) so the controller's
 		// init-materialized core-trust series stay off the edge's /metrics.
-		corazaMatch := observe.CorazaMatch(scope)
+		corazaMatch := observe.CorazaMatch(scope, zone)
 		return corazawaf.New(corazawaf.Options{
 			RootFS:           rootFS,
 			RequestBodyLimit: requestBodyLimit,
@@ -64,13 +66,13 @@ func NewEdgeCoraza(rootFS fs.FS, requestBodyLimit int) *EdgeCoraza {
 			Observe:          observe.CorazaEval(scope),
 			OnMatch: func(ev corazawaf.MatchEvent) {
 				corazaMatch(ev.RuleID, ev.Severity)
-				slog.Debug("edge coraza match", "scope", scope, "rule", ev.RuleID,
+				slog.Debug("edge coraza match", "scope", scope, "zone", zone, "rule", ev.RuleID,
 					"disruptive", ev.Disruptive, "uri", ev.URI, "message", ev.Message)
 			},
 		})
 	}
-	w := &EdgeCoraza{newZone: func() *corazawaf.Instance { return newInstance("zone") }}
-	w.global = newInstance("global")
+	w := &EdgeCoraza{newZone: func(key string) *corazawaf.Instance { return newInstance("zone", key) }}
+	w.global = newInstance("global", "")
 	empty := map[string]*corazawaf.Instance{}
 	w.zones.Store(&empty)
 	w.matcher.Store(newZoneMatcher(nil, nil))
@@ -107,7 +109,7 @@ func (w *EdgeCoraza) Update(generation uint64, globalDirectives string, zonesDir
 	for key, directives := range zonesDirectives {
 		z := (*cur)[key]
 		if z == nil {
-			z = w.newZone()
+			z = w.newZone(key)
 		}
 		if err := z.SetDirectives(directives); err != nil {
 			note(fmt.Errorf("zone %s: %w", key, err))

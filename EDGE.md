@@ -633,9 +633,10 @@ allowed** — rulesets are stateless config, the WAF model). The edge polls
 host-level binding** (Coraza is new — no old edges).
 
 Per-request order: **after the edge WAF and before rate limiting** — a Coraza
-block never burns rate budget. Request phases only (URI + headers; request body
-opt-in via `EDGE_CORAZA_REQUEST_BODY_LIMIT`); response-body inspection is never
-enabled (it would break the response cache / streaming / HTTP2).
+block never burns rate budget. Request phases only (URI + headers, and phase 2
+always evaluates even with no body; request-body bytes opt-in via
+`EDGE_CORAZA_REQUEST_BODY_LIMIT`); response-body inspection is never enabled (it
+would break the response cache / streaming / HTTP2).
 
 What to know before enabling:
 
@@ -644,9 +645,11 @@ What to know before enabling:
   re-runs its own Coraza** — parapet stays authoritative. The edge is purely an
   early-drop layer.
 - **Per-edge matches** are counted as `parapet_coraza_matches{rule_id,severity,
-  scope}` (alongside the debug log and `parapet_coraza_eval_duration_seconds`) —
-  the same metric the controller records, via `metric/observe` so the edge's
-  `:9187` stays free of the controller's core-trust series.
+  scope,zone}` (alongside the debug log and
+  `parapet_coraza_eval_duration_seconds`) — the same metric and label set the
+  controller records (`zone` = zone registry key, `""` for global), via
+  `metric/observe` so the edge's `:9187` stays free of the controller's
+  core-trust series.
 - **Zone resolution is path-aware** (`route_zone_map`), like the edge WAF — the
   controller's own route keys on a real `http.ServeMux`.
 

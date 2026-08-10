@@ -9,10 +9,13 @@
 // middleware becomes a cheap pass-through. All-or-nothing like waf.SetRules — a
 // bad ruleset is rejected and the last-good instance stays live.
 //
-// Only the REQUEST phases run (connection, URI, headers, and — opt-in — the
-// request body up to a byte limit). Response-body inspection is deliberately
-// never enabled: it would force buffering the response and break the reverse
-// proxy's streaming, the edge response cache, and HTTP/2.
+// Only the REQUEST phases run: connection, URI, headers, and phase 2 — which
+// always evaluates, even for bodyless requests, because most CRS detections
+// (SQLi 942xxx, XSS 941xxx) and the CRS anomaly-blocking evaluation rule
+// (949110) are phase 2; request-body bytes feed it only when a byte limit opts
+// in. Response-body inspection is deliberately never enabled: it would force
+// buffering the response and break the reverse proxy's streaming, the edge
+// response cache, and HTTP/2.
 //
 // The package is pure (no metric/k8s imports), so both the controller and the
 // out-of-cluster edge can import it, wiring metrics/logging through the OnMatch
@@ -35,11 +38,11 @@ import (
 	"github.com/moonrhythm/parapet"
 )
 
-// MatchEvent is one matched rule, delivered to Options.OnMatch for metrics and
-// logging. It carries only what types.MatchedRule exposes: the error callback is
-// installed at WAF-build time and cannot see the *http.Request, so request
-// context (host, method) is not available here — scope is supplied by the caller
-// when it builds the OnMatch closure.
+// MatchEvent is one logged rule match, delivered to Options.OnMatch for metrics
+// and logging. It carries only what types.MatchedRule exposes: the error
+// callback is installed at WAF-build time and cannot see the *http.Request, so
+// request context (host, method) is not available here — scope is supplied by
+// the caller when it builds the OnMatch closure.
 type MatchEvent struct {
 	RuleID     int
 	Severity   string
@@ -53,14 +56,17 @@ type MatchEvent struct {
 type Options struct {
 	// RootFS is the rule filesystem resolved by Include directives — wire the
 	// embedded OWASP CRS (coreruleset.FS) here so a ruleset can `Include
-	// @owasp_crs`. nil disables bundled-ruleset includes.
+	// @crs-setup.conf.example` + `Include @owasp_crs/*.conf`. Include is a plain
+	// fs.ReadFile that globs only when the path contains '*', so the bare
+	// `@crs-setup` / `@owasp_crs` forms do not resolve. nil disables
+	// bundled-ruleset includes.
 	RootFS fs.FS
 
 	// RequestBodyLimit caps request-body inspection, in bytes. <= 0 disables
-	// request-body access entirely (URI + headers only) — no body is buffered, so
-	// the request path pays nothing extra. When > 0, up to this many bytes are
-	// fed to Coraza and the body is rebuilt so the upstream still receives it in
-	// full.
+	// request-body access entirely — no body is buffered, so the request path
+	// pays nothing extra (phase-2 rules still evaluate, over the URI, args, and
+	// headers only). When > 0, up to this many bytes are fed to Coraza and the
+	// body is rebuilt so the upstream still receives it in full.
 	RequestBodyLimit int
 
 	// ClientIP resolves the true client IP (parapet's X-Real-IP / X-Forwarded-For
@@ -68,10 +74,19 @@ type Options struct {
 	// back to the RemoteAddr host.
 	ClientIP func(*http.Request) string
 
-	// OnMatch, when set, is called once per matched rule after the request phases
-	// run — wire it to metrics and logging (the caller adds the scope label). It
-	// reads tx.MatchedRules() rather than Coraza's error callback, so it fires for
-	// every match regardless of whether the rule engaged logging.
+	// OnMatch, when set, is called once per matched rule that engages logging —
+	// wire it to metrics and logging (the caller adds the scope/zone labels). It
+	// is Coraza's error callback (ModSecurity error-log semantics): a rule's log
+	// flag is raised only by the `log` action or a `SecDefaultAction` that
+	// includes `log` (the CRS setup does), never by default, and `nolog` clears
+	// it. That keeps the CRS's administrative matches (initialization SecActions,
+	// paranoia-level flow rules, scoring bookkeeping — all nolog, ~63 on every
+	// clean request through the full CRS) out of the hot path and the metrics,
+	// while every detection and the anomaly-blocking rule 949110 engage logging
+	// and surface in enforce and detect mode alike. tx.MatchedRules() cannot make
+	// this distinction: types.MatchedRule does not expose the log flag, and
+	// Disruptive() folds the admin rules' `pass` action into "disruptive" under
+	// SecRuleEngine On (and everything into non-disruptive under DetectionOnly).
 	OnMatch func(MatchEvent)
 
 	// Observe, when set, is called once per evaluated request with the
@@ -119,9 +134,14 @@ func (in *Instance) SetDirectives(docs ...string) error {
 			WithRequestBodyInMemoryLimit(in.opts.RequestBodyLimit)
 	}
 	// Response-body access is intentionally never enabled (see package doc).
-	// Matches are surfaced from tx.MatchedRules() per request (see ServeHandler),
-	// not via WithErrorCallback — the callback fires only for rules that engaged
-	// logging, which would silently miss matches for metrics.
+	// Matches surface through Coraza's error callback — logged rules only, which
+	// is the operator-meaningful set (see Options.OnMatch for why
+	// tx.MatchedRules() can't substitute).
+	if onMatch := in.opts.OnMatch; onMatch != nil {
+		cfg = cfg.WithErrorCallback(func(mr types.MatchedRule) {
+			onMatch(toEvent(mr))
+		})
+	}
 	cfg = cfg.WithDirectives(directives)
 
 	w, err := coraza.NewWAF(cfg)
@@ -162,11 +182,6 @@ func (in *Instance) ServeHandler(next http.Handler) http.Handler {
 		if in.opts.Observe != nil {
 			in.opts.Observe(time.Since(start), it != nil)
 		}
-		if onMatch := in.opts.OnMatch; onMatch != nil {
-			for _, mr := range tx.MatchedRules() {
-				onMatch(toEvent(mr))
-			}
-		}
 		if it != nil {
 			handleInterruption(w, r, it)
 			return
@@ -201,19 +216,26 @@ func (in *Instance) inspectRequest(tx types.Transaction, r *http.Request) *types
 	}
 
 	if in.opts.RequestBodyLimit > 0 && r.Body != nil && r.Body != http.NoBody {
-		if it := in.inspectBody(tx, r); it != nil {
+		if it := in.feedBody(tx, r); it != nil {
 			return it
 		}
 	}
-	return nil
+	// Phase 2 always runs, body or not: most CRS detections (SQLi 942xxx, XSS
+	// 941xxx) and the CRS anomaly-blocking evaluation rule (949110) are phase 2,
+	// so gating it on a body would leave GET query-string attacks entirely
+	// unblocked. With no body fed it evaluates over the URI/args/headers above.
+	it, _ := tx.ProcessRequestBody()
+	return it
 }
 
-// inspectBody feeds up to RequestBodyLimit bytes of the request body to Coraza,
+// feedBody buffers up to RequestBodyLimit bytes of the request body into the
+// transaction (phase 2 itself runs later, unconditionally, in inspectRequest),
 // then rebuilds r.Body so the upstream still receives the body in full (the
 // buffered prefix followed by whatever remained unread). A read error fails open
-// (the body is restored and inspection skipped) — the WAF must never drop a
-// request because its body couldn't be buffered.
-func (in *Instance) inspectBody(tx types.Transaction, r *http.Request) *types.Interruption {
+// (the body is restored and body inspection skipped) — the WAF must never drop a
+// request because its body couldn't be buffered. The returned interruption is
+// WriteRequestBody's own, e.g. the body limit reached under a rejecting action.
+func (in *Instance) feedBody(tx types.Transaction, r *http.Request) *types.Interruption {
 	limit := in.opts.RequestBodyLimit
 	var buf bytes.Buffer
 	_, err := io.CopyN(&buf, r.Body, int64(limit))
@@ -224,12 +246,7 @@ func (in *Instance) inspectBody(tx types.Transaction, r *http.Request) *types.In
 		return nil
 	}
 
-	it, _, werr := tx.WriteRequestBody(buf.Bytes())
-	if werr == nil && it != nil {
-		r.Body = newBodyReadCloser(buf.Bytes(), r.Body)
-		return it
-	}
-	it, _ = tx.ProcessRequestBody()
+	it, _, _ := tx.WriteRequestBody(buf.Bytes())
 	r.Body = newBodyReadCloser(buf.Bytes(), r.Body)
 	return it
 }
