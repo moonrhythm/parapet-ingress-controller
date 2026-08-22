@@ -29,7 +29,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.7'
           # Self-hosted runner: local GOMODCACHE/GOCACHE beat the remote
           # actions-cache restore (see go-test.yaml for the numbers).
           cache: false
