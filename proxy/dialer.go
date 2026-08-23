@@ -12,7 +12,7 @@ import (
 
 type dialer struct {
 	inner   net.Dialer
-	onError func(addr string)
+	onError func(ctx context.Context, addr string)
 }
 
 func newDialer() *dialer {
@@ -29,7 +29,7 @@ func (d *dialer) DialContext(ctx context.Context, network, addr string) (conn ne
 	if err != nil {
 		if ctx.Err() == nil { // parent context is not canceled
 			if d.onError != nil {
-				d.onError(addr)
+				d.onError(ctx, addr)
 			}
 			slog.Error("proxy: can not connect", "addr", addr, "error", err)
 		}

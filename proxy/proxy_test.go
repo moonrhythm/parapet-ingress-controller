@@ -9,7 +9,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 )
@@ -227,6 +229,119 @@ func TestErrorHandlerMarksBad(t *testing.T) {
 		assert.True(t, IsRetryable(err), "dial failure must panic for retryMiddleware")
 		assert.Equal(t, []string{addr}, marked, "dialer marks once; ErrorHandler panics before a second mark")
 	})
+}
+
+// TestBackendBadAddrMetric: every mark-bad event increments
+// parapet_backend_bad_addr for the destination Service carried on the request
+// (WithBackendAttr). A client cancel or request deadline is not a mark and
+// must not count.
+func TestBackendBadAddrMetric(t *testing.T) {
+	t.Run("post-connect mark counts for the Service", func(t *testing.T) {
+		addr := acceptAndClose(t)
+		p := New()
+		r := httptest.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+		r = r.WithContext(WithBackendAttr(r.Context(), "ClusterIP", "default", "web-postconnect"))
+		before := backendBadAddrValue(t, "ClusterIP", "default", "web-postconnect")
+
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+		assert.Equal(t, before+1, backendBadAddrValue(t, "ClusterIP", "default", "web-postconnect"))
+	})
+
+	t.Run("dial refused counts for the Service", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		addr := ln.Addr().String()
+		ln.Close()
+
+		p := New()
+		r := httptest.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+		r = r.WithContext(WithBackendAttr(r.Context(), "ClusterIP", "default", "web-dialrefused"))
+		before := backendBadAddrValue(t, "ClusterIP", "default", "web-dialrefused")
+
+		w := httptest.NewRecorder()
+		func() {
+			defer func() { recover() }()
+			p.ServeHTTP(w, r)
+		}()
+
+		assert.Equal(t, before+1, backendBadAddrValue(t, "ClusterIP", "default", "web-dialrefused"))
+	})
+
+	t.Run("client cancel is not counted", func(t *testing.T) {
+		received := make(chan struct{})
+		ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			close(received)
+			<-r.Context().Done()
+		}))
+		defer ts.Close()
+
+		p := New()
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() {
+			<-received
+			cancel()
+		}()
+		r := httptest.NewRequest(http.MethodGet, ts.URL, nil).WithContext(
+			WithBackendAttr(ctx, "ClusterIP", "default", "web-cancel"))
+		before := backendBadAddrValue(t, "ClusterIP", "default", "web-cancel")
+
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+
+		assert.Equal(t, 499, w.Code)
+		assert.Equal(t, before, backendBadAddrValue(t, "ClusterIP", "default", "web-cancel"))
+	})
+
+	t.Run("request deadline is not counted", func(t *testing.T) {
+		ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		defer ts.Close()
+
+		p := New()
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		r := httptest.NewRequest(http.MethodGet, ts.URL, nil).WithContext(
+			WithBackendAttr(ctx, "ClusterIP", "default", "web-deadline"))
+		before := backendBadAddrValue(t, "ClusterIP", "default", "web-deadline")
+
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+		assert.Equal(t, before, backendBadAddrValue(t, "ClusterIP", "default", "web-deadline"))
+	})
+}
+
+func backendBadAddrValue(t *testing.T, serviceType, ns, name string) float64 {
+	t.Helper()
+	mfs, err := prom.Registry().Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "parapet_backend_bad_addr" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			var st, sns, sn string
+			for _, lp := range m.GetLabel() {
+				switch lp.GetName() {
+				case "service_type":
+					st = lp.GetValue()
+				case "service_namespace":
+					sns = lp.GetValue()
+				case "service_name":
+					sn = lp.GetValue()
+				}
+			}
+			if st == serviceType && sns == ns && sn == name {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }
 
 func acceptAndClose(t *testing.T) string {

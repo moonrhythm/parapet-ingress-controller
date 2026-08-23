@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/wafclaim"
 	"github.com/moonrhythm/parapet-ingress-controller/wsh2"
 )
@@ -83,7 +84,9 @@ func New() *Proxy {
 	return &p
 }
 
-func (p *Proxy) onDialError(addr string) {
+func (p *Proxy) onDialError(ctx context.Context, addr string) {
+	a := backendAttrFromContext(ctx)
+	metric.BackendBadAddr(a.serviceType, a.namespace, a.serviceName)
 	if p.OnDialError != nil {
 		p.OnDialError(addr)
 	}
@@ -96,7 +99,7 @@ func (p *Proxy) markUnusable(ctx context.Context, addr string) {
 	if ctx.Err() != nil || addr == "" {
 		return
 	}
-	p.onDialError(addr)
+	p.onDialError(ctx, addr)
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
