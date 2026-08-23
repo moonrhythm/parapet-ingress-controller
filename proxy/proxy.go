@@ -14,6 +14,9 @@ import (
 )
 
 type Proxy struct {
+	// OnDialError is called when an upstream address is unusable: a dial
+	// failure, or a post-connect failure that produced no HTTP response.
+	// The addr is host:port (the Dial argument / r.URL.Host).
 	OnDialError func(addr string)
 
 	dialer        *dialer
@@ -57,7 +60,8 @@ func New() *Proxy {
 		// No ModifyResponse: an upstream that responded — including with 502/503 —
 		// has processed the request, so its response passes through to the client
 		// unchanged (status, headers, body). Only connection failures (no response)
-		// reach ErrorHandler and may be retried.
+		// reach ErrorHandler. Dial failures panic so retryMiddleware can retry;
+		// post-connect failures 502 and mark the target bad without retrying.
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			if errors.Is(err, context.Canceled) {
 				// client canceled request
@@ -65,13 +69,14 @@ func New() *Proxy {
 				return
 			}
 
-			slog.Warn("proxy: upstream error", "host", r.Host, "error", err)
+			slog.Warn("proxy: upstream error", "host", r.Host, "addr", r.URL.Host, "error", err)
 
 			if IsRetryable(err) {
-				// lets handler retry
+				// lets handler retry; the dialer already marked the addr
 				panic(err)
 			}
 
+			p.markUnusable(r.Context(), r.URL.Host)
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		},
 	}
@@ -82,6 +87,16 @@ func (p *Proxy) onDialError(addr string) {
 	if p.OnDialError != nil {
 		p.OnDialError(addr)
 	}
+}
+
+// markUnusable records addr as a bad RRLB target. Skip when the request
+// context is already done: that is a client cancel/deadline, not evidence
+// the pod is dead (same guard as dialer.DialContext).
+func (p *Proxy) markUnusable(ctx context.Context, addr string) {
+	if ctx.Err() != nil || addr == "" {
+		return
+	}
+	p.onDialError(addr)
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {

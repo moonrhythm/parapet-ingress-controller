@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -103,4 +104,146 @@ func TestIsRetryable(t *testing.T) {
 	assert.False(t, IsRetryable(errors.New("upstream returned 503")))
 	assert.False(t, IsRetryable(&net.OpError{Op: "read", Err: errors.New("connection reset")}))
 	assert.False(t, IsRetryable(nil))
+}
+
+// TestErrorHandlerMarksBad: a post-connect failure that produces no HTTP
+// response marks the target so RRLB can skip it. Retry stays dial-only — this
+// request still 502s. An upstream that responded, or a client cancel/deadline,
+// is not a mark signal.
+func TestErrorHandlerMarksBad(t *testing.T) {
+	t.Parallel()
+
+	t.Run("accept then close marks the target", func(t *testing.T) {
+		t.Parallel()
+
+		addr := acceptAndClose(t)
+		var marked []string
+		p := New()
+		p.OnDialError = func(a string) { marked = append(marked, a) }
+
+		r := httptest.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+		assert.Equal(t, []string{addr}, marked)
+	})
+
+	t.Run("upstream 503 response is not marked", func(t *testing.T) {
+		t.Parallel()
+
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			w.Write([]byte("upstream-503"))
+		}))
+		defer ts.Close()
+
+		var marked []string
+		p := New()
+		p.OnDialError = func(a string) { marked = append(marked, a) }
+
+		r := httptest.NewRequest(http.MethodGet, ts.URL, nil)
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+		assert.Equal(t, "upstream-503", w.Body.String())
+		assert.Empty(t, marked)
+	})
+
+	t.Run("client cancel is not marked", func(t *testing.T) {
+		t.Parallel()
+
+		received := make(chan struct{})
+		ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			close(received)
+			<-r.Context().Done()
+		}))
+		defer ts.Close()
+
+		var marked []string
+		p := New()
+		p.OnDialError = func(a string) { marked = append(marked, a) }
+
+		ctx, cancel := context.WithCancel(t.Context())
+		go func() {
+			<-received
+			cancel()
+		}()
+		r := httptest.NewRequest(http.MethodGet, ts.URL, nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+
+		assert.Equal(t, 499, w.Code)
+		assert.Empty(t, marked)
+	})
+
+	t.Run("request deadline is not marked", func(t *testing.T) {
+		t.Parallel()
+
+		ts := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done()
+		}))
+		defer ts.Close()
+
+		var marked []string
+		p := New()
+		p.OnDialError = func(a string) { marked = append(marked, a) }
+
+		ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+		defer cancel()
+		r := httptest.NewRequest(http.MethodGet, ts.URL, nil).WithContext(ctx)
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+		assert.Empty(t, marked, "a client/request deadline is not evidence the pod is dead")
+	})
+
+	t.Run("dial refused panics and marks once", func(t *testing.T) {
+		t.Parallel()
+
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		addr := ln.Addr().String()
+		ln.Close()
+
+		var marked []string
+		p := New()
+		p.OnDialError = func(a string) { marked = append(marked, a) }
+
+		r := httptest.NewRequest(http.MethodGet, "http://"+addr+"/", nil)
+		w := httptest.NewRecorder()
+		var recovered any
+		func() {
+			defer func() { recovered = recover() }()
+			p.ServeHTTP(w, r)
+		}()
+
+		err, _ = recovered.(error)
+		assert.Error(t, err)
+		assert.True(t, IsRetryable(err), "dial failure must panic for retryMiddleware")
+		assert.Equal(t, []string{addr}, marked, "dialer marks once; ErrorHandler panics before a second mark")
+	})
+}
+
+func acceptAndClose(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	return ln.Addr().String()
 }

@@ -226,6 +226,50 @@ func TestServeWSTunnelDialErrorRetryable(t *testing.T) {
 	assert.True(t, IsRetryable(err), "tunnel dial error is retryable")
 }
 
+// TestServeWSTunnelPostConnectMarksBad: a pod that accepts TCP then drops
+// before the upgrade response 502s (not retried) and marks the target.
+func TestServeWSTunnelPostConnectMarksBad(t *testing.T) {
+	podAddr := startFakePod(t, func(net.Conn, *http.Request, *bufio.Reader) {
+		// drop without a response
+	})
+
+	var marked []string
+	p := New()
+	p.OnDialError = func(addr string) { marked = append(marked, addr) }
+
+	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	r.URL.Scheme = "http"
+	r.URL.Host = podAddr
+	r.Header.Set("Upgrade", "websocket")
+	r = r.WithContext(wsh2.MarkTunnel(r.Context(), http.NoBody))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Equal(t, []string{podAddr}, marked)
+}
+
+func TestServeWSTunnelRefusedDoesNotMark(t *testing.T) {
+	podAddr := startFakePod(t, func(conn net.Conn, _ *http.Request, _ *bufio.Reader) {
+		fmt.Fprint(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 4\r\n\r\nnope")
+	})
+
+	var marked []string
+	p := New()
+	p.OnDialError = func(addr string) { marked = append(marked, addr) }
+
+	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	r.URL.Scheme = "http"
+	r.URL.Host = podAddr
+	r.Header.Set("Upgrade", "websocket")
+	r = r.WithContext(wsh2.MarkTunnel(r.Context(), http.NoBody))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Empty(t, marked, "a pod that responded is not marked")
+}
+
 // startFakePod accepts one h1 WebSocket upgrade and hands the connection to fn.
 func startFakePod(t *testing.T, fn func(conn net.Conn, req *http.Request, br *bufio.Reader)) string {
 	t.Helper()

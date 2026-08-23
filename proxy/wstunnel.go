@@ -62,6 +62,7 @@ func (p *Proxy) serveWSTunnel(w http.ResponseWriter, r *http.Request, stream io.
 			// The TCP connection was established, so the request may have reached the
 			// pod; do not retry. Nothing is written to the client yet.
 			slog.Warn("proxy: ws tunnel tls handshake failed", "addr", addr, "error", err)
+			p.markUnusable(r.Context(), addr)
 			http.Error(w, "Bad Gateway", http.StatusBadGateway)
 			metric.WSTunnel("upstream_error")
 			return
@@ -75,6 +76,7 @@ func (p *Proxy) serveWSTunnel(w http.ResponseWriter, r *http.Request, stream io.
 	_ = conn.SetWriteDeadline(time.Now().Add(wsHandshakeTimeout))
 	if _, err := conn.Write(handshake); err != nil {
 		slog.Warn("proxy: ws tunnel write handshake failed", "addr", addr, "error", err)
+		p.markUnusable(r.Context(), addr)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		metric.WSTunnel("upstream_error")
 		return
@@ -86,6 +88,7 @@ func (p *Proxy) serveWSTunnel(w http.ResponseWriter, r *http.Request, stream io.
 	if err != nil {
 		// The request reached the pod; a failed/absent response must not be replayed.
 		slog.Warn("proxy: ws tunnel read response failed", "addr", addr, "error", err)
+		p.markUnusable(r.Context(), addr)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		metric.WSTunnel("upstream_error")
 		return
