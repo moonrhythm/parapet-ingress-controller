@@ -55,7 +55,9 @@ duplicate side effects and amplify load on a failing backend. Non-idempotent
 requests (body already read) are never retried. Marking is independent of
 retry: a post-connect no-response failure still **marks the address bad**
 (the next request's Lookup skips it for 2s) so a single broken pod does not
-keep taking 1/N of traffic.
+keep taking 1/N of traffic. `http.ErrAbortHandler` (ReverseProxy body-copy
+failure after headers were written) is re-panicked, not logged as a handler
+crash and not retried — net/http aborts the already-started response.
 
 ## Annotations
 
