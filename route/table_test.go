@@ -53,6 +53,18 @@ func TestTable(t *testing.T) {
 		}
 	})
 
+	t.Run("Single Bad", func(t *testing.T) {
+		lone := Table{}
+		lone.SetHostRoutes(map[string]*RRLB{
+			"api.default.svc.cluster.local": {IPs: []string{"192.168.0.1"}},
+		})
+		lone.SetPortRoutes(map[string]string{
+			"api.default.svc.cluster.local:8080": "9000",
+		})
+		lone.MarkBad("192.168.0.1")
+		assert.Empty(t, lone.Lookup("api.default.svc.cluster.local:8080"))
+	})
+
 	t.Run("SetHostRoute", func(t *testing.T) {
 		tb.SetHostRoute("about.service.svc.cluster.local", &RRLB{IPs: []string{"192.168.3.1"}})
 		res := tb.Lookup("about.service.svc.cluster.local:8000")

@@ -15,19 +15,18 @@ func (lb *RRLB) Get(badAddr *badAddrTable) (ip string) {
 	if l == 0 {
 		return ""
 	}
-	if l == 1 {
-		return lb.IPs[0]
-	}
 
 	// take the modulo in uint32 space: int(uint32) can be negative on 32-bit
 	// platforms once current exceeds MaxInt32, which would yield a negative index.
 	p := int(atomic.AddUint32(&lb.current, 1) % uint32(l))
-	for k := 0; k < l; k++ { // try gets not bad address
+	for k := range l { // try gets not bad address
 		i := (p + k) % l
 		ip = lb.IPs[i]
 		if !badAddr.IsBad(ip) {
 			return
 		}
 	}
-	return "" // all bad, return empty, prevent requests from stuck up in the queue
+	// every replica is marked bad (including a lone replica): return empty so
+	// Lookup 503s instead of dialing a known-dead target and pinning the request.
+	return ""
 }

@@ -27,7 +27,10 @@ slice falls back to its legacy `Endpoints` object (the no-mirror / `skip-mirror`
 case). Endpoint selection is **round-robin**; an address that
 fails to dial **or fails after connect without producing an HTTP response**
 (reset, EOF, header timeout, TLS handshake error) is marked **bad for 2s**
-and skipped (reactive health — no active probing). An upstream that
+and skipped (reactive health — no active probing). If every replica is
+marked bad — including a Service with a **single** pod — `Lookup` returns
+empty and the request is **503** without dialing (fail fast; the mark
+expires after 2s and requests dial it again). An upstream that
 *responds* — including with 502/503 — is never marked. A client cancel or
 request-context deadline is not a mark signal. Host is lowercased and
 port-stripped before matching.
