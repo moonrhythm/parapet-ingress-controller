@@ -105,3 +105,26 @@ func TestRetryMiddlewareLogsUnexpectedPanic(t *testing.T) {
 	assert.Equal(t, http.StatusBadGateway, w.Code)
 	assert.Contains(t, buf.String(), "boom", "the recovered panic must be logged")
 }
+
+// httputil.ReverseProxy panics http.ErrAbortHandler when the upstream body
+// copy fails after headers were written (client gone, truncated body). That is
+// the server's normal abort signal — retryMiddleware must re-panic it, not log
+// it as a programming error or try to 502 over a response already in flight.
+func TestRetryMiddlewareRethrowsAbortHandler(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int32
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		r := httptest.NewRequest(http.MethodGet, "http://svc/", nil)
+		w := httptest.NewRecorder()
+		retryMiddleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			calls.Add(1)
+			panic(http.ErrAbortHandler)
+		})).ServeHTTP(w, r)
+	}()
+
+	assert.Equal(t, int32(1), calls.Load(), "abort is not retried")
+	assert.Equal(t, http.ErrAbortHandler, recovered, "must re-panic so net/http can abort the connection")
+}

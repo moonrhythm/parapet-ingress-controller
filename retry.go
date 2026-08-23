@@ -29,6 +29,12 @@ func retryMiddleware(h http.Handler) http.Handler {
 		defer func() {
 			if e := recover(); e != nil {
 				err, _ := e.(error)
+				// ReverseProxy panics ErrAbortHandler when the body copy fails
+				// after headers were written (client gone, truncated upstream).
+				// Re-panic so net/http aborts the connection without a crash log.
+				if errors.Is(err, http.ErrAbortHandler) {
+					panic(e)
+				}
 				if errors.Is(err, context.Canceled) {
 					ok = true
 					return
