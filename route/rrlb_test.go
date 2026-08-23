@@ -27,6 +27,18 @@ func TestRRLB(t *testing.T) {
 		assert.Equal(t, "192.168.1.1", lb.Get(nil))
 	})
 
+	t.Run("Single Bad", func(t *testing.T) {
+		lb := &RRLB{
+			IPs: []string{
+				"192.168.1.1",
+			},
+		}
+		badAddr := badAddrTable{}
+		badAddr.MarkBad("192.168.1.1")
+		assert.Equal(t, "", lb.Get(&badAddr))
+		assert.Equal(t, "", lb.Get(&badAddr))
+	})
+
 	t.Run("All Healthy", func(t *testing.T) {
 		lb := &RRLB{
 			IPs: []string{
