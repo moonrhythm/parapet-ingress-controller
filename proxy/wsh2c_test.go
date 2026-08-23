@@ -297,3 +297,33 @@ func TestWSTunnelH2C_DialErrorRetryable(t *testing.T) {
 	assert.True(t, IsRetryable(err), "h2c tunnel dial error is retryable")
 	assert.False(t, p.wsH2CNegativeFresh(addr), "a dial error is not a not-supported verdict")
 }
+
+// TestWSTunnelH2C_PostConnectMarksBad: a post-dial h2c handshake error (not a
+// dial failure, not a not-supported peer) 502s without retry and marks the
+// target. The RoundTripper is stubbed so this does not depend on an h2 peer.
+func TestWSTunnelH2C_PostConnectMarksBad(t *testing.T) {
+	addr := "10.0.0.1:8080"
+	var marked []string
+	p := New()
+	p.EnableWSUpstreamH2C()
+	p.OnDialError = func(a string) { marked = append(marked, a) }
+	p.wsH2C = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	})
+
+	r := httptest.NewRequest(http.MethodGet, "/ws", nil)
+	r.URL.Scheme = "h2c"
+	r.URL.Host = addr
+	r.Header.Set("Upgrade", "websocket")
+	r = r.WithContext(wsh2.MarkTunnel(r.Context(), io.NopCloser(strings.NewReader(""))))
+	w := httptest.NewRecorder()
+	p.ServeHTTP(w, r)
+
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Equal(t, []string{addr}, marked)
+	assert.False(t, p.wsH2CNegativeFresh(addr), "a dead peer is not a not-supported verdict")
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

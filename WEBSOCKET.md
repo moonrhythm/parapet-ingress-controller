@@ -149,7 +149,9 @@ request: that path hijacks the downstream connection, and an h2 stream's
 1. Resolve and dial the pod exactly like today: `route.Table.Lookup`, the
    shared dialer, bad-addr marking. A **dial error before the handshake** is
    retryable exactly like today's dial errors (bodyless GET, nothing sent) and
-   follows the existing retry/bad-addr semantics.
+   follows the existing retry/bad-addr semantics. A **post-dial handshake
+   failure** (TLS, write, or missing response) is not retried but marks the
+   pod bad, same as ReverseProxy's 502 path.
 2. Send the h1 upgrade handshake to the pod. The pod requires a
    `Sec-WebSocket-Key` (the h2 side has none): the core **generates a random
    key**, validates the pod's `Sec-WebSocket-Accept` against it (cheap
@@ -290,7 +292,9 @@ connection reduction and native-h2 apps.
 ## Failure semantics & blast radius
 
 - **Before acceptance** (dial error, refused handshake): unchanged semantics —
-  dial errors retry per `retry.go`, HTTP refusals pass through.
+  dial errors retry per `retry.go`, HTTP refusals pass through. A post-dial
+  tunnel 502 (TLS/write/read failure, h2c handshake error) marks the pod bad
+  without retrying.
 - **After acceptance**: a WebSocket session is stateful; no layer retries or
   resumes it. Mid-stream failure closes both sides, the client reconnects
   (standard WS client behavior).

@@ -145,8 +145,10 @@ func (p *Proxy) tryWSTunnelH2C(w http.ResponseWriter, r *http.Request, stream io
 		}
 		// Conn died mid-handshake or the stream was reset: the body may have been
 		// partially consumed, so a replay could duplicate frames — no fallback, no
-		// retry.
+		// retry. Use r.Context() (not the handshake timer ctx) so a handshake
+		// timeout still marks the pod; a client cancel does not.
 		slog.Warn("proxy: ws h2c tunnel handshake failed", "addr", addr, "error", err)
+		p.markUnusable(r.Context(), addr)
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 		metric.WSUpstreamH2C("error")
 		metric.WSTunnel("upstream_error")

@@ -25,8 +25,12 @@ Backends resolve to a Service `host:port`, then to pod IPs via EndpointSlices
 ready addresses only). EndpointSlices are authoritative; a Service with **no**
 slice falls back to its legacy `Endpoints` object (the no-mirror / `skip-mirror`
 case). Endpoint selection is **round-robin**; an address that
-fails to dial is marked **bad for 2s** and skipped (reactive health — no active
-probing). Host is lowercased and port-stripped before matching.
+fails to dial **or fails after connect without producing an HTTP response**
+(reset, EOF, header timeout, TLS handshake error) is marked **bad for 2s**
+and skipped (reactive health — no active probing). An upstream that
+*responds* — including with 502/503 — is never marked. A client cancel or
+request-context deadline is not a mark signal. Host is lowercased and
+port-stripped before matching.
 
 A Service of `type: ExternalName` is also supported: it has no EndpointSlices, so the
 backend is dialed at its `spec.externalName` (an external DNS name, resolved at
@@ -48,7 +52,10 @@ upstream that *responds* (**including with 502/503**): its response passes
 through to the client unchanged. A connected-but-failed or responding upstream
 may already have received and processed the request, so retrying could
 duplicate side effects and amplify load on a failing backend. Non-idempotent
-requests (body already read) are never retried.
+requests (body already read) are never retried. Marking is independent of
+retry: a post-connect no-response failure still **marks the address bad**
+(the next request's Lookup skips it for 2s) so a single broken pod does not
+keep taking 1/N of traffic.
 
 ## Annotations
 
