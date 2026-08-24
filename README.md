@@ -389,9 +389,10 @@ annotations:
 
 - parapet_requests{host, status, method, ingress_name, ingress_namespace, service_type, service_name}
 - parapet_service_duration_seconds{service_type, service_namespace, service_name}
-- parapet_backend_connections{addr}
-- parapet_backend_network_read_bytes{addr}
-- parapet_backend_network_write_bytes{addr}
+- parapet_backend_connections{service_type, service_namespace, service_name}
+- parapet_backend_network_read_bytes{service_type, service_namespace, service_name}
+- parapet_backend_network_write_bytes{service_type, service_namespace, service_name}
+- parapet_backend_bad_addr{service_type, service_namespace, service_name}
 - parapet_reload{success}
 - parapet_host_ratelimit_requests{host}
 - parapet_host_active_requests{host, kind}

@@ -27,7 +27,9 @@ slice falls back to its legacy `Endpoints` object (the no-mirror / `skip-mirror`
 case). Endpoint selection is **round-robin**; an address that
 fails to dial **or fails after connect without producing an HTTP response**
 (reset, EOF, header timeout, TLS handshake error) is marked **bad for 2s**
-and skipped (reactive health — no active probing). If every replica is
+and skipped (reactive health — no active probing). Each mark increments
+`parapet_backend_bad_addr{service_type,service_namespace,service_name}`
+(the destination Service, never the pod IP). If every replica is
 marked bad — including a Service with a **single** pod — `Lookup` returns
 empty and the request is **503** without dialing (fail fast; the mark
 expires after 2s and requests dial it again). An upstream that
@@ -328,8 +330,9 @@ Prometheus, served on `:9187`.
 | `parapet_reload{success}` | |
 | `parapet_host_active_requests{host,kind}` | |
 | `parapet_host_ratelimit_requests{host}` | |
-| `parapet_backend_connections{addr}` | |
-| `parapet_backend_network_read_bytes{addr}` / `_write_bytes{addr}` | |
+| `parapet_backend_connections{service_type,service_namespace,service_name}` | attributed to the destination Service, not the pod IP (pods churn) |
+| `parapet_backend_network_read_bytes{service_type,service_namespace,service_name}` / `_write_bytes{service_type,service_namespace,service_name}` | same labels |
+| `parapet_backend_bad_addr{service_type,service_namespace,service_name}` | incremented each time a pod address is marked bad (dial failure or post-connect no-response); same Service labels, never the pod IP; a client cancel or request deadline is not a mark and does not count |
 | `parapet_network_request_bytes` / `parapet_network_response_bytes` | |
 | `parapet_waf_matches{rule_id,action,scope}` | note: **no** `_total` suffix |
 | `parapet_waf_skips{scope}` | requests that bypassed WAF evaluation via `WAF_VALIDATED_PROXY` (already validated at the edge); `scope` = `global\|zone`, no `_total` suffix |

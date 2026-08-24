@@ -48,7 +48,7 @@ cert/                             # TLS certificate table (SNI lookup)
 k8s/                              # Kubernetes client helpers
   k8s.go, cluster.go, fs.go      # in-cluster / local kubeconfig init + list/watch helpers
 metric/                           # Prometheus metrics
-  requests.go, backendconns.go, host.go, reload.go, waf.go, coraza.go
+  requests.go, backendconns.go, badaddr.go, host.go, reload.go, waf.go, coraza.go
   cache.go                        # generic lock+map cache for per-label-set metric handles
 state/                            # per-request state map (passed via context)
 trustcidr/                        # TRUST_PROXY spec -> parapet trust Conditional (CIDRs + cloudflare/google/bunny); shared by controller + edge
@@ -110,7 +110,7 @@ Routes are keyed as `host + path` strings (e.g. `"www.example.com/api/"`). PathT
 - `Exact` → registers `host/path` only (strips trailing slash)
 - `ImplementationSpecific` → registers as-is
 
-Endpoint lookup is round-robin (`route.RRLB`). Pod IPs come from the Service's EndpointSlices (`discovery.k8s.io/v1`) — a Service may own several slices, so they're unioned (ready addresses only, keyed back to the Service via the `kubernetes.io/service-name` label). **EndpointSlices are authoritative**: a Service that owns at least one slice (even an empty one) is routed from its slices alone; only a Service with *no* slice falls back to its legacy `Endpoints` object (`aggregateServiceIPs` / `resolveTargetPort`, the no-mirror / `skip-mirror` case). Bad addresses (dial errors **and** post-connect failures that produce no HTTP response) are marked and skipped temporarily; if every replica is marked bad (including a lone replica) `Lookup` is empty and the request 503s without dialing.
+Endpoint lookup is round-robin (`route.RRLB`). Pod IPs come from the Service's EndpointSlices (`discovery.k8s.io/v1`) — a Service may own several slices, so they're unioned (ready addresses only, keyed back to the Service via the `kubernetes.io/service-name` label). **EndpointSlices are authoritative**: a Service that owns at least one slice (even an empty one) is routed from its slices alone; only a Service with *no* slice falls back to its legacy `Endpoints` object (`aggregateServiceIPs` / `resolveTargetPort`, the no-mirror / `skip-mirror` case). Bad addresses (dial errors **and** post-connect failures that produce no HTTP response) are marked and skipped temporarily (each mark counts `parapet_backend_bad_addr{service_type,service_namespace,service_name}`); if every replica is marked bad (including a lone replica) `Lookup` is empty and the request 503s without dialing.
 
 **ExternalName Services** (`spec.type: ExternalName`) are supported via a separate `route.Table` map (`addrToExternalName`, set by `reloadServiceDebounced` via `SetExternalNameRoutes` — full-replace, so it never races the incremental endpoint host-route path). They have no EndpointSlices, so `Table.Lookup` falls back to dialing `spec.externalName` (resolved by the dialer's `net.Resolver`) on the **service port** the ingress references (no `targetPort` indirection; no RRLB/bad-addr — single target). A pod-backed host route takes precedence over an ExternalName one (only transiently overlapping during a type change). See [`SPEC.md`](SPEC.md).
 
