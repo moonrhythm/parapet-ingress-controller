@@ -5,19 +5,14 @@ import (
 
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/moonrhythm/parapet-ingress-controller/hostlabel"
 )
 
-// unknownHostLabel is substituted for a Host the router doesn't serve, so a
-// flood of random Host headers can't create unbounded host-labeled series.
-const unknownHostLabel = "other"
-
-// HostLabel returns host if the router serves it, else the "other" sentinel. A
+// HostLabel returns host if the router serves it, else hostlabel.Other. A
 // nil isKnownHost (e.g. in tests) passes the host through unchanged.
 func HostLabel(host string, isKnownHost func(host string) bool) string {
-	if isKnownHost == nil || isKnownHost(host) {
-		return host
-	}
-	return unknownHostLabel
+	return hostlabel.Of(host, isKnownHost)
 }
 
 var _rejected = prometheus.NewCounterVec(prometheus.CounterOpts{

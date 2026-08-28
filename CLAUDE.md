@@ -28,6 +28,7 @@ wafrule/                          # WAF rule YAML DTO + parser (-> []waf.Rule)
 wafclaim/                         # edge→core X-Parapet-Waf claim header (wire contract shared by core + edge)
 ratelimitrule/                    # rate-limit YAML DTO + parser + runtime (hot-swap Limiter, fixed/sliding strategies)
 hostrps/                          # pre-WAF per-Host RPS fuse (HOST_RPS); metric-free so the edge can import it
+hostlabel/                        # Host → "other" collapse for limit keys and metric labels (controller + edge)
 geoip/                            # IPLocate ip-to-country/ip-to-asn .mmdb -> request.country/asn (WAF_GEOIP_DB/WAF_ASN_DB)
 plugin/                           # annotation-driven middleware plugins
   plugin.go                       # core plugin type + built-in plugins

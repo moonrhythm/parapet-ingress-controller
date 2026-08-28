@@ -497,7 +497,7 @@ func main() {
 	// Arrival fuse: after Requests (503s still counted) and before the access
 	// log / WAF / cache, so a flood never pays CEL or origin and is not logged
 	// at flood volume. Same hostrps as the controller's HOST_RPS.
-	m.Use(hostRPS(edgeHosts.HostRPSKnown))
+	m.Use(hostRPS(edgeHosts))
 	if !disableLog {
 		m.Use(logger.Stdout())
 	}
