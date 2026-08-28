@@ -74,6 +74,8 @@ control plane (`edge/cp.go`), terminates public TLS via a hot-swappable
 `cert.Table` (`edge/certstore.go`, self-signed fallback on SNI miss, on-demand
 fetch in serve-all mode), runs global + zone WAF (`edge/waf.go`, reusing
 `parapet/pkg/waf` + `wafrule` + `geoip` exactly like the controller), optionally
+enforces a per-Host RPS fuse (`EDGE_HOST_RPS`, shared `hostrps` — same as the
+controller's `HOST_RPS`, before WAF/cache), optionally
 enforces the ConfigMap-driven global+zone rate limits (`edge/ratelimit.go`,
 `EDGE_RATELIMIT_ENABLED`, reusing `ratelimitrule` exactly like the controller;
 per-edge counters, mounted after the WAF and before the cache), optionally

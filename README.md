@@ -208,6 +208,7 @@ Out-of-cluster TLS-terminating proxy. See [EDGE.md](EDGE.md).
 | `EDGE_UPSTREAM_MAX_IDLE_CONNS_PER_HOST` | `0` | Idle keep-alive pool per core host (`0` ⇒ parapet default 32) |
 | `EDGE_DATAPLANE_MTLS` | `false` | Present a CP-issued client cert on the upstream hop (requires `EDGE_UPSTREAM_TLS=true` + `EDGE_ID`) |
 | `EDGE_WAF_ENABLED` | `false` | Run the global+zone WAF at the edge |
+| `EDGE_HOST_RPS` | `0` | Per-host admitted requests per 1s window per edge replica (0 = off). Same fuse as the controller's `HOST_RPS` (unknown Hosts share `other`; overflow 503 before WAF/cache/origin) |
 | `EDGE_RATELIMIT_ENABLED` | `false` | Enforce the CP-distributed rate limits at the edge (requires `CP_RATELIMIT_ENABLED`) |
 | `WAF_GEOIP_DB` | `/geoip/ip-to-country.mmdb` | Same as the controller — `request.country`; `""` disables |
 | `WAF_ASN_DB` | `/geoip/ip-to-asn.mmdb` | Same as the controller — `request.asn`; `""` disables |

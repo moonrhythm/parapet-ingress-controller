@@ -556,6 +556,21 @@ it is no stronger than the front proxy's own ingress filtering, so an attacker w
 can reach the edge directly from a trusted CIDR can spoof `X-Forwarded-For`; keep
 the edge reachable only from the front proxy.
 
+## Host RPS at the edge
+
+Opt-in (`EDGE_HOST_RPS > 0`): the same pre-WAF per-Host arrival-rate fuse as
+the controller's `HOST_RPS` (`hostrps`). Each edge replica admits at most that
+many requests per 1s epoch-aligned fixed window per known Host (up to 2× across
+a window boundary). Hosts `EdgeHosts.IsKnownHost` does not serve — including
+serve-all random Hosts — share one `other` bucket. Overflow is 503 with a
+ceiled `Retry-After`, before the access log, WAF, cache, and origin.
+
+Mount order: after host normalize + `edge.Requests` (so the 503 is still
+counted on `parapet_requests`) and **before** the access log / WAF / ConfigMap
+rate limits / cache. Counters are per edge replica (`parapet_ratelimit_total{name="host-rps"}`).
+The core's `HOST_RPS` is independent — each layer counts the traffic it sees.
+Default off.
+
 ## Rate limiting at the edge
 
 Opt-in (`EDGE_RATELIMIT_ENABLED=true` on the edge, `CP_RATELIMIT_ENABLED=true`
