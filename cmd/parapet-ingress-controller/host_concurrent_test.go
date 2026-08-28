@@ -3,11 +3,20 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func hold() (started, block chan struct{}, release func()) {
+	started = make(chan struct{})
+	block = make(chan struct{})
+	var once sync.Once
+	release = func() { once.Do(func() { close(block) }) }
+	return started, block, release
+}
 
 func TestHostRateLimit_UnknownHostsShareOther(t *testing.T) {
 	t.Setenv("HOST_CONCURRENT_CAPACITY", "1")
@@ -15,8 +24,8 @@ func TestHostRateLimit_UnknownHostsShareOther(t *testing.T) {
 	m := hostRateLimit(func(h string) bool { return h == "a.example.com" })
 	require.NotNil(t, m)
 
-	started := make(chan struct{})
-	block := make(chan struct{})
+	started, block, release := hold()
+	defer release()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(started)
 		<-block
@@ -44,7 +53,7 @@ func TestHostRateLimit_UnknownHostsShareOther(t *testing.T) {
 	h.ServeHTTP(rec, r)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "two unknown hosts must share the other bucket")
 
-	close(block)
+	release()
 	assert.Equal(t, http.StatusOK, <-done)
 }
 
@@ -54,8 +63,8 @@ func TestHostRateLimit_KnownHostIndependentOfOther(t *testing.T) {
 	m := hostRateLimit(func(h string) bool { return h == "a.example.com" })
 	require.NotNil(t, m)
 
-	started := make(chan struct{})
-	block := make(chan struct{})
+	started, block, release := hold()
+	defer release()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Host == "x.example.com" {
 			close(started)
@@ -85,7 +94,7 @@ func TestHostRateLimit_KnownHostIndependentOfOther(t *testing.T) {
 	h.ServeHTTP(rec, r)
 	assert.Equal(t, http.StatusOK, rec.Code, "known host must not share the other bucket")
 
-	close(block)
+	release()
 	<-done
 }
 
@@ -96,8 +105,8 @@ func TestHostCountryRateLimit_UnknownHostsShareOther(t *testing.T) {
 	m := hostCountryRateLimit(func(h string) bool { return h == "a.example.com" })
 	require.NotNil(t, m)
 
-	started := make(chan struct{})
-	block := make(chan struct{})
+	started, block, release := hold()
+	defer release()
 	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		close(started)
 		<-block
@@ -127,6 +136,6 @@ func TestHostCountryRateLimit_UnknownHostsShareOther(t *testing.T) {
 	h.ServeHTTP(rec, r)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 
-	close(block)
+	release()
 	assert.Equal(t, http.StatusOK, <-done)
 }
