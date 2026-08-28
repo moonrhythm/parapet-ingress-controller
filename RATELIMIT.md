@@ -252,10 +252,11 @@ also surface in the standard request metrics (status 429/503).
 concurrency limiter and the host RPS limiter (`HOST_RPS`); distinguish them
 with `rejected_requests{reason="host_limit"|"host_rps"}` and
 `parapet_ratelimit_total{name="host"|"host-rps"}`. ConfigMap rejections are
-not counted there. Note on the status-derived rejection reason: a 429
-rejection counts under the rate-limit reason, while `status: 503` rejections
-are deliberately uncounted there (503 is not a tracked edge-rejection status)
-— with 503 you observe rejections via `parapet_ratelimit_total` and the
+not counted there. Note on the status-derived rejection reason: a ConfigMap
+**429** counts under the `rate_limit` reason, while a ConfigMap **`status: 503`**
+is deliberately uncounted there (503 is not a tracked status-derived reason —
+host-limiter 503s are recorded **directly** as `host_limit` / `host_rps`).
+With ConfigMap 503 you observe rejections via `parapet_ratelimit_total` and the
 status-labeled request metrics only.
 
 ## Memory bounds
