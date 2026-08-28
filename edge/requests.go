@@ -10,6 +10,8 @@ import (
 	"github.com/moonrhythm/parapet"
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/moonrhythm/parapet-ingress-controller/hostlabel"
 )
 
 // parapet_requests is the per-request counter the in-cluster controller already
@@ -74,16 +76,8 @@ func (p *requestsMiddleware) ServeHandler(h http.Handler) http.Handler {
 	})
 }
 
-// unknownHostLabel substitutes for a host the edge doesn't serve, so a flood of
-// random Host headers can't create unbounded host-labeled series. Matches
-// metric.HostLabel's "other" so edge and controller series share one bucket.
-const unknownHostLabel = "other"
-
 func hostLabel(host string, knownHost func(string) bool) string {
-	if knownHost == nil || knownHost(host) {
-		return host
-	}
-	return unknownHostLabel
+	return hostlabel.Of(host, knownHost)
 }
 
 // methodLabel collapses the client-controlled method to a bounded set; only the

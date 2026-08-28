@@ -10,6 +10,8 @@ import (
 	"github.com/moonrhythm/parapet"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/moonrhythm/parapet-ingress-controller/hostlabel"
 )
 
 func known(hosts ...string) func(string) bool {
@@ -141,7 +143,7 @@ func TestNew_OnLimitedCollapsedHost(t *testing.T) {
 		if serve(t, m, "y.example.com", ok).Code == http.StatusOK {
 			continue
 		}
-		assert.Equal(t, collapsedHost, got)
+		assert.Equal(t, hostlabel.Other, got)
 		return
 	}
 	t.Fatal("could not land OnLimited in the same 1s window after 5 attempts")

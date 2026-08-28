@@ -572,7 +572,10 @@ before it exists would 503 every tenant). Overflow is 503 with a ceiled
 Mount order: after host normalize + `edge.Requests` (so the 503 is still
 counted on `parapet_requests` — unlike the controller, where host-RPS 503s
 short-circuit before that metric) and **before** the access log / WAF / ConfigMap
-rate limits / cache. Counters are per edge replica (`parapet_ratelimit_total{name="host-rps"}`).
+rate limits / cache. Counters are per edge replica: `parapet_ratelimit_total{name="host-rps"}`,
+`parapet_host_ratelimit_requests{host}` (collapsed via `hostlabel.Of`), and
+`parapet_rejected_requests{reason="host_rps"}` (lazy-registered in
+`metric/observe` so the edge never imports `metric`).
 The core's `HOST_RPS` is independent — each layer counts the traffic it sees.
 Default off.
 

@@ -24,6 +24,7 @@ import (
 
 	controller "github.com/moonrhythm/parapet-ingress-controller"
 	"github.com/moonrhythm/parapet-ingress-controller/geoip"
+	"github.com/moonrhythm/parapet-ingress-controller/hostlabel"
 	"github.com/moonrhythm/parapet-ingress-controller/k8s"
 	"github.com/moonrhythm/parapet-ingress-controller/metric"
 	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
@@ -628,12 +629,12 @@ func hostRateLimit(isKnownHost func(host string) bool) parapet.Middleware {
 	}
 
 	keyFromRequest := func(r *http.Request) string {
-		return r.Host
+		return hostlabel.Of(r.Host, isKnownHost)
 	}
 
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		metric.HostRatelimitRequest(metric.HostLabel(r.Host, isKnownHost))
+		metric.HostRatelimitRequest(hostlabel.Of(r.Host, isKnownHost))
 		metric.RejectedRequest("host_limit")
 	}
 
@@ -705,12 +706,12 @@ func hostCountryRateLimit(isKnownHost func(host string) bool) parapet.Middleware
 		if country == "" {
 			country = "XX"
 		}
-		return r.Host + "|" + country
+		return hostlabel.Of(r.Host, isKnownHost) + "|" + country
 	}
 
 	exceededHandler := func(w http.ResponseWriter, r *http.Request, _ time.Duration) {
 		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
-		metric.HostRatelimitRequest(metric.HostLabel(r.Host, isKnownHost))
+		metric.HostRatelimitRequest(hostlabel.Of(r.Host, isKnownHost))
 		metric.RejectedRequest("host_limit")
 	}
 

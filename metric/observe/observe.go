@@ -21,10 +21,11 @@
 // MustRegister panics at startup.
 //
 // The match counters (WAFMatch -> parapet_waf_matches, CorazaMatch ->
-// parapet_coraza_matches) duplicate names the metric package registers in its
-// own init, so they register LAZILY on first call (see _wafMatch / _corazaMatch):
-// a binary that imports both — the controller — records matches through metric
-// and never calls these, so the lazy registration never fires there; only the
-// edge, which never imports metric, mints them here. Wiring one of these in a
-// binary that also imports metric would duplicate-register and panic.
+// parapet_coraza_matches) and host-limiter overflow counters
+// (HostRatelimitRequest / RejectedRequest) duplicate names the metric package
+// registers in its own init, so they register LAZILY on first call: a binary
+// that imports both — the controller — records those through metric and never
+// calls these, so the lazy registration never fires there; only the edge, which
+// never imports metric, mints them here. Wiring one of these in a binary that
+// also imports metric would duplicate-register and panic.
 package observe

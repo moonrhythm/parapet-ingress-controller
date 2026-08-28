@@ -14,6 +14,8 @@ import (
 	"github.com/moonrhythm/parapet/pkg/header"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 	"github.com/moonrhythm/parapet/pkg/waf"
+
+	"github.com/moonrhythm/parapet-ingress-controller/hostlabel"
 )
 
 const (
@@ -33,13 +35,6 @@ const (
 	// AllowRemote), and ACME validation probes come from unpublished IPs that an
 	// ip-keyed limit could 429 fleet-wide.
 	acmeChallengePrefix = "/.well-known/acme-challenge"
-
-	// collapsedHost is the shared bucket key for host-keyed limits when the
-	// router doesn't serve the request's Host (KnownHost is wired): a
-	// random-Host flood mints one bucket, not unbounded ones. The global set
-	// sees such requests on every flood; a zone set sees them when it is bound
-	// to an ingress with host-less (catch-all) rules, which route any Host.
-	collapsedHost = "other"
 )
 
 // maxKeyPartLen caps a header/cookie value's contribution to the bucket key.
@@ -144,7 +139,7 @@ type Limiter struct {
 	Observe func(name string) ratelimit.ObserveFunc
 
 	// KnownHost, when set, collapses host bucket keys the router doesn't serve
-	// into one shared bucket (see collapsedHost). The controller wires it on the
+	// into hostlabel.Other. The controller wires it on the
 	// global instance and on every zone: zone traffic usually carries a served
 	// Host, but an ingress with host-less (catch-all) rules routes ANY Host into
 	// its zone, so an unwired zone would be unbounded-key mintable.
@@ -734,8 +729,5 @@ func ipKey(addr netip.Addr, rawIP string) string {
 }
 
 func hostKey(host string, knownHost func(string) bool) string {
-	if knownHost != nil && !knownHost(host) {
-		return collapsedHost
-	}
-	return host
+	return hostlabel.Of(host, knownHost)
 }

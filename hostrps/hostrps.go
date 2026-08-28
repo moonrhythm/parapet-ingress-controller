@@ -14,12 +14,9 @@ import (
 	"github.com/moonrhythm/parapet/pkg/header"
 	"github.com/moonrhythm/parapet/pkg/ratelimit"
 
+	"github.com/moonrhythm/parapet-ingress-controller/hostlabel"
 	"github.com/moonrhythm/parapet-ingress-controller/metric/observe"
 )
-
-// collapsedHost is the shared bucket for Hosts isKnownHost rejects (random-Host
-// floods and host-less catch-all traffic). Same sentinel as metric.HostLabel.
-const collapsedHost = "other"
 
 // New returns a 1s epoch-aligned fixed-window limiter of `rate` admits per Host
 // per replica, or nil when rate <= 0. Overflow is 503 with a ceiled Retry-After.
@@ -34,7 +31,7 @@ func New(rate int, isKnownHost func(string) bool, onLimited func(string)) parape
 		Observe:  observe.RateLimit("host-rps"),
 		Strategy: &ratelimit.FixedWindowStrategy{Max: rate, Size: time.Second},
 		Key: func(r *http.Request) string {
-			return bucket(r.Host, isKnownHost)
+			return hostlabel.Of(r.Host, isKnownHost)
 		},
 		ExceededHandler: func(w http.ResponseWriter, r *http.Request, after time.Duration) {
 			if after > 0 {
@@ -46,15 +43,8 @@ func New(rate int, isKnownHost func(string) bool, onLimited func(string)) parape
 			}
 			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
 			if onLimited != nil {
-				onLimited(bucket(r.Host, isKnownHost))
+				onLimited(hostlabel.Of(r.Host, isKnownHost))
 			}
 		},
 	}
-}
-
-func bucket(host string, isKnownHost func(string) bool) string {
-	if isKnownHost == nil || isKnownHost(host) {
-		return host
-	}
-	return collapsedHost
 }

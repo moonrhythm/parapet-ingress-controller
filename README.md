@@ -91,7 +91,7 @@ manifests for runnable examples.
 | `DISABLE_LOG` | `false` | Suppress the access log |
 | `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | Max request header size |
 | `HOST_RPS` | `0` | Per-host admitted requests per 1s window per replica (0 = off). Unknown Hosts share one `other` bucket. Overflow is 503 before WAF/origin |
-| `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host in-flight cap / queue size (0 = off) |
+| `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host in-flight cap / queue size (0 = off). Unknown Hosts share one `other` bucket |
 | `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host+country cap / queue size |
 | `HOST_COUNTRY_HEADER` | `""` | Header(s) carrying the country code for the per-host+country limiter |
 | `TR_MAX_CONNS_PER_HOST` | stdlib | Upstream max connections per host |

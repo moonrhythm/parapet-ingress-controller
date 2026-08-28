@@ -1,12 +1,15 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,4 +53,54 @@ func TestHostRPSRegistrationSlot(t *testing.T) {
 	require.Less(t, requests, rps, "hostRPS must register AFTER edge.Requests so 503s are counted")
 	require.Less(t, rps, log, "hostRPS must register BEFORE the access log")
 	require.Less(t, rps, strip, "hostRPS must register BEFORE WAF (StripWAFClaim is the WAF-adjacent slot)")
+}
+
+func TestHostRPS_OverflowIncrementsMetrics(t *testing.T) {
+	t.Setenv("EDGE_HOST_RPS", "1")
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	for i := range 5 {
+		host := "overflow-" + strings.Repeat("x", i+1) + ".example.com"
+		m := hostRPS(func(h string) bool { return h == host })
+		require.NotNil(t, m)
+		h := m.ServeHandler(ok)
+		serve := func() int {
+			rec := httptest.NewRecorder()
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.Host = host
+			h.ServeHTTP(rec, r)
+			return rec.Code
+		}
+		if serve() != http.StatusOK {
+			continue
+		}
+		if serve() == http.StatusOK {
+			continue
+		}
+		assert.Equal(t, 1.0, counterValue(t, "parapet_host_ratelimit_requests", "host", host))
+		assert.GreaterOrEqual(t, counterValue(t, "parapet_rejected_requests", "reason", "host_rps"), 1.0)
+		return
+	}
+	t.Fatal("could not land a host-RPS overflow in the same 1s window after 5 attempts")
+}
+
+func counterValue(t *testing.T, name, label, value string) float64 {
+	t.Helper()
+	mfs, err := prom.Registry().Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			for _, lp := range m.GetLabel() {
+				if lp.GetName() == label && lp.GetValue() == value {
+					return m.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	t.Fatalf("%s{%s=%q} not found", name, label, value)
+	return 0
 }
