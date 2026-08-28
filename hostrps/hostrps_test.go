@@ -149,13 +149,10 @@ func TestNew_OnLimitedCollapsedHost(t *testing.T) {
 
 func TestNew_LimitedDoesNotCallNext(t *testing.T) {
 	t.Parallel()
-	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
-		t.Error("next handler must not run on a limited request")
-	})
 	for range 5 {
-		var hits atomic.Int32
-		pass := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			hits.Add(1)
+		var admitted, reached atomic.Int32
+		pass := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			admitted.Add(1)
 			w.WriteHeader(http.StatusOK)
 			_, _ = io.WriteString(w, "ok")
 		})
@@ -163,10 +160,16 @@ func TestNew_LimitedDoesNotCallNext(t *testing.T) {
 		if serve(t, m, "a.example.com", pass).Code != http.StatusOK {
 			continue
 		}
-		serve(t, m, "a.example.com", ok)
-		if hits.Load() != 1 {
-			continue
+		next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			reached.Add(1)
+		})
+		w := serve(t, m, "a.example.com", next)
+		if w.Code == http.StatusOK {
+			continue // window boundary; the second request was admitted
 		}
+		require.Equal(t, http.StatusServiceUnavailable, w.Code)
+		require.Equal(t, int32(1), admitted.Load())
+		require.Equal(t, int32(0), reached.Load(), "next handler must not run on a limited request")
 		return
 	}
 	t.Fatal("could not land a limited request in the same 1s window after 5 attempts")
