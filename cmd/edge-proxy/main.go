@@ -494,6 +494,10 @@ func main() {
 	// serve-all mode can't grow series cardinality, while real hosts keep EXACT
 	// per-host labels for the observation system.
 	m.Use(edge.Requests(edgeHosts.IsKnownHost))
+	// Arrival fuse: after Requests (503s still counted) and before the access
+	// log / WAF / cache, so a flood never pays CEL or origin and is not logged
+	// at flood volume. Same hostrps as the controller's HOST_RPS.
+	m.Use(hostRPS(edgeHosts.HostRPSKnown))
 	if !disableLog {
 		m.Use(logger.Stdout())
 	}

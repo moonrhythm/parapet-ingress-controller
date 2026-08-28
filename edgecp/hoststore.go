@@ -17,8 +17,10 @@ import (
 // It is deliberately STANDALONE — not bundled into /v1/waf or /v1/ratelimit —
 // for two reasons: the metric is always on (even with WAF + rate-limiting off),
 // and a stale host list only over-collapses the metric label to "other" (a
-// cardinality bound, never a WAF/limit correctness signal), so it has no
-// atomicity coupling with those payloads. Same scoping/ETag model as the other
+// cardinality bound). WAF/ConfigMap rate-limit payloads are not keyed on it.
+// The edge's host-RPS fuse *does* use the set as a collapse oracle, but only
+// after the first snapshot (Generation()==0 is fail-open — see
+// edge.HostRPSKnown). Same scoping/ETag model as the other
 // stores: lock-free reads via the atomic pointer, mu held by the writer and by
 // scoped() for a consistent snapshot.
 type HostsStore struct {
