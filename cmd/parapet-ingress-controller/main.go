@@ -395,6 +395,7 @@ func main() {
 	m.Use(host.StripPort())
 	m.Use(host.ToLower())
 	m.Use(metric.HostActiveTracker(ctrl.IsKnownHost))
+	m.Use(hostRPS(ctrl.IsKnownHost))
 	m.Use(hostCountryRateLimit(ctrl.IsKnownHost))
 	m.Use(hostRateLimit(ctrl.IsKnownHost))
 

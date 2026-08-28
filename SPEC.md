@@ -89,7 +89,7 @@ All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
 
 ### Per-request order
 
-1. host normalization → `/healthz` (IP-host only) → host/country concurrency limits
+1. host normalization → `/healthz` (IP-host only) → **host RPS** (`HOST_RPS`) → host/country concurrency limits
 2. **global WAF** → **global Coraza** (`CORAZA_ENABLED`) → **global rate limits** (`RATELIMIT_ENABLED`) (before routing)
 3. routing → per-route: `allow-remote` → **zone WAF** → **zone Coraza** → `redirect-https` → **zone rate limits** → annotation rate limits → body limit → basic-auth → forward-auth
 4. upstream proxy (with retry on connection failure + bad-addr skip)
@@ -296,6 +296,7 @@ invariants:
 | `LOAD_ALL_CERTS` | `false` | Index every TLS secret, not just `spec.tls`-referenced |
 | `TRUST_PROXY` | `""` | `true`/`false`/CIDRs (+ `cloudflare`/`google`/`bunny`). Whether to honor inbound `X-Forwarded-*` (real client IP) from a trusted front proxy vs. overwrite with the peer. The edge proxy honors the same knob to sit behind an L7 proxy (e.g. Cloudflare) — see EDGE.md |
 | `WAIT_BEFORE_SHUTDOWN` | `30s` | Drain delay on SIGTERM |
+| `HOST_RPS` | `0` | Per-Host admits per **1s epoch-aligned fixed window** per replica (0 = off). Up to 2× `HOST_RPS` across a window boundary. Hosts `IsKnownHost` does not serve — including traffic hitting **host-less catch-all** rules — share one `other` bucket. Overflow is 503 (ceiled `Retry-After`) before WAF/origin. Independent of `HOST_CONCURRENT_*`. N replicas admit up to N×. Host RPS and host concurrent 503s short-circuit before the access log and `parapet_requests` — observe them on `parapet_ratelimit_total`, `parapet_rejected_requests`, and `parapet_host_ratelimit_requests`. |
 | `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host in-flight cap / queue size. Slot is released when upstream response headers arrive (or on a 101 upgrade), not at end-of-body — so SSE / WebSocket / long-poll streams don't pin a slot for the stream lifetime. The cap exists to shed load while upstreams are *unresponsive*. |
 | `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host+country cap / queue (same release semantics as `HOST_CONCURRENT_CAPACITY`) |
 | `HOST_COUNTRY_HEADER` | `""` | Header(s) carrying the country code |
@@ -329,7 +330,8 @@ Prometheus, served on `:9187`.
 | `parapet_service_duration_seconds{service_type,service_namespace,service_name}` | |
 | `parapet_reload{success}` | |
 | `parapet_host_active_requests{host,kind}` | |
-| `parapet_host_ratelimit_requests{host}` | |
+| `parapet_host_ratelimit_requests{host}` | incremented on **both** host-concurrency and host-RPS overflow; `host` is `HostLabel`-collapsed |
+| `parapet_rejected_requests{reason}` | bounded reasons; `host_limit` / `host_rps` are recorded **directly** at those limiters (503 is not status-derived; `rejectReason` does not map 503). Other reasons (`no_route`, `forbidden`, `unauthorized`, `body_limit`, `rate_limit`) are status-derived only when the request did not reach a backend |
 | `parapet_backend_connections{service_type,service_namespace,service_name}` | attributed to the destination Service, not the pod IP (pods churn) |
 | `parapet_backend_network_read_bytes{service_type,service_namespace,service_name}` / `_write_bytes{service_type,service_namespace,service_name}` | same labels |
 | `parapet_backend_bad_addr{service_type,service_namespace,service_name}` | incremented each time a pod address is marked bad (dial failure or post-connect no-response); same Service labels, never the pod IP; a client cancel or request deadline is not a mark and does not count |
@@ -339,7 +341,7 @@ Prometheus, served on `:9187`.
 | `parapet_waf_eval_duration_seconds{outcome,scope}` | histogram of per-request rule-eval latency; `outcome` = `pass\|allow\|block\|error`, fired once per evaluated request — the pass path `parapet_waf_matches` can't see |
 | `parapet_coraza_matches{rule_id,severity,scope}` | Coraza (OWASP CRS / SecLang) rule matches; `scope` = `global\|zone`, no `_total` suffix |
 | `parapet_coraza_eval_duration_seconds{outcome,scope}` | histogram of per-request Coraza request-phase eval latency; `outcome` = `pass\|block` |
-| `parapet_ratelimit_total{name,result}` | `result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured limiters, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names |
+| `parapet_ratelimit_total{name,result}` | `result` = `allowed\|limited`; `name` = `host` / `host-country` for the env-configured **concurrency** limiters, `host-rps` for the env-configured host RPS limiter, `<ns>/<name>:<s\|m\|h>` for annotation limiters, `global:<id>` / `zone:<ns>/<name>:<id>` for ConfigMap-driven limits — the `zone:` prefix keeps zone names disjoint from annotation names |
 | `parapet_ws_tunnels{result}` | WebSocket-over-h2 extended-CONNECT handshakes at the core; `result` = `tunneled\|refused\|upstream_error\|bad_protocol`, no `_total` suffix (see [WEBSOCKET.md](WEBSOCKET.md)) |
 | `parapet_ws_tunnel_active` | live spliced WebSocket-over-h2 sessions at the core |
 | `parapet_ws_upstream_h2c{result}` | core→pod extended-CONNECT attempt outcomes; `result` = `ok\|not_supported\|error` — `not_supported` = the pod doesn't advertise the capability (fell back to h1), no `_total` suffix |

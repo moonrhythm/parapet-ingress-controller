@@ -40,9 +40,9 @@ func RejectedRequest(reason string) {
 // rejectReason maps an edge-rejection HTTP status to a bounded reason label, or
 // "" if the status isn't a tracked rejection. The caller must only apply it when
 // the request did NOT reach a backend, so a backend responding with one of these
-// codes isn't miscounted as an ingress rejection. host_limit is recorded
-// directly at the host-concurrency limiter (it short-circuits before the request
-// metric runs), not here.
+// codes isn't miscounted as an ingress rejection. host_limit and host_rps are
+// recorded directly at the host-concurrency / host-RPS limiters (they
+// short-circuit before the request metric runs), not here.
 // edgeRejectReason returns the reason for a request rejected at the edge, or ""
 // if it isn't a tracked rejection. reachedBackend gates it: once the request has
 // been proxied, the status is the backend's own response, not an ingress

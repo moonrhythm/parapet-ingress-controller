@@ -90,6 +90,7 @@ manifests for runnable examples.
 | `WAIT_BEFORE_SHUTDOWN` | `30s` | Drain delay on SIGTERM |
 | `DISABLE_LOG` | `false` | Suppress the access log |
 | `HTTP_SERVER_MAX_HEADER_BYTES` | `16384` | Max request header size |
+| `HOST_RPS` | `0` | Per-host admitted requests per 1s window per replica (0 = off). Unknown Hosts share one `other` bucket. Overflow is 503 before WAF/origin |
 | `HOST_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host in-flight cap / queue size (0 = off) |
 | `HOST_COUNTRY_CONCURRENT_CAPACITY` / `_SIZE` | `0` | Per-host+country cap / queue size |
 | `HOST_COUNTRY_HEADER` | `""` | Header(s) carrying the country code for the per-host+country limiter |
@@ -397,7 +398,7 @@ annotations:
 - parapet_host_ratelimit_requests{host}
 - parapet_host_active_requests{host, kind}
 - parapet_ratelimit_total{name, result}
-- parapet_rejected_requests{reason}
+- parapet_rejected_requests{reason} (`host_limit`, `host_rps` recorded at the host limiters; others status-derived when the request did not reach a backend)
 - parapet_waf_matches{rule_id, action, scope}
 - parapet_waf_eval_duration_seconds{outcome, scope}
 
