@@ -184,7 +184,7 @@ fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
 `make test` target.
 
 ### Docker image
-- Builder: `golang:1.26.7-trixie` (pure Go, `CGO_ENABLED=0`) — cross-compiles, so the image is multi-arch-capable (linux/amd64 + linux/arm64) without QEMU like the edge images
+- Builder: `golang:1.26.7-trixie` (pure Go, `CGO_ENABLED=0`) — cross-compiles, so the image is multi-arch-capable (linux/amd64 + linux/arm64) without QEMU like the edge images. Do not bump to 1.27 until [`GO-1.27.md`](GO-1.27.md) is cleared (WS-over-h2 wrap blocker).
 - Runtime: `gcr.io/distroless/static-debian12` (static binary; root variant so it can bind privileged :80/:443)
 - Build args: `VERSION` (injected as `main.version`), `GOAMD64` (v3 default, v1 for compatibility image; honored only for amd64)
 

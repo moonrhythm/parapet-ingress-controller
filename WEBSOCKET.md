@@ -39,6 +39,10 @@ components keeps working.
 
 ## Protocol background (verified against Go 1.26.5 / x/net v0.56.0)
 
+Do not bump the toolchain to Go 1.27 until [GO-1.27.md](GO-1.27.md) is
+cleared: 1.27.0's `x/net/http2` wrap rejects `Header[":protocol"]`, which
+is how this design sends extended CONNECT.
+
 Facts the design leans on, checked in the shipped toolchain and module — not
 from documentation:
 
