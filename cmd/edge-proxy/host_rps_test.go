@@ -43,7 +43,7 @@ func TestHostRPSRegistrationSlot(t *testing.T) {
 	}
 
 	requests := idx("m.Use(edge.Requests(edgeHosts.IsKnownHost))")
-	rps := idx("m.Use(hostRPS(edgeHosts.IsKnownHost))")
+	rps := idx("m.Use(hostRPS(edgeHosts.HostRPSKnown))")
 	log := idx("m.Use(logger.Stdout())")
 	strip := idx("m.Use(edge.StripWAFClaim())")
 

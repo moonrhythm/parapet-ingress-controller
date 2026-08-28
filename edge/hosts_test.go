@@ -9,6 +9,7 @@ import (
 func TestEdgeHosts_Empty(t *testing.T) {
 	h := NewEdgeHosts()
 	assert.False(t, h.IsKnownHost("acme.com"))
+	assert.True(t, h.HostRPSKnown("acme.com"), "gen 0 must not collapse RPS into a global other bucket")
 	assert.Equal(t, "", h.Etag())
 	assert.EqualValues(t, 0, h.Generation())
 }
@@ -19,7 +20,9 @@ func TestEdgeHosts_Update(t *testing.T) {
 
 	assert.True(t, h.IsKnownHost("acme.com"))
 	assert.True(t, h.IsKnownHost("app.acme.com"))
+	assert.True(t, h.HostRPSKnown("acme.com"))
 	assert.False(t, h.IsKnownHost("evil.com"), "undeclared host is unknown (collapses to \"other\")")
+	assert.False(t, h.HostRPSKnown("evil.com"), "after the first snapshot, RPS collapse matches IsKnownHost")
 	assert.False(t, h.IsKnownHost("other.acme.com"), "a wildcard cert subdomain is NOT known unless an Ingress declares it")
 	assert.Equal(t, `"h1"`, h.Etag())
 	assert.EqualValues(t, 5, h.Generation())
@@ -27,6 +30,8 @@ func TestEdgeHosts_Update(t *testing.T) {
 	// A later update swaps the set wholesale.
 	h.Update(6, []string{"new.com"}, `"h2"`)
 	assert.True(t, h.IsKnownHost("new.com"))
+	assert.True(t, h.HostRPSKnown("new.com"))
 	assert.False(t, h.IsKnownHost("acme.com"), "removed host is no longer known")
+	assert.False(t, h.HostRPSKnown("acme.com"))
 	assert.EqualValues(t, 6, h.Generation())
 }

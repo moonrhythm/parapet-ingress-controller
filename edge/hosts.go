@@ -11,10 +11,11 @@ import (
 // to "other"), giving EXACT per-host labels for an observation system while
 // keeping series cardinality bounded under a random-Host flood.
 //
-// Always-on (the metric is always mounted) and standalone: a stale or empty set
-// only over-collapses the label, never a WAF/limit signal, so it has no
-// atomicity coupling with the WAF/ratelimit payloads. Lock-free reads via the
-// atomic pointer.
+// Always-on (the metric is always mounted) and standalone from WAF/ratelimit
+// payloads. A stale or empty set over-collapses the *metric label* to "other".
+// Host RPS (`HostRPSKnown`) must not use that empty-set collapse as a limit
+// key — Generation()==0 treats every host as known so boot cannot turn
+// EDGE_HOST_RPS into a process-wide cap. Lock-free reads via the atomic pointer.
 type EdgeHosts struct {
 	hosts atomic.Pointer[map[string]struct{}]
 
@@ -63,6 +64,8 @@ func (h *EdgeHosts) Update(generation uint64, hosts []string, etag string) {
 
 // IsKnownHost reports whether host is one an Ingress declares. A host not in the
 // set collapses to the metric's "other" bucket, bounding series cardinality.
+// Until the first snapshot lands this is false for every host — fine for labels,
+// not for a rate-limit key (use HostRPSKnown).
 func (h *EdgeHosts) IsKnownHost(host string) bool {
 	m := h.hosts.Load()
 	if m == nil {
@@ -70,4 +73,15 @@ func (h *EdgeHosts) IsKnownHost(host string) bool {
 	}
 	_, ok := (*m)[host]
 	return ok
+}
+
+// HostRPSKnown is the host-RPS collapse oracle. Until the first GET /v1/hosts
+// snapshot lands (Generation()==0) every host is treated as known so an empty
+// set cannot fold all traffic into one shared bucket. After that it matches
+// IsKnownHost: declared hosts are independent, everything else is `other`.
+func (h *EdgeHosts) HostRPSKnown(host string) bool {
+	if h.Generation() == 0 {
+		return true
+	}
+	return h.IsKnownHost(host)
 }

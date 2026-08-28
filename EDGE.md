@@ -561,12 +561,17 @@ the edge reachable only from the front proxy.
 Opt-in (`EDGE_HOST_RPS > 0`): the same pre-WAF per-Host arrival-rate fuse as
 the controller's `HOST_RPS` (`hostrps`). Each edge replica admits at most that
 many requests per 1s epoch-aligned fixed window per known Host (up to 2× across
-a window boundary). Hosts `EdgeHosts.IsKnownHost` does not serve — including
-serve-all random Hosts — share one `other` bucket. Overflow is 503 with a
-ceiled `Retry-After`, before the access log, WAF, cache, and origin.
+a window boundary). After the first `GET /v1/hosts` snapshot, Hosts
+`EdgeHosts.HostRPSKnown` does not serve — including serve-all random Hosts —
+share one `other` bucket. Until that snapshot lands (`Generation()==0`) every
+Host is its own bucket, so an empty oracle cannot turn the fuse into a
+process-wide cap (the hosts set is a metric oracle; using it as a limit key
+before it exists would 503 every tenant). Overflow is 503 with a ceiled
+`Retry-After`, before the access log, WAF, cache, and origin.
 
 Mount order: after host normalize + `edge.Requests` (so the 503 is still
-counted on `parapet_requests`) and **before** the access log / WAF / ConfigMap
+counted on `parapet_requests` — unlike the controller, where host-RPS 503s
+short-circuit before that metric) and **before** the access log / WAF / ConfigMap
 rate limits / cache. Counters are per edge replica (`parapet_ratelimit_total{name="host-rps"}`).
 The core's `HOST_RPS` is independent — each layer counts the traffic it sees.
 Default off.
