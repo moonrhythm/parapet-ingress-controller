@@ -119,8 +119,11 @@ func (p *promHostRatelimit) Inc(host string) {
 }
 
 // HostRatelimitRequest increments the host ratelimit counter. Kept distinct from
-// the host-less rejected_requests{reason="host_limit"} aggregate: the per-host
-// breakdown is what tells you *which* host is being flooded during an attack.
+// the host-less rejected_requests aggregate: the per-host breakdown is what
+// tells you *which* host is being flooded during an attack. Both the
+// concurrency limiter (reason=host_limit) and the RPS limiter (reason=host_rps)
+// increment this; split them via rejected_requests and
+// parapet_ratelimit_total{name="host"|"host-rps"}.
 func HostRatelimitRequest(host string) {
 	_hostRatelimit.Inc(host)
 }

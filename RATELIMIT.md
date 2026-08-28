@@ -21,6 +21,7 @@ This complements, not replaces, the existing limiters:
 
 | Layer | Configured by | What it bounds |
 |---|---|---|
+| Host RPS | `HOST_RPS` env | arrival rate per Host, pre-WAF (1s fixed window; unknown Hosts share `other`) |
 | Host / host+country concurrency | `HOST_*CONCURRENT_*` env | in-flight requests while upstreams are unresponsive |
 | **Global rate limits** | ConfigMap `…/ratelimit: global` | request rate across **all** traffic |
 | **Zone rate limits** | ConfigMap `…/ratelimit: zone` + `ratelimit-zone` annotation | request rate across a tenant's ingresses |
@@ -220,7 +221,7 @@ wherever possible.
 ## Per-request order
 
 ```
-host/country concurrency limits → access log/metrics → global WAF
+host RPS → host/country concurrency limits → access log/metrics → global WAF
 → GLOBAL RATE LIMITS → router → allow-remote → zone WAF → redirect-https
 → ZONE RATE LIMITS → annotation rate limits → body limit → auth → upstream
 ```
@@ -246,12 +247,16 @@ with two new (collision-free) name forms:
 
 (The `zone:` prefix exists because a bare `<ns>/<name>:<id>` could collide with
 the annotation limiters' `<ns>/<ingress>:<s|m|h>` names.) Enforced rejections
-also surface in the standard request metrics (status 429/503) — do **not**
-expect them in `parapet_host_ratelimit_requests`, which belongs to the host
-concurrency limiter. Note on the status-derived rejection reason: a 429
-rejection counts under the rate-limit reason, while `status: 503` rejections
-are deliberately uncounted there (503 is not a tracked edge-rejection status)
-— with 503 you observe rejections via `parapet_ratelimit_total` and the
+also surface in the standard request metrics (status 429/503).
+`parapet_host_ratelimit_requests` is incremented by **both** the host
+concurrency limiter and the host RPS limiter (`HOST_RPS`); distinguish them
+with `rejected_requests{reason="host_limit"|"host_rps"}` and
+`parapet_ratelimit_total{name="host"|"host-rps"}`. ConfigMap rejections are
+not counted there. Note on the status-derived rejection reason: a ConfigMap
+**429** counts under the `rate_limit` reason, while a ConfigMap **`status: 503`**
+is deliberately uncounted there (503 is not a tracked status-derived reason —
+host-limiter 503s are recorded **directly** as `host_limit` / `host_rps`).
+With ConfigMap 503 you observe rejections via `parapet_ratelimit_total` and the
 status-labeled request metrics only.
 
 ## Memory bounds
