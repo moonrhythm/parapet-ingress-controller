@@ -1,7 +1,6 @@
 # parapet-ingress-controller
 
 [![Go Test](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml/badge.svg?branch=main)](https://github.com/moonrhythm/parapet-ingress-controller/actions/workflows/go-test.yaml)
-[![Go Report Card](https://goreportcard.com/badge/github.com/moonrhythm/parapet-ingress-controller)](https://goreportcard.com/report/github.com/moonrhythm/parapet-ingress-controller)
 
 A Kubernetes ingress controller built on the
 [parapet](https://github.com/moonrhythm/parapet) middleware framework. The page
