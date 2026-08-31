@@ -64,6 +64,13 @@ keep taking 1/N of traffic. `http.ErrAbortHandler` (ReverseProxy body-copy
 failure after headers were written) is re-panicked, not logged as a handler
 crash and not retried — net/http aborts the already-started response.
 
+**QUERY (RFC 10008)** is a registered HTTP method: safe, idempotent, and may
+carry a request body. Routes are method-agnostic, so QUERY hits the same
+backend as GET. The proxy forwards method and body unchanged. Dial-only retry
+applies (an unread QUERY body is retried like GET). The edge cache does **not**
+cache QUERY (RFC 10008 requires the cache key to incorporate request content;
+the edge cache keys on URL only).
+
 ## Annotations
 
 All keys are prefixed `parapet.moonrhythm.io/`. Applied per-Ingress.
@@ -251,7 +258,9 @@ invariants:
   response cache (`EDGE_CACHE_*`, off by default): **honor-origin** policy (caches
   only on explicit `Cache-Control`/`Expires` freshness; refuses
   `private`/`no-store`/`no-cache`/`Set-Cookie`/`Vary: *`; ignores **client**
-  request `Cache-Control`, CDN-style), `GET`/`HEAD`, LRU-bounded, restart-
+  request `Cache-Control`, CDN-style), `GET`/`HEAD` (QUERY is not cached: RFC 10008
+  requires the cache key to incorporate request content, and the edge cache keys
+  on URL only), LRU-bounded, restart-
   persistent, fail-static, `X-Cache: HIT|MISS|STALE|BYPASS` (BYPASS = stamped on
   responses ineligible for caching — non-cacheable method, upgrade, Range, or
   override bypass — that the cache proxies straight to the origin). This is an **edge-only** feature:
@@ -349,8 +358,10 @@ Prometheus, served on `:9187`.
 | `parapet_connections{state}` | per-state connection gauge |
 | `go_*` runtime, `process_*` (client_golang), Cloud Profiler/Trace | |
 
-Host and HTTP-method labels are collapsed to `other` for values the router
-doesn't serve, to bound cardinality under a flood.
+Host labels collapse to `other` for hosts the router doesn't serve. HTTP-method
+labels pass through the registered methods (RFC 7231 + PATCH + QUERY / RFC 10008)
+and collapse anything else to `other`, so a client can't mint unbounded series
+with arbitrary method tokens.
 
 On `parapet_host_active_requests`, the `kind` label classifies each in-flight
 request into one mutually-exclusive connection bucket: `websocket` / `h2c` from

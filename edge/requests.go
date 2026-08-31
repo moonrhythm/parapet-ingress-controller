@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/moonrhythm/parapet-ingress-controller/hostlabel"
+	"github.com/moonrhythm/parapet-ingress-controller/methodlabel"
 )
 
 // parapet_requests is the per-request counter the in-cluster controller already
@@ -28,8 +29,9 @@ import (
 // All three input-derived labels are bounded so request input can't grow series
 // cardinality (the OOM class the controller's metric.Requests guards the same
 // way): host collapses to "other" for any host the edge doesn't serve, method to
-// "other" outside the registered HTTP methods (any RFC7230 token is a valid
-// method), and status to "other" outside 100–599 (an upstream can write any code).
+// "other" outside the registered HTTP methods (RFC 7231 + PATCH + QUERY; any
+// RFC 9110 token is otherwise a valid method), and status to "other" outside
+// 100–599 (an upstream can write any code).
 var (
 	requestsOnce sync.Once
 	requestsVec  *prometheus.CounterVec
@@ -68,7 +70,7 @@ func (p *requestsMiddleware) ServeHandler(h http.Handler) http.Handler {
 			requestsVec.WithLabelValues(
 				hostLabel(r.Host, p.knownHost),
 				statusLabel(nw.status),
-				methodLabel(r.Method),
+				methodlabel.Of(r.Method),
 				edgeID,
 			).Inc()
 		}()
@@ -78,19 +80,6 @@ func (p *requestsMiddleware) ServeHandler(h http.Handler) http.Handler {
 
 func hostLabel(host string, knownHost func(string) bool) string {
 	return hostlabel.Of(host, knownHost)
-}
-
-// methodLabel collapses the client-controlled method to a bounded set; only the
-// registered HTTP methods pass through, anything else becomes "other".
-func methodLabel(method string) string {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
-		http.MethodPatch, http.MethodDelete, http.MethodConnect,
-		http.MethodOptions, http.MethodTrace:
-		return method
-	default:
-		return "other"
-	}
 }
 
 // statusLabel bounds the response status: valid HTTP codes (100–599) pass

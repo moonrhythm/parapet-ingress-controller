@@ -11,6 +11,7 @@ import (
 	"github.com/moonrhythm/parapet/pkg/prom"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/moonrhythm/parapet-ingress-controller/methodlabel"
 	"github.com/moonrhythm/parapet-ingress-controller/state"
 )
 
@@ -69,29 +70,10 @@ func init() {
 	prom.Registry().MustRegister(_promRequests.vec, _promRequests.durations)
 }
 
-// methodLabel collapses the client-controlled request method to a bounded label
-// set for the `requests` metric. net/http admits any RFC7230 token as a method
-// (it only rejects invalid token characters), so labeling the counter — and
-// keying the handle cache — with the raw method lets a client mint unbounded
-// permanent series, and grow the cache, by sending random method tokens to a
-// host the router serves (the same OOM class host/upgrade are sanitized
-// against). Only the registered HTTP methods pass through; anything else
-// collapses to "other".
-func methodLabel(method string) string {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut,
-		http.MethodPatch, http.MethodDelete, http.MethodConnect,
-		http.MethodOptions, http.MethodTrace:
-		return method
-	default:
-		return "other"
-	}
-}
-
 // statusLabel bounds the response status label for the `requests` metric. An
 // upstream can write any int via WriteHeader, so labeling the counter — and keying
 // the handle cache — with the raw code lets a buggy/hostile backend mint unbounded
-// permanent series (the same OOM class methodLabel guards against). Valid HTTP
+// permanent series (the same OOM class methodlabel.Of guards against). Valid HTTP
 // codes (100–599) pass through; anything else collapses to "other".
 func statusLabel(status int) string {
 	if status >= 100 && status <= 599 {
@@ -107,7 +89,7 @@ func (p *promRequests) Inc(r *http.Request, status int, start time.Time) {
 	s := state.Get(ctx)
 
 	host := HostLabel(r.Host, p.isKnownHost)
-	method := methodLabel(r.Method)
+	method := methodlabel.Of(r.Method)
 	statusStr := statusLabel(status)
 
 	// Edge rejection: a tracked rejection status where the request never reached

@@ -3,9 +3,11 @@ package proxy
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -85,6 +87,37 @@ func TestProxy(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, w.Code)
 		assert.Equal(t, "upstream-503", w.Body.String())
 		assert.Equal(t, 1, calls)
+	})
+
+	t.Run("forwards QUERY method and body", func(t *testing.T) {
+		t.Parallel()
+
+		// QUERY (RFC 10008) is safe/idempotent and carries a request body.
+		// ReverseProxy must forward both; stripping the body would turn it into
+		// a different request than the client sent.
+		const payload = `{"q":"foo"}`
+		var gotMethod, gotCT, gotBody string
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotMethod = r.Method
+			gotCT = r.Header.Get("Content-Type")
+			b, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			gotBody = string(b)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		}))
+		defer ts.Close()
+
+		proxy := New()
+		r := httptest.NewRequest("QUERY", ts.URL, strings.NewReader(payload))
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		proxy.ServeHTTP(w, r)
+		assert.Equal(t, http.StatusOK, w.Code)
+		assert.Equal(t, "QUERY", gotMethod)
+		assert.Equal(t, "application/json", gotCT)
+		assert.Equal(t, payload, gotBody)
+		assert.Equal(t, `{"ok":true}`, w.Body.String())
 	})
 }
 
