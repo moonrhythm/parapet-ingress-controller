@@ -75,6 +75,20 @@ func TestMux(t *testing.T) {
 			assert.True(t, called)
 		})
 
+		t.Run("Match QUERY", func(t *testing.T) {
+			// Routes are registered without a method prefix, so QUERY (RFC 10008)
+			// hits the same handler as GET rather than 405.
+			mux := http.NewServeMux()
+			var got string
+			mux.HandleFunc("example.com/", func(w http.ResponseWriter, r *http.Request) {
+				got = r.Method
+			})
+			r := httptest.NewRequest("QUERY", "http://example.com/", strings.NewReader(`q=1`))
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+			assert.Equal(t, "QUERY", got)
+		})
+
 		t.Run("Match Prefix", func(t *testing.T) {
 			mux := http.NewServeMux()
 			var called bool

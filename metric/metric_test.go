@@ -26,23 +26,10 @@ func TestHostGetMCaching(t *testing.T) {
 	assert.NotSame(t, a, e)
 }
 
-func TestMethodLabel(t *testing.T) {
-	// registered methods pass through unchanged
-	for _, m := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "CONNECT", "OPTIONS", "TRACE"} {
-		assert.Equal(t, m, methodLabel(m))
-	}
-	// anything else collapses to the bounded sentinel (case-sensitive: lower-case
-	// and arbitrary tokens are non-standard)
-	assert.Equal(t, "other", methodLabel(""))
-	assert.Equal(t, "other", methodLabel("get"))
-	assert.Equal(t, "other", methodLabel("FOOBAR"))
-	assert.Equal(t, "other", methodLabel("PROPFIND"))
-}
-
 func TestMethodLabelBoundsRequestCardinality(t *testing.T) {
 	// A client can send unbounded distinct (but syntactically valid) HTTP method
-	// tokens to a host the router serves. Without methodLabel, each one mints a
-	// new handle-cache entry and a permanent Prometheus series. methodLabel must
+	// tokens to a host the router serves. Without methodlabel.Of, each one mints a
+	// new handle-cache entry and a permanent Prometheus series. methodlabel.Of must
 	// collapse them all to one "other" series per (host, status).
 	const host = "method-card-test.example.com"
 	s := state.State{

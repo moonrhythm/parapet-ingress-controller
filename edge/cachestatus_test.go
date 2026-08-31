@@ -110,6 +110,9 @@ func TestCacheStatusWithRealCache(t *testing.T) {
 	assert.Equal(t, "BYPASS", do(http.MethodGet, "/private/x"))
 	// Non-cacheable method -> real bypass -> stamped BYPASS.
 	assert.Equal(t, "BYPASS", do(http.MethodPost, "/public"))
+	// QUERY is cacheable per RFC 10008 only when the cache key includes the
+	// request content. The edge cache keys on URL only, so QUERY must bypass.
+	assert.Equal(t, "BYPASS", do("QUERY", "/public"))
 }
 
 // recordingWriter captures each WriteHeader code and the X-Cache header value

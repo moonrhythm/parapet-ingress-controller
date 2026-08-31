@@ -64,6 +64,15 @@ func TestRequestsDefaultStatusAndBounding(t *testing.T) {
 		t.Errorf("default status: %v -> %v, want +1 under 200", before, got)
 	}
 
+	// RFC 10008 QUERY is a registered method, not "other".
+	before = count("h.example.com", "200", "QUERY")
+	serveRequest(t, mw, "QUERY", "h.example.com", func(w http.ResponseWriter) {
+		w.WriteHeader(http.StatusOK)
+	})
+	if got := count("h.example.com", "200", "QUERY"); got != before+1 {
+		t.Errorf("QUERY: %v -> %v, want +1 under QUERY", before, got)
+	}
+
 	// Unregistered method token collapses to "other".
 	before = count("h.example.com", "200", "other")
 	serveRequest(t, mw, "WEIRDVERB", "h.example.com", func(w http.ResponseWriter) {

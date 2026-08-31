@@ -708,7 +708,9 @@ cacheable object locally removes a full origin round trip. Enabled with
   `Cache-Control`/`Expires` freshness — no forced or heuristic TTL. Refuses
   `private`/`no-store`/`no-cache`, any `Set-Cookie`, and `Vary: *`. Honors `Vary`
   (keys per varied request header). `GET`/`HEAD` only; a conservative set of
-  cacheable status codes. **Client** request `Cache-Control` (`no-cache`/
+  cacheable status codes. **QUERY is not cached**: RFC 10008 requires the cache
+  key to incorporate request content, and this cache keys on URL only, so a
+  QUERY is `X-Cache: BYPASS` like POST. **Client** request `Cache-Control` (`no-cache`/
   `no-store`) is **ignored by design** — like a CDN, so a client can't bust the
   shared cache (a DoS vector); origins needing freshness simply mark responses
   uncacheable.
