@@ -3,7 +3,7 @@
 Status: **blocked** as of 2026-08-28. Recheck before bumping `go.mod`,
 `golang:*-trixie` Dockerfiles, or CI `go-test.yaml`.
 
-Pinned today: `go 1.26.7`, `golang.org/x/net v0.58.0`,
+Pinned today: `go 1.26.7`, `golang.org/x/net v0.59.0`,
 `golang:1.26.7-trixie`. 1.26 stays supported until 1.28 (~Feb 2027).
 
 ## Recheck
