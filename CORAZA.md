@@ -3,9 +3,10 @@
 `CORAZA_ENABLED=true` turns on a second, **signature-based** web-application
 firewall built on the [OWASP Coraza](https://github.com/corazawaf/coraza)
 engine. It speaks ModSecurity **SecLang** and ships the embedded **OWASP Core
-Rule Set (CRS)**, so a ruleset can `Include @owasp_crs` to get managed coverage
-for SQLi, XSS, path traversal, scanner fingerprints, and the rest of the CRS
-without writing any rules.
+Rule Set (CRS)**, so a ruleset can `Include @crs-setup.conf.example` +
+`Include @owasp_crs/*.conf` to get managed coverage for SQLi, XSS, path
+traversal, scanner fingerprints, and the rest of the CRS without writing any
+rules.
 
 It is **complementary to**, not a replacement for, the CEL [WAF](WAF.md):
 
@@ -44,12 +45,16 @@ instance stays a cheap pass-through.
 
 ## Request phases only
 
-Coraza runs the **request** phases: connection, URI, headers, and — opt-in via
-`CORAZA_REQUEST_BODY_LIMIT` — the request body up to that many bytes. When body
+Coraza runs the **request** phases: connection, URI, headers, and phase 2.
+**Phase 2 always evaluates, even for bodyless requests** — most CRS detections
+(SQLi 942xxx, XSS 941xxx) and the CRS anomaly-blocking evaluation rule (949110)
+are phase 2, so a GET query-string attack blocks with no body and with body
+inspection off. Request-body **bytes** feed phase 2 only when
+`CORAZA_REQUEST_BODY_LIMIT` opts in (up to that many bytes). When body
 inspection is on, the buffered prefix is fed to Coraza and the body is rebuilt so
-the **upstream still receives it in full**; a read error fails open (inspection
-skipped, request proceeds). With the limit at `0` (default) no body is buffered —
-URI + headers only.
+the **upstream still receives it in full**; a read error fails open (body
+inspection skipped, request proceeds). With the limit at `0` (default) no body is
+buffered — phase 2 sees the URI, args, and headers only.
 
 **Response-body inspection is deliberately never enabled.** Engaging CRS phase-4
 (response) rules would force buffering the response and break the reverse proxy's
@@ -57,9 +62,20 @@ streaming, the edge response cache, and HTTP/2. CRS rules that target the
 response simply don't fire.
 
 A block writes the rule's status (default `403`; a `redirect` action with a
-target becomes an HTTP redirect). Matches are surfaced from
-`tx.MatchedRules()` (not Coraza's error callback, which only fires for rules that
-engaged logging), so metrics count every match.
+target becomes an HTTP redirect). Matches are surfaced through Coraza's **error
+callback**, which fires only for rules that engage logging (ModSecurity
+error-log semantics): the CRS's `nolog` administrative rules — initialization
+SecActions, paranoia-level flow rules, scoring bookkeeping, ~63 matches on
+every clean request — never reach metrics or logs, while every CRS detection
+and the anomaly-blocking rule 949110 carry `log` and are counted in enforce
+**and** detect (`SecRuleEngine DetectionOnly`) mode. (`tx.MatchedRules()` can't
+make this distinction: it doesn't expose the log flag, and its `Disruptive()`
+folds the admin rules' `pass` into "disruptive" under `SecRuleEngine On`.) An
+operator rule that should be counted must engage logging: coraza raises the
+flag only via the `log` action or a `SecDefaultAction` that includes `log` (as
+the CRS setup does) — a rule with neither still enforces, but its match isn't
+counted (the block itself still shows in
+`parapet_coraza_eval_duration_seconds{outcome="block"}`).
 
 ## Hot reload
 
@@ -89,7 +105,7 @@ edge stays off the `metric` package.
 | Env | Default | Effect |
 |---|---|---|
 | `CORAZA_ENABLED` | `false` | Master switch (controller) |
-| `CORAZA_REQUEST_BODY_LIMIT` | `0` | Request-body inspection bytes (`0` = URI+headers only) |
+| `CORAZA_REQUEST_BODY_LIMIT` | `0` | Request-body inspection bytes (`0` = no body bytes fed; phase 2 still evaluates URI/args/headers) |
 | `EDGE_CORAZA_ENABLED` | `false` | Run Coraza at the edge |
 | `EDGE_CORAZA_REQUEST_BODY_LIMIT` | `0` | Edge request-body inspection bytes |
 | `CP_CORAZA_ENABLED` | `false` | Distribute Coraza rulesets from the control plane |
@@ -100,7 +116,7 @@ edge stays off the `metric` package.
 
 | Metric | Notes |
 |---|---|
-| `parapet_coraza_matches{rule_id,severity,scope}` | one per matched rule; `scope` = `global\|zone` |
+| `parapet_coraza_matches{rule_id,severity,scope,zone}` | one per matched rule that engages logging (`nolog` administrative CRS matches are excluded); `scope` = `global\|zone`; `zone` = the zone registry key `<ns>/<name>` (`""` for global) — rule ids are shared CRS ids, so `zone` is what attributes a match to a tenant |
 | `parapet_coraza_eval_duration_seconds{outcome,scope}` | per-request request-phase eval latency; `outcome` = `pass\|block` |
 
 ## Example
@@ -119,9 +135,18 @@ data:
   crs.conf: |
     SecRuleEngine On
     SecRequestBodyAccess On
-    Include @crs-setup
-    Include @owasp_crs
+    Include @crs-setup.conf.example
+    Include @owasp_crs/*.conf
 ```
+
+These are the **only include forms that resolve**: coraza's `Include` is a plain
+`fs.ReadFile` against the embedded CRS filesystem, globbing only when the path
+contains `*`, and that filesystem holds `@crs-setup.conf.example` (a file) and
+`@owasp_crs/` (a directory). The bare `Include @crs-setup` / `Include
+@owasp_crs` forms fail to compile — loudly, which is what you want, since a
+compile error keeps the last-good ruleset (pass-through for a brand-new zone)
+and surfaces only in the controller log. `corazawaf/crs_test.go` pins both the
+resolving and the non-resolving forms.
 
 A per-tenant zone with a custom signature, bound from an Ingress:
 
@@ -136,7 +161,7 @@ metadata:
 data:
   rules.conf: |
     SecRuleEngine On
-    SecRule REQUEST_URI "@contains /wp-admin" "id:100001,phase:1,deny,status:403,msg:'blocked wp-admin'"
+    SecRule REQUEST_URI "@contains /wp-admin" "id:100001,phase:1,deny,status:403,log,msg:'blocked wp-admin'"
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
