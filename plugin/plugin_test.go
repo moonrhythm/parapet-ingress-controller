@@ -158,6 +158,12 @@ api.example.com: 308,https://www.example.com/api`
 					"parapet.moonrhythm.io/redirect": config,
 				},
 			},
+			Spec: networking.IngressSpec{
+				Rules: []networking.IngressRule{
+					{Host: "example.com"},
+					{Host: "api.example.com"},
+				},
+			},
 		},
 		Routes: map[string]http.Handler{},
 	}
@@ -200,6 +206,15 @@ bad.example.com: ""`
 					"parapet.moonrhythm.io/redirect": config,
 				},
 			},
+			Spec: networking.IngressSpec{
+				Rules: []networking.IngressRule{
+					{Host: "a.example.com"},
+					{Host: "b.example.com"},
+					{Host: "c.example.com"},
+					{Host: "d.example.com"},
+					{Host: "bad.example.com"},
+				},
+			},
 		},
 		Routes: map[string]http.Handler{},
 	}
@@ -209,6 +224,89 @@ bad.example.com: ""`
 		assert.Contains(t, ctx.Routes, h, "valid rule must be registered even when another entry is invalid")
 	}
 	assert.NotContains(t, ctx.Routes, "bad.example.com/")
+}
+
+func TestRedirectRulesHostOwnership(t *testing.T) {
+	t.Parallel()
+
+	config := `
+owned.example.com: https://target.example.com
+foo.wild.example.com: https://target-wild.example.com
+owned.example.com/old: https://target-path.example.com
+unowned.example.com: https://evil.example.com
+tls.example.com: https://target-tls.example.com`
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Namespace: "ns",
+				Name:      "ing",
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/redirect": config,
+				},
+			},
+			Spec: networking.IngressSpec{
+				Rules: []networking.IngressRule{
+					{Host: "owned.example.com"},
+					{Host: "*.wild.example.com"},
+				},
+				TLS: []networking.IngressTLS{
+					{Hosts: []string{"tls.example.com"}},
+				},
+			},
+		},
+		Routes: map[string]http.Handler{},
+	}
+	RedirectRules(ctx)
+
+	// exact-owned host (via spec.rules) registered
+	assert.Contains(t, ctx.Routes, "owned.example.com/")
+	// wildcard-owned source registered (owned "*.wild.example.com" matches "foo.wild.example.com")
+	assert.Contains(t, ctx.Routes, "foo.wild.example.com/")
+	// path-bearing source checked on its host part (trailing slash normalized)
+	assert.Contains(t, ctx.Routes, "owned.example.com/old/")
+	// host owned via spec.tls[].hosts registered
+	assert.Contains(t, ctx.Routes, "tls.example.com/")
+	// unowned host must be skipped — the hijack this fix prevents
+	assert.NotContains(t, ctx.Routes, "unowned.example.com/")
+}
+
+func TestRedirectRulesNon3xxStatusSkipped(t *testing.T) {
+	t.Parallel()
+
+	config := `
+owned.example.com: 200,https://target.example.com
+ok.example.com: 301,https://target-ok.example.com`
+	ctx := Context{
+		Middlewares: &parapet.Middlewares{},
+		Ingress: &networking.Ingress{
+			ObjectMeta: metav1.ObjectMeta{
+				Annotations: map[string]string{
+					"parapet.moonrhythm.io/redirect": config,
+				},
+			},
+			Spec: networking.IngressSpec{
+				Rules: []networking.IngressRule{
+					{Host: "owned.example.com"},
+					{Host: "ok.example.com"},
+				},
+			},
+		},
+		Routes: map[string]http.Handler{},
+	}
+	RedirectRules(ctx)
+
+	// a non-3xx status is rejected entirely (not treated as a URL)
+	assert.NotContains(t, ctx.Routes, "owned.example.com/")
+
+	// a valid "301,url" still works
+	if assert.Contains(t, ctx.Routes, "ok.example.com/") {
+		r := httptest.NewRequest(http.MethodGet, "http://ok.example.com/", nil)
+		w := httptest.NewRecorder()
+		ctx.Routes["ok.example.com/"].ServeHTTP(w, r)
+		assert.Equal(t, http.StatusMovedPermanently, w.Code)
+		assert.Equal(t, "https://target-ok.example.com", w.Header().Get("Location"))
+	}
 }
 
 func TestBodyLimit(t *testing.T) {
