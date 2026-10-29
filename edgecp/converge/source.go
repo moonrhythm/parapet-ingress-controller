@@ -30,7 +30,8 @@ func NewPromQuerier(base string) (Querier, error) {
 type promQuerier struct{ api promv1.API }
 
 func (p *promQuerier) Query(ctx context.Context, query string, ts time.Time) (model.Vector, error) {
-	v, _, err := p.api.Query(ctx, query, ts)
+	// Warnings and infos are advisory annotations. A query error is the fail-closed signal.
+	v, _, _, err := p.api.Query(ctx, query, ts)
 	if err != nil {
 		return nil, err
 	}
