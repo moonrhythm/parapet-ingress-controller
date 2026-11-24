@@ -5,7 +5,7 @@
 > trust a newly-deployed **edge** proxy (`cmd/edge-proxy` + [`edge/`](edge/))
 > automatically — without an operator editing `TRUST_PROXY` and restarting the
 > core. It builds on the edge architecture in [`EDGE.md`](EDGE.md). Per
-> [`CLAUDE.md`](CLAUDE.md), the contract changes in [`SPEC.md`](SPEC.md) first.
+> [`AGENTS.md`](AGENTS.md), the contract changes in [`SPEC.md`](SPEC.md) first.
 > **Trust is CA-only:** the core trusts an edge iff `cidrTrust(r) OR a verified TLS
 > chain to the dedicated edge CA` — a pure cryptographic predicate, no SAN
 > allow-set, no per-request map read. Issuance stays token-gated; *trust* is

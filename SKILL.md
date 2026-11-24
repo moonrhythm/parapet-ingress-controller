@@ -10,5 +10,5 @@ description: >
   limiting, TLS handling, or Prometheus metrics in the context of this project.
 ---
 
-See CLAUDE.md in the repository root for the architecture guide and SPEC.md
+See AGENTS.md in the repository root for the architecture guide and SPEC.md
 for the behavior contract.
