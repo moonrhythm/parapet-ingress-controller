@@ -7,7 +7,7 @@ reused verbatim in the controller.
 
 > Status: **implemented** in the controller (`controller_waf.go`,
 > `plugin/waf.go`, `wafrule/`), gated by `WAF_ENABLED` (off by default).
-> See [`CLAUDE.md`](CLAUDE.md) and [`SPEC.md`](SPEC.md).
+> See [`AGENTS.md`](AGENTS.md) and [`SPEC.md`](SPEC.md).
 
 > **Authoring:** [`tools/ruleset-editor.html`](tools/ruleset-editor.html) is a
 > dependency-free, offline editor that builds the WAF ConfigMap visually (its

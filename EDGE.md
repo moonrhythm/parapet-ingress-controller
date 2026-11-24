@@ -10,7 +10,7 @@ private keys) and WAF rules for the domains that edge serves.
 > Both the control plane (`cmd/edge-controlplane`, reusing `cert`, `k8s`,
 > `wafrule`) and the **edge** (`cmd/edge-proxy` + `edge`, on the parapet
 > framework) are **Go**. They share **only a language-neutral HTTP/JSON contract**
-> (below) on the wire. Per [`CLAUDE.md`](CLAUDE.md) the contract changes here first.
+> (below) on the wire. Per [`AGENTS.md`](AGENTS.md) the contract changes here first.
 
 > **Both Go.** The control plane and edge share only the wire contract — no
 > shared in-process state — but, both being Go, they draw on the same libraries
