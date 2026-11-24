@@ -1,32 +1,63 @@
 # Go 1.27.0 upgrade — WS-over-h2 wrap blocker
 
-Status: **blocked** as of 2026-08-28. Recheck before bumping `go.mod`,
+Status: **blocked** as of 2026-11-24. Rechecked on go1.27.4 with
+`golang.org/x/net v0.63.0` — still red. Recheck before bumping `go.mod`,
 `golang:*-trixie` Dockerfiles, or CI `go-test.yaml`.
 
-Pinned today: `go 1.26.10`, `golang.org/x/net v0.62.0`,
-`golang:1.26.10-trixie`. 1.26 stays supported until 1.28 (~Feb 2027).
+Pinned today: `go 1.26.11`, `golang.org/x/net v0.63.0`,
+`golang:1.26.11-trixie`. 1.26 stays supported until 1.28 (~Feb 2027).
 
 ## Recheck
 
 Wrap is selected by the **compiler version**, not `go.mod`. Building this
 module with a 1.27 toolchain is enough to hit it.
 
+Use the newest 1.27 patch (last checked: go1.27.4).
+
 ```bash
-GOTOOLCHAIN=go1.27.0 go test ./proxy/ ./edge/ -count=1 -run 'WSTunnel|WSH2'
+GOTOOLCHAIN=go1.27.4 go test ./proxy/ ./edge/ -count=1 -run 'WSTunnel|WSH2'
 ```
 
 **Unblocked** only if that suite is green **without** `-tags http2legacy`.
 
 Then also run the full `./proxy/` `./edge/` packages (auto-h2c / ForceAttemptHTTP2
-already passed on 1.27.0; keep them in the recheck). If still red, the
+passed on 1.27.0 and again on 1.27.4; keep them in the recheck). If still red, the
 control case is:
 
 ```bash
-GOTOOLCHAIN=go1.27.0 go test -tags http2legacy ./proxy/ ./edge/ -count=1 -run 'WSTunnel|WSH2'
+GOTOOLCHAIN=go1.27.4 go test -tags http2legacy ./proxy/ ./edge/ -count=1 -run 'WSTunnel|WSH2'
 ```
 
-That was green on 1.27.0 / x/net v0.58.0 — it only proves the old x/net
-client still works, not that we can ship 1.27.
+That was green on 1.27.0 / x/net v0.58.0 and again on 1.27.4 / x/net v0.63.0 —
+it only proves the old x/net client still works, not that we can ship 1.27.
+
+## Rechecked 2026-11-24 (go1.27.4)
+
+Not fixed. go1.27.4's release notes (and 1.27.1–1.27.3) do not mention
+`:protocol`, `validateHeaders`, or extended CONNECT. The security fixes in
+1.27.4 / 1.26.11 are unrelated (cgo/toolchain, and the `MaxBytesReader`
+header race).
+
+`net/http.Transport.validateHeaders` in go1.27.4 still rejects any name
+`httpguts.ValidHeaderFieldName` rejects, with no `:protocol` exception.
+`net/http/internal/httpcommon.validateHeaders` still allows `:protocol`.
+The stdlib HTTP/2 extended-CONNECT tests are still skipped on
+[#53208](https://github.com/golang/go/issues/53208). `HTTP2Config.EnableConnectProtocol`
+still has not landed.
+
+Same failure on `GOTOOLCHAIN=local` (go1.27.4), `go.mod` at 1.26.11, x/net
+v0.63.0, without `-tags http2legacy`:
+
+| Result | Tests |
+|---|---|
+| FAIL | `TestWSTunnelH2C_*`, `TestWSTunnelEndToEnd`, `TestWSTunnelRefused` (`proxy/`) |
+| FAIL | `TestWSH2Inbound_*`, `TestWSTunnel_EndToEnd_H2C` (101→502), `TestWSTunnel_EndToEnd_Refused` (403→502) (`edge/`) |
+| PASS | the rest of `./proxy/` and `./edge/` (auto-h2c included) |
+| PASS | the FAIL list above, with `-tags http2legacy` |
+
+Error is still `net/http: invalid header field name ":protocol"`, so the
+h1 fallback does not fire. x/net v0.63.0 (2026-11-17) did not close the
+wrap hole.
 
 ## What broke (2026-08-28)
 
