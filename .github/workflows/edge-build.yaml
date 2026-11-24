@@ -30,7 +30,8 @@ on:
 jobs:
   controlplane:
     name: Build (edge control plane)
-    runs-on: self-hosted
+    # GitHub-hosted. Pinned to 24.04 so the image stays stable across the ubuntu-latest rollover.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2
@@ -68,7 +69,8 @@ jobs:
 
   edge:
     name: Build (edge proxy)
-    runs-on: self-hosted
+    # GitHub-hosted. Pinned to 24.04 so the image stays stable across the ubuntu-latest rollover.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: google-github-actions/auth@v2

@@ -24,15 +24,13 @@ on:
 jobs:
   e2e:
     name: edge ↔ control-plane e2e
-    runs-on: self-hosted
+    # GitHub-hosted. Pinned to 24.04 so the image stays stable across the ubuntu-latest rollover.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.10'
-          # Self-hosted runner: local GOMODCACHE/GOCACHE beat the remote
-          # actions-cache restore (see go-test.yaml for the numbers).
-          cache: false
       - name: Install test deps (openssl, curl, python3, nc)
         run: |
           sudo apt-get update

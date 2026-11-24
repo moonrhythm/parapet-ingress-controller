@@ -5,7 +5,8 @@ on:
     - '*'
 jobs:
   build:
-    runs-on: self-hosted
+    # GitHub-hosted. Pinned to 24.04 so the image stays stable across the ubuntu-latest rollover.
+    runs-on: ubuntu-24.04
     name: Build
     steps:
     - uses: actions/checkout@v4

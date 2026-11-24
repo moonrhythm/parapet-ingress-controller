@@ -191,6 +191,9 @@ fails on unformatted files. See the umbrella [`Makefile`](Makefile) for the
 
 ## CI / Release
 
+Jobs run on GitHub-hosted `ubuntu-24.04`. Image builds still cross-compile
+arm64 on that amd64 runner (build stage pinned to `$BUILDPLATFORM`, no QEMU).
+
 All path-filtered to `**/*.go` + `go.mod`/`go.sum` (plus `Dockerfile*`):
 - **Push & PR touching Go files** → `go-test.yaml`: `go vet` + `go test -race`
 - **Push to `main`** → `go-build.yaml`: pushes two images tagged with `$GITHUB_SHA` — `:$sha` is a **multi-arch manifest** (linux/amd64 GOAMD64=v3 + linux/arm64; pure-Go cross-compile, no QEMU), and `:$sha-amd64v1` is the amd64-only GOAMD64=v1 compatibility image (no arm64 — GOAMD64 levels are amd64-only). Docker build context is the repo root.
